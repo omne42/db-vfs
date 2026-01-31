@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
+
 ## [0.1.0] - 2026-01-31
 
 ### Added
@@ -18,4 +22,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests:
   - SQLite VFS semantic tests (CAS conflicts, deny globs, grep/glob scoping).
   - HTTP smoke test for `write` + `read`.
-
