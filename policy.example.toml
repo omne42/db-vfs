@@ -1,0 +1,26 @@
+[permissions]
+read = true
+glob = true
+grep = true
+write = true
+patch = true
+delete = true
+
+# All limits have defaults; override as needed.
+#
+# [limits]
+# max_read_bytes = 1048576
+# max_write_bytes = 1048576
+# max_results = 2000
+# max_walk_files = 200000
+# max_walk_entries = 500000
+# max_walk_ms = 2000
+# max_line_bytes = 4096
+
+# Secrets are enabled by default in code, but can be customized here:
+#
+# [secrets]
+# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*"]
+# redact_regexes = []
+# replacement = "***REDACTED***"
+

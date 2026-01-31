@@ -1,0 +1,12 @@
+[package]
+name = "db-vfs-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core policy/path/redaction/error types for db-vfs."
+
+[dependencies]
+globset = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+

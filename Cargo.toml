@@ -1,0 +1,24 @@
+[package]
+name = "db-vfs"
+version = "0.1.0"
+edition = "2024"
+description = "DB-backed virtual filesystem (read/glob/grep/write/patch/delete) with explicit safety policy."
+readme = "README.md"
+
+[workspace]
+members = ["core", "service"]
+
+[dependencies]
+db-vfs-core = { path = "core" }
+diffy = "0.4"
+globset = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+
+postgres = { version = "0.19", optional = true }
+rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:postgres"]
