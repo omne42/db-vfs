@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(not(feature = "postgres"))]
         {
+            let _ = url;
             anyhow::bail!(
                 "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
             );

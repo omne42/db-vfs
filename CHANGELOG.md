@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 
+### Fixed
+
+- Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
+
 ## [0.1.0] - 2026-01-31
 
 ### Added
