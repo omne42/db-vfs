@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "HTTP service for db-vfs (SQLite/Postgres-backed virtual filesystem)."
 
+[features]
+default = []
+postgres = ["db-vfs/postgres"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.7"

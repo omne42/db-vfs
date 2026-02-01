@@ -1,9 +1,17 @@
 use std::net::SocketAddr;
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 #[derive(Debug, Parser)]
-#[command(name = "db-vfs-service")]
+#[command(
+    name = "db-vfs-service",
+    group(
+        ArgGroup::new("db")
+            .required(true)
+            .multiple(false)
+            .args(["sqlite", "postgres"])
+    )
+)]
 struct Args {
     /// Bind address, e.g. 127.0.0.1:8080
     #[arg(long, default_value = "127.0.0.1:8080")]
@@ -11,7 +19,12 @@ struct Args {
 
     /// SQLite database file path (created if missing)
     #[arg(long)]
-    sqlite: std::path::PathBuf,
+    sqlite: Option<std::path::PathBuf>,
+
+    /// Postgres connection string, e.g. postgres://user:pass@localhost:5432/db
+    #[cfg_attr(not(feature = "postgres"), arg(hide = true))]
+    #[arg(long)]
+    postgres: Option<String>,
 
     /// Policy file path (.toml or .json), parsed as db_vfs_core::policy::VfsPolicy.
     #[arg(long)]
@@ -27,7 +40,21 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let policy = db_vfs_service::policy_io::load_policy(&args.policy)?;
 
-    let app = db_vfs_service::server::build_app(args.sqlite, policy)?;
+    let app = if let Some(url) = args.postgres {
+        #[cfg(feature = "postgres")]
+        {
+            db_vfs_service::server::build_app_postgres(url, policy)?
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            anyhow::bail!(
+                "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
+            );
+        }
+    } else {
+        let sqlite = args.sqlite.expect("clap enforces exactly one DB backend");
+        db_vfs_service::server::build_app_sqlite(sqlite, policy)?
+    };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())

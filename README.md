@@ -30,7 +30,9 @@ filesystem semantics and a small dependency graph.
   - `delete(expected_version = Some(v))` enforces CAS; `delete(expected_version = None)` is
     unconditional.
 
-## HTTP service (SQLite)
+## HTTP service
+
+### SQLite
 
 Run:
 
@@ -38,6 +40,18 @@ Run:
 cd db-vfs
 cargo run -p db-vfs-service -- \
   --sqlite ./db-vfs.sqlite \
+  --policy ./policy.example.toml \
+  --listen 127.0.0.1:8080
+```
+
+### Postgres
+
+Run (requires building with `postgres` enabled):
+
+```bash
+cd db-vfs
+cargo run -p db-vfs-service --features postgres -- \
+  --postgres "postgres://user:pass@localhost:5432/db_vfs" \
   --policy ./policy.example.toml \
   --listen 127.0.0.1:8080
 ```

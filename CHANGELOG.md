@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `db-vfs-service`: optional Postgres backend via `--postgres` (build with `--features postgres`).
+
 ### Changed
 
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.

@@ -6,16 +6,94 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::post;
 
+#[cfg(feature = "postgres")]
+use db_vfs::store::postgres::PostgresStore;
 use db_vfs::store::sqlite::SqliteStore;
+use db_vfs::store::{DeleteOutcome, FileMeta, FileRecord, Store};
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
     PatchRequest, PatchResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
 use db_vfs_core::policy::VfsPolicy;
 
+enum AnyStore {
+    Sqlite(SqliteStore),
+    #[cfg(feature = "postgres")]
+    Postgres(PostgresStore),
+}
+
+impl Store for AnyStore {
+    fn get_file(&mut self, workspace_id: &str, path: &str) -> db_vfs::Result<Option<FileRecord>> {
+        match self {
+            AnyStore::Sqlite(store) => store.get_file(workspace_id, path),
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(store) => store.get_file(workspace_id, path),
+        }
+    }
+
+    fn insert_file_new(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        content: &str,
+        now_ms: u64,
+    ) -> db_vfs::Result<FileRecord> {
+        match self {
+            AnyStore::Sqlite(store) => store.insert_file_new(workspace_id, path, content, now_ms),
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(store) => store.insert_file_new(workspace_id, path, content, now_ms),
+        }
+    }
+
+    fn update_file_cas(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        content: &str,
+        expected_version: u64,
+        now_ms: u64,
+    ) -> db_vfs::Result<FileRecord> {
+        match self {
+            AnyStore::Sqlite(store) => {
+                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
+            }
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(store) => {
+                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
+            }
+        }
+    }
+
+    fn delete_file(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        expected_version: Option<u64>,
+    ) -> db_vfs::Result<DeleteOutcome> {
+        match self {
+            AnyStore::Sqlite(store) => store.delete_file(workspace_id, path, expected_version),
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(store) => store.delete_file(workspace_id, path, expected_version),
+        }
+    }
+
+    fn list_metas_by_prefix(
+        &mut self,
+        workspace_id: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> db_vfs::Result<Vec<FileMeta>> {
+        match self {
+            AnyStore::Sqlite(store) => store.list_metas_by_prefix(workspace_id, prefix, limit),
+            #[cfg(feature = "postgres")]
+            AnyStore::Postgres(store) => store.list_metas_by_prefix(workspace_id, prefix, limit),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
-    vfs: Arc<Mutex<DbVfs<SqliteStore>>>,
+    vfs: Arc<Mutex<DbVfs<AnyStore>>>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -46,8 +124,22 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
     )
 }
 
-pub fn build_app(db_path: std::path::PathBuf, policy: VfsPolicy) -> anyhow::Result<Router> {
+pub fn build_app_sqlite(db_path: std::path::PathBuf, policy: VfsPolicy) -> anyhow::Result<Router> {
     let store = SqliteStore::open(db_path)?;
+    build_app_with_store(AnyStore::Sqlite(store), policy)
+}
+
+#[cfg(feature = "postgres")]
+pub fn build_app_postgres(url: String, policy: VfsPolicy) -> anyhow::Result<Router> {
+    let store = PostgresStore::connect(&url)?;
+    build_app_with_store(AnyStore::Postgres(store), policy)
+}
+
+pub fn build_app(db_path: std::path::PathBuf, policy: VfsPolicy) -> anyhow::Result<Router> {
+    build_app_sqlite(db_path, policy)
+}
+
+fn build_app_with_store(store: AnyStore, policy: VfsPolicy) -> anyhow::Result<Router> {
     let vfs = DbVfs::new(store, policy)?;
     let state = AppState {
         vfs: Arc::new(Mutex::new(vfs)),
