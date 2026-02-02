@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use db_vfs_core::path::normalize_path;
+use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
 use crate::store::DeleteOutcome;
@@ -28,6 +28,7 @@ pub(super) fn delete<S: crate::store::Store>(
     request: DeleteRequest,
 ) -> Result<DeleteResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.delete, "delete")?;
+    validate_workspace_id(&request.workspace_id)?;
 
     let path = normalize_path(&request.path)?;
     if vfs.redactor.is_path_denied(&path) {

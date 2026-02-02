@@ -63,14 +63,8 @@ enum AuthMode {
 
 #[derive(Clone)]
 struct AuthRule {
-    matcher: TokenMatcher,
+    token_sha256: [u8; 32],
     allowed_workspaces: Arc<[String]>,
-}
-
-#[derive(Clone)]
-enum TokenMatcher {
-    Plain(String),
-    Sha256([u8; 32]),
 }
 
 #[derive(Clone)]
@@ -106,11 +100,14 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
     let code = err.code();
     let status = match code {
         "not_permitted" => StatusCode::FORBIDDEN,
+        "secret_path_denied" => StatusCode::FORBIDDEN,
         "invalid_path" | "invalid_policy" | "invalid_regex" | "input_too_large" => {
             StatusCode::BAD_REQUEST
         }
+        "patch" => StatusCode::BAD_REQUEST,
         "not_found" => StatusCode::NOT_FOUND,
         "conflict" => StatusCode::CONFLICT,
+        "file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
         "quota_exceeded" => StatusCode::PAYLOAD_TOO_LARGE,
         "timeout" => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -157,24 +154,19 @@ fn hash_token_sha256(token: &str) -> [u8; 32] {
     digest.into()
 }
 
-fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
-    let mut token_sha256: Option<[u8; 32]> = None;
-    for rule in rules {
-        match &rule.matcher {
-            TokenMatcher::Plain(expected) => {
-                if expected == token {
-                    return Some(rule);
-                }
-            }
-            TokenMatcher::Sha256(expected) => {
-                let actual = token_sha256.get_or_insert_with(|| hash_token_sha256(token));
-                if actual == expected {
-                    return Some(rule);
-                }
-            }
-        }
+fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff: u8 = 0;
+    for idx in 0..32 {
+        diff |= a[idx] ^ b[idx];
     }
-    None
+    diff == 0
+}
+
+fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
+    let actual = hash_token_sha256(token);
+    rules
+        .iter()
+        .find(|rule| constant_time_eq_32(&rule.token_sha256, &actual))
 }
 
 async fn auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
@@ -242,6 +234,7 @@ fn generate_request_id() -> String {
 }
 
 fn max_body_bytes(policy: &VfsPolicy) -> usize {
+    const MAX_BODY_BYTES: u64 = 256 * 1024 * 1024 + 64 * 1024;
     let patch = policy
         .limits
         .max_patch_bytes
@@ -252,12 +245,13 @@ fn max_body_bytes(policy: &VfsPolicy) -> usize {
         .max(policy.limits.max_write_bytes)
         .max(patch);
     let max = max.saturating_add(64 * 1024);
+    let max = max.min(MAX_BODY_BYTES);
     usize::try_from(max).unwrap_or(usize::MAX)
 }
 
 fn build_state(
     backend: Backend,
-    policy: VfsPolicy,
+    mut policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<(AppState, usize)> {
     policy.validate().map_err(anyhow::Error::msg)?;
@@ -278,18 +272,18 @@ fn build_state(
             allowed_workspaces,
         } in &policy.auth.tokens
         {
-            let matcher = if let Some(hex) = token.strip_prefix("sha256:") {
+            let token_sha256 = if let Some(hex) = token.strip_prefix("sha256:") {
                 let bytes = hex::decode(hex).map_err(anyhow::Error::msg)?;
                 let hash: [u8; 32] = bytes
                     .as_slice()
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("invalid sha256 token hash length"))?;
-                TokenMatcher::Sha256(hash)
+                hash
             } else {
-                TokenMatcher::Plain(token.clone())
+                hash_token_sha256(token)
             };
             rules.push(AuthRule {
-                matcher,
+                token_sha256,
                 allowed_workspaces: Arc::from(allowed_workspaces.clone()),
             });
         }
@@ -297,6 +291,8 @@ fn build_state(
             rules: Arc::from(rules),
         }
     };
+
+    policy.auth.tokens.clear();
 
     let state = AppState {
         inner: Arc::new(AppInner {
@@ -327,6 +323,7 @@ pub fn build_app_sqlite(
     });
     let pool = r2d2::Pool::builder()
         .max_size(policy.limits.max_db_connections)
+        .connection_timeout(Duration::from_millis(policy.limits.max_io_ms))
         .build(manager)
         .map_err(anyhow::Error::msg)?;
 
@@ -355,13 +352,27 @@ pub fn build_app_postgres(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     policy.validate().map_err(anyhow::Error::msg)?;
-    let _ = PostgresStore::connect(&url)?;
 
-    let config: r2d2_postgres::postgres::Config = url.parse()?;
+    let statement_timeout_ms = policy.limits.max_io_ms;
+    let mut config: r2d2_postgres::postgres::Config = url.parse()?;
+    let options_extra = format!("-c statement_timeout={statement_timeout_ms}");
+    let options = match config.get_options() {
+        Some(existing) => format!("{existing} {options_extra}"),
+        None => options_extra,
+    };
+    config.options(&options);
+    config.connect_timeout(Duration::from_millis(policy.limits.max_io_ms));
+
+    {
+        let mut client = config.connect(r2d2_postgres::postgres::NoTls)?;
+        db_vfs::migrations::migrate_postgres(&mut client).map_err(anyhow::Error::msg)?;
+    }
+
     let manager =
         r2d2_postgres::PostgresConnectionManager::new(config, r2d2_postgres::postgres::NoTls);
     let pool = r2d2::Pool::builder()
         .max_size(policy.limits.max_db_connections)
+        .connection_timeout(Duration::from_millis(policy.limits.max_io_ms))
         .build(manager)?;
 
     let (state, body_limit) = build_state(Backend::Postgres { pool }, policy, unsafe_no_auth)?;
@@ -389,11 +400,50 @@ pub fn build_app(
     build_app_sqlite(db_path, policy, unsafe_no_auth)
 }
 
+fn io_timeout(policy: &VfsPolicy) -> Duration {
+    Duration::from_millis(policy.limits.max_io_ms)
+}
+
+fn scan_timeout(policy: &VfsPolicy) -> Option<Duration> {
+    policy
+        .limits
+        .max_walk_ms
+        .map(|ms| Duration::from_millis(ms.saturating_add(250)))
+}
+
+async fn run_blocking<T>(
+    timeout: Option<Duration>,
+    f: impl FnOnce() -> db_vfs::Result<T> + Send + 'static,
+) -> Result<T, (StatusCode, Json<ErrorBody>)>
+where
+    T: Send + 'static,
+{
+    let mut handle = tokio::task::spawn_blocking(f);
+    let join = if let Some(timeout) = timeout {
+        let sleep = tokio::time::sleep(timeout);
+        tokio::pin!(sleep);
+        tokio::select! {
+            res = &mut handle => res,
+            _ = &mut sleep => {
+                handle.abort();
+                tracing::warn!(timeout_ms = timeout.as_millis() as u64, "db-vfs request timed out");
+                return Err(err(StatusCode::REQUEST_TIMEOUT, "timeout", "request timed out"));
+            }
+        }
+    } else {
+        handle.await
+    };
+
+    let result = join.map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    result.map_err(map_err)
+}
+
 async fn read(
     State(state): State<AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<ReadRequest>,
 ) -> Result<Json<ReadResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -414,7 +464,8 @@ async fn read(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<ReadResponse> {
+    let timeout = Some(io_timeout(&state.inner.policy));
+    let result = run_blocking(timeout, move || -> db_vfs::Result<ReadResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -436,10 +487,9 @@ async fn read(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }
 
 async fn write(
@@ -447,6 +497,7 @@ async fn write(
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<WriteRequest>,
 ) -> Result<Json<WriteResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -467,7 +518,8 @@ async fn write(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<WriteResponse> {
+    let timeout = Some(io_timeout(&state.inner.policy));
+    let result = run_blocking(timeout, move || -> db_vfs::Result<WriteResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -489,10 +541,9 @@ async fn write(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }
 
 async fn patch(
@@ -500,6 +551,7 @@ async fn patch(
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<PatchRequest>,
 ) -> Result<Json<PatchResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -520,7 +572,8 @@ async fn patch(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<PatchResponse> {
+    let timeout = Some(io_timeout(&state.inner.policy));
+    let result = run_blocking(timeout, move || -> db_vfs::Result<PatchResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -542,10 +595,9 @@ async fn patch(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }
 
 async fn delete(
@@ -553,6 +605,7 @@ async fn delete(
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -573,7 +626,8 @@ async fn delete(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<DeleteResponse> {
+    let timeout = Some(io_timeout(&state.inner.policy));
+    let result = run_blocking(timeout, move || -> db_vfs::Result<DeleteResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -595,10 +649,9 @@ async fn delete(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }
 
 async fn glob(
@@ -606,6 +659,7 @@ async fn glob(
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<GlobRequest>,
 ) -> Result<Json<GlobResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -626,7 +680,8 @@ async fn glob(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<GlobResponse> {
+    let timeout = scan_timeout(&state.inner.policy);
+    let result = run_blocking(timeout, move || -> db_vfs::Result<GlobResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -648,10 +703,9 @@ async fn glob(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }
 
 async fn grep(
@@ -659,6 +713,7 @@ async fn grep(
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
     Json(req): Json<GrepRequest>,
 ) -> Result<Json<GrepResponse>, (StatusCode, Json<ErrorBody>)> {
+    db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(map_err)?;
     if !workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(err(
             StatusCode::FORBIDDEN,
@@ -679,7 +734,8 @@ async fn grep(
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> db_vfs::Result<GrepResponse> {
+    let timeout = scan_timeout(&state.inner.policy);
+    let result = run_blocking(timeout, move || -> db_vfs::Result<GrepResponse> {
         let _permit = permit;
         match backend {
             Backend::Sqlite { pool } => {
@@ -701,8 +757,7 @@ async fn grep(
             }
         }
     })
-    .await
-    .map_err(|err| map_err(db_vfs_core::Error::Db(err.to_string())))?;
+    .await?;
 
-    result.map(Json).map_err(map_err)
+    Ok(Json(result))
 }

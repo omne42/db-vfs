@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use db_vfs_core::path::normalize_path;
+use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
 use super::DbVfs;
@@ -26,6 +26,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     request: PatchRequest,
 ) -> Result<PatchResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.patch, "patch")?;
+    validate_workspace_id(&request.workspace_id)?;
 
     let path = normalize_path(&request.path)?;
     if vfs.redactor.is_path_denied(&path) {

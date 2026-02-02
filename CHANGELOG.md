@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `permissions.allow_full_scan` to gate `path_prefix = ""` scans for `glob`/`grep`.
 - `db-vfs-service`: `--unsafe-no-auth` for local development.
 - Policy: `limits.max_concurrency_io`, `limits.max_concurrency_scan`, and `limits.max_db_connections`.
+- Policy: `limits.max_io_ms` for service IO timeouts.
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 
 ### Changed
@@ -24,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.
 - `db-vfs-service`: validate bearer token before parsing JSON request bodies.
 - `db-vfs-service`: use r2d2 connection pooling for SQLite/Postgres stores.
+- `db-vfs-service`: apply request timeouts for IO endpoints and set Postgres `statement_timeout`.
+- `db-vfs-core`: default `secrets.deny_globs` also denies `.omne_agent_data/**`.
 - Policy parsing: deny unknown fields (`serde(deny_unknown_fields)`).
 - `policy.example.toml`: safer defaults (no write/patch/delete; auth enabled; full scan disabled).
 - Store API: split file reads into `get_meta` + `get_content`.
@@ -34,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.
+- `db-vfs-service`: hash bearer tokens once and compare in constant time; avoid retaining plaintext tokens.
+- Policy: validate `limits.max_io_ms` and cap request size limits to 256MB.
+- `db-vfs-service`: map `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
+- `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
 - Lint: fix `clippy::large_enum_variant`.
 
 ## [0.1.0] - 2026-01-31

@@ -47,6 +47,8 @@ Notes:
   - `max_concurrency_io` (read/write/patch/delete)
   - `max_concurrency_scan` (glob/grep)
   - `max_db_connections` (SQLite/Postgres pool size)
+  - `max_io_ms` (service timeout for read/write/patch/delete; also used for Postgres `statement_timeout`)
+- Secrets are denied by default (e.g. `.env`, `.git/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
 
 ### SQLite
 

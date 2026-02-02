@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use db_vfs_core::path::normalize_path_prefix;
+use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
 use super::util::{compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match};
@@ -66,6 +66,7 @@ pub(super) fn grep<S: crate::store::Store>(
     request: GrepRequest,
 ) -> Result<GrepResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.grep, "grep")?;
+    validate_workspace_id(&request.workspace_id)?;
 
     let started = std::time::Instant::now();
     let max_walk = vfs

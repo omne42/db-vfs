@@ -36,6 +36,7 @@ allowed_workspaces = ["*"]
 # max_walk_entries = 500000
 # max_walk_ms = 2000
 # max_line_bytes = 4096
+# max_io_ms = 30000
 # max_concurrency_io = 16
 # max_concurrency_scan = 8
 # max_db_connections = 16
@@ -43,6 +44,6 @@ allowed_workspaces = ["*"]
 # Secrets are enabled by default in code, but can be customized here:
 #
 # [secrets]
-# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*"]
+# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".omne_agent_data/**", "**/.omne_agent_data/**"]
 # redact_regexes = []
 # replacement = "***REDACTED***"

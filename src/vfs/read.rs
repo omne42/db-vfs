@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use db_vfs_core::path::normalize_path;
+use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
 use super::DbVfs;
@@ -34,6 +34,7 @@ pub(super) fn read<S: crate::store::Store>(
     request: ReadRequest,
 ) -> Result<ReadResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.read, "read")?;
+    validate_workspace_id(&request.workspace_id)?;
 
     let path = normalize_path(&request.path)?;
     if vfs.redactor.is_path_denied(&path) {
@@ -43,12 +44,6 @@ pub(super) fn read<S: crate::store::Store>(
     let Some(mut meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
         return Err(Error::NotFound("file not found".to_string()));
     };
-
-    let max_fetch_bytes = vfs
-        .policy
-        .limits
-        .max_read_bytes
-        .max(vfs.policy.limits.max_write_bytes);
 
     let (bytes_read, content, version) = match (request.start_line, request.end_line) {
         (None, None) => {
@@ -86,20 +81,20 @@ pub(super) fn read<S: crate::store::Store>(
             (meta.size_bytes, content, meta.version)
         }
         (Some(start_line), Some(end_line)) => {
-            if meta.size_bytes > max_fetch_bytes {
+            if meta.size_bytes > vfs.policy.limits.max_read_bytes {
                 return Err(Error::FileTooLarge {
                     path,
                     size_bytes: meta.size_bytes,
-                    max_bytes: max_fetch_bytes,
+                    max_bytes: vfs.policy.limits.max_read_bytes,
                 });
             }
 
             let content = loop {
-                if meta.size_bytes > max_fetch_bytes {
+                if meta.size_bytes > vfs.policy.limits.max_read_bytes {
                     return Err(Error::FileTooLarge {
                         path,
                         size_bytes: meta.size_bytes,
-                        max_bytes: max_fetch_bytes,
+                        max_bytes: vfs.policy.limits.max_read_bytes,
                     });
                 }
 

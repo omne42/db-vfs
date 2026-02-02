@@ -1,5 +1,35 @@
 use crate::{Error, Result};
 
+pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
+    const MAX_BYTES: usize = 256;
+    if workspace_id.is_empty() {
+        return Err(Error::InvalidPath("workspace_id is empty".to_string()));
+    }
+    if workspace_id.len() > MAX_BYTES {
+        return Err(Error::InvalidPath(format!(
+            "workspace_id is too large ({} bytes; max {} bytes)",
+            workspace_id.len(),
+            MAX_BYTES
+        )));
+    }
+    if workspace_id.contains('\0') {
+        return Err(Error::InvalidPath(
+            "workspace_id must not contain NUL bytes".to_string(),
+        ));
+    }
+    if workspace_id.chars().any(|ch| ch.is_whitespace()) {
+        return Err(Error::InvalidPath(
+            "workspace_id must not contain whitespace".to_string(),
+        ));
+    }
+    if workspace_id.chars().any(|ch| ch.is_control()) {
+        return Err(Error::InvalidPath(
+            "workspace_id must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn normalize_path(path: &str) -> Result<String> {
     normalize_path_inner(path, PathKind::File)
 }

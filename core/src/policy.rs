@@ -43,6 +43,9 @@ pub struct Limits {
     pub max_walk_ms: Option<u64>,
     #[serde(default = "default_max_line_bytes")]
     pub max_line_bytes: usize,
+    /// Wall-clock budget for non-scan requests (read/write/patch/delete), in milliseconds.
+    #[serde(default = "default_max_io_ms")]
+    pub max_io_ms: u64,
     /// Max in-flight non-scan requests (read/write/patch/delete).
     #[serde(default = "default_max_concurrency_io")]
     pub max_concurrency_io: usize,
@@ -78,6 +81,10 @@ const fn default_max_line_bytes() -> usize {
     4096
 }
 
+const fn default_max_io_ms() -> u64 {
+    30_000
+}
+
 const fn default_max_concurrency_io() -> usize {
     16
 }
@@ -101,6 +108,7 @@ impl Default for Limits {
             max_walk_files: default_max_walk_files(),
             max_walk_ms: None,
             max_line_bytes: default_max_line_bytes(),
+            max_io_ms: default_max_io_ms(),
             max_concurrency_io: default_max_concurrency_io(),
             max_concurrency_scan: default_max_concurrency_scan(),
             max_db_connections: default_max_db_connections(),
@@ -127,6 +135,8 @@ fn default_secret_deny_globs() -> Vec<String> {
         ".env.*".to_string(),
         "**/.env".to_string(),
         "**/.env.*".to_string(),
+        ".omne_agent_data/**".to_string(),
+        "**/.omne_agent_data/**".to_string(),
     ]
 }
 
@@ -183,10 +193,18 @@ pub struct VfsPolicy {
 
 impl VfsPolicy {
     pub fn validate(&self) -> Result<()> {
+        const MAX_REQUEST_BYTES: u64 = 256 * 1024 * 1024;
+
         if self.limits.max_read_bytes == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_read_bytes must be > 0".to_string(),
             ));
+        }
+        if self.limits.max_read_bytes > MAX_REQUEST_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_read_bytes is too large (max {} bytes)",
+                MAX_REQUEST_BYTES
+            )));
         }
         if let Some(max_patch_bytes) = self.limits.max_patch_bytes
             && max_patch_bytes == 0
@@ -195,10 +213,24 @@ impl VfsPolicy {
                 "limits.max_patch_bytes must be > 0".to_string(),
             ));
         }
+        if let Some(max_patch_bytes) = self.limits.max_patch_bytes
+            && max_patch_bytes > MAX_REQUEST_BYTES
+        {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_patch_bytes is too large (max {} bytes)",
+                MAX_REQUEST_BYTES
+            )));
+        }
         if self.limits.max_write_bytes == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_write_bytes must be > 0".to_string(),
             ));
+        }
+        if self.limits.max_write_bytes > MAX_REQUEST_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_write_bytes is too large (max {} bytes)",
+                MAX_REQUEST_BYTES
+            )));
         }
         if self.limits.max_results == 0 {
             return Err(Error::InvalidPolicy(
@@ -218,6 +250,11 @@ impl VfsPolicy {
         if self.limits.max_line_bytes == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_line_bytes must be > 0".to_string(),
+            ));
+        }
+        if self.limits.max_io_ms == 0 {
+            return Err(Error::InvalidPolicy(
+                "limits.max_io_ms must be > 0".to_string(),
             ));
         }
         if self.limits.max_concurrency_io == 0 {
