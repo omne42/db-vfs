@@ -12,34 +12,62 @@ impl PostgresStore {
         Ok(Self { client })
     }
 
+    pub fn new_no_migrate(client: postgres::Client) -> Result<Self> {
+        Ok(Self { client })
+    }
+
     pub fn connect(url: &str) -> Result<Self> {
         let client = postgres::Client::connect(url, postgres::NoTls).map_err(db_err)?;
         Self::new(client)
     }
+
+    pub fn connect_no_migrate(url: &str) -> Result<Self> {
+        let client = postgres::Client::connect(url, postgres::NoTls).map_err(db_err)?;
+        Self::new_no_migrate(client)
+    }
 }
 
 impl Store for PostgresStore {
-    fn get_file(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileRecord>> {
+    fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let row = self
             .client
             .query_opt(
-                "SELECT content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
+                "SELECT size_bytes, version, updated_at_ms
                  FROM files
                  WHERE workspace_id = $1 AND path = $2",
                 &[&workspace_id, &path],
             )
             .map_err(db_err)?;
 
-        Ok(row.map(|row| FileRecord {
-            workspace_id: workspace_id.to_string(),
-            path: path.to_string(),
-            content: row.get::<_, String>(0),
-            size_bytes: i64_to_u64(row.get::<_, i64>(1)),
-            version: i64_to_u64(row.get::<_, i64>(2)),
-            created_at_ms: i64_to_u64(row.get::<_, i64>(3)),
-            updated_at_ms: i64_to_u64(row.get::<_, i64>(4)),
-            metadata_json: row.get::<_, Option<String>>(5),
-        }))
+        Ok(match row {
+            Some(row) => Some(FileMeta {
+                path: path.to_string(),
+                size_bytes: i64_to_u64(row.get::<_, i64>(0), "size_bytes")?,
+                version: i64_to_u64(row.get::<_, i64>(1), "version")?,
+                updated_at_ms: i64_to_u64(row.get::<_, i64>(2), "updated_at_ms")?,
+            }),
+            None => None,
+        })
+    }
+
+    fn get_content(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+    ) -> Result<Option<String>> {
+        let version = u64_to_i64(version, "version")?;
+        let row = self
+            .client
+            .query_opt(
+                "SELECT content
+                 FROM files
+                 WHERE workspace_id = $1 AND path = $2 AND version = $3",
+                &[&workspace_id, &path, &version],
+            )
+            .map_err(db_err)?;
+
+        Ok(row.map(|row| row.get::<_, String>(0)))
     }
 
     fn insert_file_new(
@@ -51,6 +79,9 @@ impl Store for PostgresStore {
     ) -> Result<FileRecord> {
         let size_bytes = content.len() as u64;
         let version: u64 = 1;
+        let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
+        let version_i64 = u64_to_i64(version, "version")?;
+        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
 
         let res = self.client.execute(
             "INSERT INTO files(
@@ -60,10 +91,10 @@ impl Store for PostgresStore {
                 &workspace_id,
                 &path,
                 &content,
-                &u64_to_i64(size_bytes),
-                &u64_to_i64(version),
-                &u64_to_i64(now_ms),
-                &u64_to_i64(now_ms),
+                &size_bytes_i64,
+                &version_i64,
+                &now_ms_i64,
+                &now_ms_i64,
             ],
         );
 
@@ -97,6 +128,10 @@ impl Store for PostgresStore {
     ) -> Result<FileRecord> {
         let size_bytes = content.len() as u64;
         let new_version = expected_version.saturating_add(1);
+        let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
+        let new_version_i64 = u64_to_i64(new_version, "new_version")?;
+        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
+        let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
 
         let updated = self
             .client
@@ -106,12 +141,12 @@ impl Store for PostgresStore {
                  WHERE workspace_id = $5 AND path = $6 AND version = $7",
                 &[
                     &content,
-                    &u64_to_i64(size_bytes),
-                    &u64_to_i64(new_version),
-                    &u64_to_i64(now_ms),
+                    &size_bytes_i64,
+                    &new_version_i64,
+                    &now_ms_i64,
                     &workspace_id,
                     &path,
-                    &u64_to_i64(expected_version),
+                    &expected_version_i64,
                 ],
             )
             .map_err(db_err)?;
@@ -124,7 +159,8 @@ impl Store for PostgresStore {
                     &[&workspace_id, &path],
                 )
                 .map_err(db_err)?
-                .map(|row| i64_to_u64(row.get::<_, i64>(0)))
+                .map(|row| i64_to_u64(row.get::<_, i64>(0), "created_at_ms"))
+                .transpose()?
                 .unwrap_or(now_ms);
 
             return Ok(FileRecord {
@@ -159,13 +195,15 @@ impl Store for PostgresStore {
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome> {
         let deleted = match expected_version {
-            Some(version) => self
-                .client
-                .execute(
-                    "DELETE FROM files WHERE workspace_id = $1 AND path = $2 AND version = $3",
-                    &[&workspace_id, &path, &u64_to_i64(version)],
-                )
-                .map_err(db_err)?,
+            Some(version) => {
+                let version_i64 = u64_to_i64(version, "version")?;
+                self.client
+                    .execute(
+                        "DELETE FROM files WHERE workspace_id = $1 AND path = $2 AND version = $3",
+                        &[&workspace_id, &path, &version_i64],
+                    )
+                    .map_err(db_err)?
+            }
             None => self
                 .client
                 .execute(
@@ -203,6 +241,7 @@ impl Store for PostgresStore {
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
         let (lower, upper) = make_prefix_bounds(prefix);
+        let limit_i64 = u64_to_i64(limit as u64, "limit")?;
         let rows = self
             .client
             .query(
@@ -211,7 +250,7 @@ impl Store for PostgresStore {
                  WHERE workspace_id = $1 AND path >= $2 AND path < $3
                  ORDER BY path
                  LIMIT $4",
-                &[&workspace_id, &lower, &upper, &u64_to_i64(limit as u64)],
+                &[&workspace_id, &lower, &upper, &limit_i64],
             )
             .map_err(db_err)?;
 
@@ -219,25 +258,21 @@ impl Store for PostgresStore {
         for row in rows {
             out.push(FileMeta {
                 path: row.get::<_, String>(0),
-                size_bytes: i64_to_u64(row.get::<_, i64>(1)),
-                version: i64_to_u64(row.get::<_, i64>(2)),
-                updated_at_ms: i64_to_u64(row.get::<_, i64>(3)),
+                size_bytes: i64_to_u64(row.get::<_, i64>(1), "size_bytes")?,
+                version: i64_to_u64(row.get::<_, i64>(2), "version")?,
+                updated_at_ms: i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
             });
         }
         Ok(out)
     }
 }
 
-fn u64_to_i64(value: u64) -> i64 {
-    if value > i64::MAX as u64 {
-        i64::MAX
-    } else {
-        value as i64
-    }
+fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 
-fn i64_to_u64(value: i64) -> u64 {
-    if value <= 0 { 0 } else { value as u64 }
+fn i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::Db(format!("invalid negative {field} value: {value}")))
 }
 
 fn is_unique_violation(err: &postgres::Error) -> bool {

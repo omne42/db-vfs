@@ -27,7 +27,14 @@ pub enum DeleteOutcome {
 }
 
 pub trait Store {
-    fn get_file(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileRecord>>;
+    fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>>;
+
+    fn get_content(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+    ) -> Result<Option<String>>;
 
     fn insert_file_new(
         &mut self,

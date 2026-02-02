@@ -38,6 +38,19 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
+    pub fn new_with_redactor(
+        store: S,
+        policy: VfsPolicy,
+        redactor: SecretRedactor,
+    ) -> Result<Self> {
+        policy.validate()?;
+        Ok(Self {
+            policy,
+            redactor,
+            store,
+        })
+    }
+
     pub fn policy(&self) -> &VfsPolicy {
         &self.policy
     }

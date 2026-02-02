@@ -7,7 +7,7 @@ use db_vfs::store::sqlite::SqliteStore;
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
-use db_vfs_core::policy::{Limits, Permissions, SecretRules, VfsPolicy};
+use db_vfs_core::policy::{AuthPolicy, Limits, Permissions, SecretRules, VfsPolicy};
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -29,9 +29,11 @@ fn policy_all_perms() -> VfsPolicy {
             write: true,
             patch: true,
             delete: true,
+            allow_full_scan: false,
         },
         limits: Limits::default(),
         secrets: SecretRules::default(),
+        auth: AuthPolicy::default(),
     }
 }
 
@@ -222,12 +224,14 @@ fn deny_globs_hide_descendants_via_probe() {
             write: true,
             patch: true,
             delete: true,
+            allow_full_scan: true,
         },
         limits: Limits::default(),
         secrets: SecretRules {
             deny_globs: vec!["dir/*".to_string()],
             ..SecretRules::default()
         },
+        auth: AuthPolicy::default(),
     };
 
     let mut vfs = DbVfs::new(store, policy).unwrap();

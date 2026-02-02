@@ -2,9 +2,19 @@ use std::path::Path;
 
 use db_vfs_core::policy::VfsPolicy;
 
+const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
+
 pub fn load_policy(path: impl AsRef<Path>) -> anyhow::Result<VfsPolicy> {
     let path = path.as_ref();
-    let raw = std::fs::read_to_string(path)?;
+    let bytes = std::fs::read(path)?;
+    if bytes.len() > MAX_POLICY_BYTES {
+        anyhow::bail!(
+            "policy file is too large ({} bytes; max {} bytes)",
+            bytes.len(),
+            MAX_POLICY_BYTES
+        );
+    }
+    let raw = String::from_utf8(bytes)?;
     let ext = path.extension().and_then(|s| s.to_str());
     let policy: VfsPolicy = match ext {
         Some("json") => serde_json::from_str(&raw)?,

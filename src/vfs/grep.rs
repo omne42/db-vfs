@@ -86,6 +86,11 @@ pub(super) fn grep<S: crate::store::Store>(
                 Error::NotPermitted("grep requires an explicit path_prefix".to_string())
             })?,
     };
+    if prefix.is_empty() && !vfs.policy.permissions.allow_full_scan {
+        return Err(Error::NotPermitted(
+            "grep requires a non-empty path_prefix unless allow_full_scan is enabled".to_string(),
+        ));
+    }
 
     let regex = if request.regex {
         if request.query.len() > MAX_GREP_REGEX_PATTERN_BYTES {
@@ -115,16 +120,29 @@ pub(super) fn grep<S: crate::store::Store>(
         .max_walk_entries
         .min(vfs.policy.limits.max_walk_files)
         .max(1);
-    let metas = vfs
-        .store
-        .list_metas_by_prefix(&request.workspace_id, &prefix, max_scan)?;
+    let mut metas = vfs.store.list_metas_by_prefix(
+        &request.workspace_id,
+        &prefix,
+        max_scan.saturating_add(1),
+    )?;
+    let truncated_by_store_limit = metas.len() > max_scan;
+    if truncated_by_store_limit {
+        metas.truncate(max_scan);
+    }
+    let truncated_reason = if vfs.policy.limits.max_walk_entries <= vfs.policy.limits.max_walk_files
+    {
+        ScanLimitReason::Entries
+    } else {
+        ScanLimitReason::Files
+    };
 
     let mut matches = Vec::<GrepMatch>::new();
     let mut skipped_too_large_files: u64 = 0;
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: u64 = 0;
-    let mut scan_limit_reached = false;
-    let mut scan_limit_reason: Option<ScanLimitReason> = None;
+    let mut scan_limit_reached = truncated_by_store_limit;
+    let mut scan_limit_reason: Option<ScanLimitReason> =
+        truncated_by_store_limit.then_some(truncated_reason);
 
     for meta in metas {
         scanned_entries = scanned_entries.saturating_add(1);
@@ -157,11 +175,14 @@ pub(super) fn grep<S: crate::store::Store>(
             continue;
         }
 
-        let Some(record) = vfs.store.get_file(&request.workspace_id, &meta.path)? else {
+        let Some(content) =
+            vfs.store
+                .get_content(&request.workspace_id, &meta.path, meta.version)?
+        else {
             continue;
         };
 
-        for (idx, line) in record.content.lines().enumerate() {
+        for (idx, line) in content.lines().enumerate() {
             let ok = match &regex {
                 Some(regex) => regex.is_match(line),
                 None => line.contains(&request.query),

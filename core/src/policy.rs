@@ -4,6 +4,7 @@ use crate::Error;
 use crate::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Permissions {
     #[serde(default)]
     pub read: bool,
@@ -17,9 +18,13 @@ pub struct Permissions {
     pub patch: bool,
     #[serde(default)]
     pub delete: bool,
+    /// Allow `path_prefix = ""` (scan the full workspace) for `glob` and `grep`.
+    #[serde(default)]
+    pub allow_full_scan: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     #[serde(default = "default_max_read_bytes")]
     pub max_read_bytes: u64,
@@ -79,6 +84,7 @@ impl Default for Limits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretRules {
     #[serde(default = "default_secret_deny_globs")]
     pub deny_globs: Vec<String>,
@@ -114,6 +120,22 @@ impl Default for SecretRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AuthPolicy {
+    #[serde(default)]
+    pub tokens: Vec<AuthToken>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthToken {
+    pub token: String,
+    #[serde(default)]
+    pub allowed_workspaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct VfsPolicy {
     #[serde(default)]
     pub permissions: Permissions,
@@ -121,6 +143,8 @@ pub struct VfsPolicy {
     pub limits: Limits,
     #[serde(default)]
     pub secrets: SecretRules,
+    #[serde(default)]
+    pub auth: AuthPolicy,
 }
 
 impl VfsPolicy {
@@ -161,6 +185,46 @@ impl VfsPolicy {
             return Err(Error::InvalidPolicy(
                 "limits.max_line_bytes must be > 0".to_string(),
             ));
+        }
+
+        if self.auth.tokens.len() > 256 {
+            return Err(Error::InvalidPolicy(
+                "auth.tokens has too many entries (max 256)".to_string(),
+            ));
+        }
+        for (idx, rule) in self.auth.tokens.iter().enumerate() {
+            if rule.token.trim().is_empty() {
+                return Err(Error::InvalidPolicy(format!(
+                    "auth.tokens[{idx}].token must be non-empty"
+                )));
+            }
+            if rule.allowed_workspaces.is_empty() {
+                return Err(Error::InvalidPolicy(format!(
+                    "auth.tokens[{idx}].allowed_workspaces must be non-empty (use \"*\" to allow all)"
+                )));
+            }
+            if rule.allowed_workspaces.len() > 1024 {
+                return Err(Error::InvalidPolicy(format!(
+                    "auth.tokens[{idx}].allowed_workspaces has too many entries (max 1024)"
+                )));
+            }
+            for (j, pattern) in rule.allowed_workspaces.iter().enumerate() {
+                if pattern.trim().is_empty() {
+                    return Err(Error::InvalidPolicy(format!(
+                        "auth.tokens[{idx}].allowed_workspaces[{j}] must be non-empty"
+                    )));
+                }
+                if pattern.chars().any(|ch| ch.is_whitespace()) {
+                    return Err(Error::InvalidPolicy(format!(
+                        "auth.tokens[{idx}].allowed_workspaces[{j}] must not contain whitespace"
+                    )));
+                }
+                if pattern != "*" && pattern.contains('*') && !pattern.ends_with('*') {
+                    return Err(Error::InvalidPolicy(format!(
+                        "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
+                    )));
+                }
+            }
         }
         Ok(())
     }

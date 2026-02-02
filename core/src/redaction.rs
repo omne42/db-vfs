@@ -13,7 +13,7 @@ const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
 
 const PROBE_FILE_NAME: &str = ".db-vfs-probe";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SecretRedactor {
     deny: GlobSet,
     redact: Vec<Regex>,

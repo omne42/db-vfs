@@ -53,6 +53,11 @@ pub(super) fn glob<S: crate::store::Store>(
             )
         })?,
     };
+    if prefix.is_empty() && !vfs.policy.permissions.allow_full_scan {
+        return Err(Error::NotPermitted(
+            "glob requires a non-empty path_prefix unless allow_full_scan is enabled".to_string(),
+        ));
+    }
 
     let max_scan = vfs
         .policy
@@ -60,14 +65,27 @@ pub(super) fn glob<S: crate::store::Store>(
         .max_walk_entries
         .min(vfs.policy.limits.max_walk_files)
         .max(1);
-    let metas = vfs
-        .store
-        .list_metas_by_prefix(&request.workspace_id, &prefix, max_scan)?;
+    let mut metas = vfs.store.list_metas_by_prefix(
+        &request.workspace_id,
+        &prefix,
+        max_scan.saturating_add(1),
+    )?;
+    let truncated_by_store_limit = metas.len() > max_scan;
+    if truncated_by_store_limit {
+        metas.truncate(max_scan);
+    }
+    let truncated_reason = if vfs.policy.limits.max_walk_entries <= vfs.policy.limits.max_walk_files
+    {
+        ScanLimitReason::Entries
+    } else {
+        ScanLimitReason::Files
+    };
 
     let mut matches = Vec::<String>::new();
     let mut scanned_entries: u64 = 0;
-    let mut scan_limit_reached = false;
-    let mut scan_limit_reason: Option<ScanLimitReason> = None;
+    let mut scan_limit_reached = truncated_by_store_limit;
+    let mut scan_limit_reason: Option<ScanLimitReason> =
+        truncated_by_store_limit.then_some(truncated_reason);
 
     for meta in metas {
         scanned_entries = scanned_entries.saturating_add(1);

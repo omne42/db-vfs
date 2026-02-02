@@ -17,7 +17,8 @@ filesystem semantics and a small dependency graph.
 - All `path`/`path_prefix` values are **root-relative**:
   - Must not start with `/`
   - Must not contain `..`
-  - `path_prefix` may be empty (`""`) to mean “the whole workspace”
+  - `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
+    `policy.permissions.allow_full_scan = true`
 - Scope control (`path_prefix`):
   - `grep` requires an explicit `path_prefix` unless a safe literal prefix can be derived from
     `glob` (e.g. `"docs/**/*.md"` → `"docs/"`).
@@ -31,6 +32,10 @@ filesystem semantics and a small dependency graph.
     unconditional.
 
 ## HTTP service
+
+By default the service requires an auth token configured in the policy file (`[auth]`), and each
+token can be restricted to a workspace allowlist. For local development only, you can run with
+`--unsafe-no-auth`.
 
 ### SQLite
 
@@ -70,9 +75,11 @@ Minimal example:
 ```bash
 curl -sS http://127.0.0.1:8080/v1/write \
   -H 'content-type: application/json' \
+  -H 'authorization: Bearer CHANGE_ME' \
   -d '{"workspace_id":"w1","path":"docs/a.txt","content":"hello","expected_version":null}'
 
 curl -sS http://127.0.0.1:8080/v1/grep \
   -H 'content-type: application/json' \
+  -H 'authorization: Bearer CHANGE_ME' \
   -d '{"workspace_id":"w1","query":"hello","regex":false,"glob":"docs/**/*.txt","path_prefix":null}'
 ```

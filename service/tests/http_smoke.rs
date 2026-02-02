@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::Router;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
-use db_vfs_core::policy::{Limits, Permissions, SecretRules, VfsPolicy};
+use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions, SecretRules, VfsPolicy};
 
 fn policy_allow_all() -> VfsPolicy {
     VfsPolicy {
@@ -13,9 +13,16 @@ fn policy_allow_all() -> VfsPolicy {
             write: true,
             patch: true,
             delete: true,
+            allow_full_scan: false,
         },
         limits: Limits::default(),
         secrets: SecretRules::default(),
+        auth: AuthPolicy {
+            tokens: vec![AuthToken {
+                token: "dev-token".to_string(),
+                allowed_workspaces: vec!["ws".to_string()],
+            }],
+        },
     }
 }
 
@@ -33,7 +40,7 @@ async fn serve(app: Router) -> SocketAddr {
 #[tokio::test]
 async fn write_then_read() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all())
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), false)
         .expect("build app");
     let addr = serve(app).await;
 
@@ -42,6 +49,7 @@ async fn write_then_read() {
 
     let write = client
         .post(format!("{base}/v1/write"))
+        .header("authorization", "Bearer dev-token")
         .json(&WriteRequest {
             workspace_id: "ws".to_string(),
             path: "docs/a.txt".to_string(),
@@ -61,6 +69,7 @@ async fn write_then_read() {
 
     let read = client
         .post(format!("{base}/v1/read"))
+        .header("authorization", "Bearer dev-token")
         .json(&ReadRequest {
             workspace_id: "ws".to_string(),
             path: "docs/a.txt".to_string(),

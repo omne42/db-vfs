@@ -18,9 +18,19 @@ impl SqliteStore {
         Ok(Self { conn })
     }
 
+    pub fn new_no_migrate(conn: rusqlite::Connection) -> Result<Self> {
+        let _ = conn.busy_timeout(Duration::from_secs(5));
+        Ok(Self { conn })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = rusqlite::Connection::open(path).map_err(db_err)?;
         Self::new(conn)
+    }
+
+    pub fn open_no_migrate(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = rusqlite::Connection::open(path).map_err(db_err)?;
+        Self::new_no_migrate(conn)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -30,27 +40,46 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
-    fn get_file(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileRecord>> {
+    fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
+                "SELECT size_bytes, version, updated_at_ms
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2",
             )
             .map_err(db_err)?;
 
         stmt.query_row(rusqlite::params![workspace_id, path], |row| {
-            Ok(FileRecord {
-                workspace_id: workspace_id.to_string(),
+            Ok(FileMeta {
                 path: path.to_string(),
-                content: row.get::<_, String>(0)?,
-                size_bytes: i64_to_u64(row.get::<_, i64>(1)?),
-                version: i64_to_u64(row.get::<_, i64>(2)?),
-                created_at_ms: i64_to_u64(row.get::<_, i64>(3)?),
-                updated_at_ms: i64_to_u64(row.get::<_, i64>(4)?),
-                metadata_json: row.get::<_, Option<String>>(5)?,
+                size_bytes: i64_to_u64_sql(row.get::<_, i64>(0)?, "size_bytes")?,
+                version: i64_to_u64_sql(row.get::<_, i64>(1)?, "version")?,
+                updated_at_ms: i64_to_u64_sql(row.get::<_, i64>(2)?, "updated_at_ms")?,
             })
+        })
+        .optional()
+        .map_err(db_err)
+    }
+
+    fn get_content(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+    ) -> Result<Option<String>> {
+        let version = u64_to_i64(version, "version")?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT content
+                 FROM files
+                 WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
+            )
+            .map_err(db_err)?;
+
+        stmt.query_row(rusqlite::params![workspace_id, path, version], |row| {
+            row.get::<_, String>(0)
         })
         .optional()
         .map_err(db_err)
@@ -65,6 +94,9 @@ impl Store for SqliteStore {
     ) -> Result<FileRecord> {
         let size_bytes = content.len() as u64;
         let version: u64 = 1;
+        let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
+        let version_i64 = u64_to_i64(version, "version")?;
+        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
 
         let res = self.conn.execute(
             "INSERT INTO files(
@@ -74,10 +106,10 @@ impl Store for SqliteStore {
                 workspace_id,
                 path,
                 content,
-                u64_to_i64(size_bytes),
-                u64_to_i64(version),
-                u64_to_i64(now_ms),
-                u64_to_i64(now_ms),
+                size_bytes_i64,
+                version_i64,
+                now_ms_i64,
+                now_ms_i64,
             ],
         );
 
@@ -111,6 +143,10 @@ impl Store for SqliteStore {
     ) -> Result<FileRecord> {
         let size_bytes = content.len() as u64;
         let new_version = expected_version.saturating_add(1);
+        let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
+        let new_version_i64 = u64_to_i64(new_version, "new_version")?;
+        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
+        let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
 
         let updated = self
             .conn
@@ -120,12 +156,12 @@ impl Store for SqliteStore {
                  WHERE workspace_id = ?5 AND path = ?6 AND version = ?7",
                 rusqlite::params![
                     content,
-                    u64_to_i64(size_bytes),
-                    u64_to_i64(new_version),
-                    u64_to_i64(now_ms),
+                    size_bytes_i64,
+                    new_version_i64,
+                    now_ms_i64,
                     workspace_id,
                     path,
-                    u64_to_i64(expected_version),
+                    expected_version_i64,
                 ],
             )
             .map_err(db_err)?;
@@ -140,7 +176,8 @@ impl Store for SqliteStore {
                 )
                 .optional()
                 .map_err(db_err)?
-                .map(i64_to_u64)
+                .map(|v| i64_to_u64(v, "created_at_ms"))
+                .transpose()?
                 .unwrap_or(now_ms);
 
             return Ok(FileRecord {
@@ -177,13 +214,15 @@ impl Store for SqliteStore {
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome> {
         let deleted = match expected_version {
-            Some(version) => self
-                .conn
-                .execute(
-                    "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
-                    rusqlite::params![workspace_id, path, u64_to_i64(version)],
-                )
-                .map_err(db_err)?,
+            Some(version) => {
+                let version = u64_to_i64(version, "version")?;
+                self.conn
+                    .execute(
+                        "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
+                        rusqlite::params![workspace_id, path, version],
+                    )
+                    .map_err(db_err)?
+            }
             None => self
                 .conn
                 .execute(
@@ -224,6 +263,7 @@ impl Store for SqliteStore {
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
         let (lower, upper) = make_prefix_bounds(prefix);
+        let limit = u64_to_i64(limit as u64, "limit")?;
         let mut stmt = self
             .conn
             .prepare(
@@ -237,13 +277,13 @@ impl Store for SqliteStore {
 
         let rows = stmt
             .query_map(
-                rusqlite::params![workspace_id, lower, upper, u64_to_i64(limit as u64)],
+                rusqlite::params![workspace_id, lower, upper, limit],
                 |row| {
                     Ok(FileMeta {
                         path: row.get::<_, String>(0)?,
-                        size_bytes: i64_to_u64(row.get::<_, i64>(1)?),
-                        version: i64_to_u64(row.get::<_, i64>(2)?),
-                        updated_at_ms: i64_to_u64(row.get::<_, i64>(3)?),
+                        size_bytes: i64_to_u64_sql(row.get::<_, i64>(1)?, "size_bytes")?,
+                        version: i64_to_u64_sql(row.get::<_, i64>(2)?, "version")?,
+                        updated_at_ms: i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms")?,
                     })
                 },
             )
@@ -257,16 +297,25 @@ impl Store for SqliteStore {
     }
 }
 
-fn u64_to_i64(value: u64) -> i64 {
-    if value > i64::MAX as u64 {
-        i64::MAX
-    } else {
-        value as i64
-    }
+fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 
-fn i64_to_u64(value: i64) -> u64 {
-    if value <= 0 { 0 } else { value as u64 }
+fn i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::Db(format!("invalid negative {field} value: {value}")))
+}
+
+fn i64_to_u64_sql(value: i64, field: &'static str) -> rusqlite::Result<u64> {
+    i64_to_u64(value, field).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                err.to_string(),
+            )),
+        )
+    })
 }
 
 fn is_unique_constraint_violation(err: &rusqlite::Error) -> bool {

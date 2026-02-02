@@ -40,21 +40,84 @@ pub(super) fn read<S: crate::store::Store>(
         return Err(Error::SecretPathDenied(path));
     }
 
-    let Some(record) = vfs.store.get_file(&request.workspace_id, &path)? else {
+    let Some(mut meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
         return Err(Error::NotFound("file not found".to_string()));
     };
 
-    if record.size_bytes > vfs.policy.limits.max_read_bytes {
-        return Err(Error::FileTooLarge {
-            path,
-            size_bytes: record.size_bytes,
-            max_bytes: vfs.policy.limits.max_read_bytes,
-        });
-    }
+    let max_fetch_bytes = vfs
+        .policy
+        .limits
+        .max_read_bytes
+        .max(vfs.policy.limits.max_write_bytes);
 
-    let (bytes_read, content) = match (request.start_line, request.end_line) {
-        (None, None) => (record.size_bytes, record.content),
+    let (bytes_read, content, version) = match (request.start_line, request.end_line) {
+        (None, None) => {
+            if meta.size_bytes > vfs.policy.limits.max_read_bytes {
+                return Err(Error::FileTooLarge {
+                    path,
+                    size_bytes: meta.size_bytes,
+                    max_bytes: vfs.policy.limits.max_read_bytes,
+                });
+            }
+
+            let content = loop {
+                if meta.size_bytes > vfs.policy.limits.max_read_bytes {
+                    return Err(Error::FileTooLarge {
+                        path,
+                        size_bytes: meta.size_bytes,
+                        max_bytes: vfs.policy.limits.max_read_bytes,
+                    });
+                }
+                match vfs
+                    .store
+                    .get_content(&request.workspace_id, &path, meta.version)?
+                {
+                    Some(content) => break content,
+                    None => {
+                        meta = vfs
+                            .store
+                            .get_meta(&request.workspace_id, &path)?
+                            .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
+                        continue;
+                    }
+                }
+            };
+
+            (meta.size_bytes, content, meta.version)
+        }
         (Some(start_line), Some(end_line)) => {
+            if meta.size_bytes > max_fetch_bytes {
+                return Err(Error::FileTooLarge {
+                    path,
+                    size_bytes: meta.size_bytes,
+                    max_bytes: max_fetch_bytes,
+                });
+            }
+
+            let content = loop {
+                if meta.size_bytes > max_fetch_bytes {
+                    return Err(Error::FileTooLarge {
+                        path,
+                        size_bytes: meta.size_bytes,
+                        max_bytes: max_fetch_bytes,
+                    });
+                }
+
+                match vfs
+                    .store
+                    .get_content(&request.workspace_id, &path, meta.version)?
+                {
+                    Some(content) => break content,
+                    None => {
+                        meta = vfs
+                            .store
+                            .get_meta(&request.workspace_id, &path)?
+                            .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
+                        continue;
+                    }
+                }
+            };
+
             if start_line == 0 || end_line == 0 || start_line > end_line {
                 return Err(Error::InvalidPath(format!(
                     "invalid line range {}..{}",
@@ -63,15 +126,15 @@ pub(super) fn read<S: crate::store::Store>(
             }
 
             let extracted = extract_line_range(
-                &record.content,
+                &content,
                 start_line,
                 end_line,
                 vfs.policy.limits.max_read_bytes,
-                record.size_bytes,
+                meta.size_bytes,
                 &path,
             )?;
             let bytes_read = extracted.len() as u64;
-            (bytes_read, extracted)
+            (bytes_read, extracted, meta.version)
         }
         _ => {
             return Err(Error::InvalidPath(
@@ -88,7 +151,7 @@ pub(super) fn read<S: crate::store::Store>(
         truncated: false,
         start_line: request.start_line,
         end_line: request.end_line,
-        version: record.version,
+        version,
     })
 }
 

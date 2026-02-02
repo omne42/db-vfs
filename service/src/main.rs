@@ -29,6 +29,10 @@ struct Args {
     /// Policy file path (.toml or .json), parsed as db_vfs_core::policy::VfsPolicy.
     #[arg(long)]
     policy: std::path::PathBuf,
+
+    /// Allow unauthenticated requests (unsafe; local dev only).
+    #[arg(long)]
+    unsafe_no_auth: bool,
 }
 
 #[tokio::main]
@@ -43,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let app = if let Some(url) = args.postgres {
         #[cfg(feature = "postgres")]
         {
-            db_vfs_service::server::build_app_postgres(url, policy)?
+            db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
         }
         #[cfg(not(feature = "postgres"))]
         {
@@ -54,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         let sqlite = args.sqlite.expect("clap enforces exactly one DB backend");
-        db_vfs_service::server::build_app_sqlite(sqlite, policy)?
+        db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     axum::serve(listener, app).await?;
