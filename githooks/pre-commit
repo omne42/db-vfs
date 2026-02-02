@@ -56,6 +56,32 @@ EOF
   fi
 fi
 
+max_rs_lines="${DB_VFS_MAX_RS_LINES:-1000}"
+offenders=()
+tracked_rs_files="$(git ls-files '*.rs' || true)"
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  lines="$(git show ":$path" 2>/dev/null | awk 'END{print NR}')"
+  if [[ "${lines:-0}" -gt "$max_rs_lines" ]]; then
+    offenders+=("$path ($lines)")
+  fi
+done <<<"$tracked_rs_files"
+
+if [[ "${#offenders[@]}" -gt 0 ]]; then
+  cat >&2 <<EOF
+pre-commit: refusing to commit oversized Rust files.
+
+一个良好的代码仓库不应该有超过 ${max_rs_lines} 行的 Rust 文件，这意味着复杂度过度或没有良好的领域分割；请拆分模块，否则禁止提交。
+
+以下 Rust 文件超过 ${max_rs_lines} 行：
+$(printf '  - %s\n' "${offenders[@]}")
+
+如果你确实需要临时放宽限制，可设置：
+  DB_VFS_MAX_RS_LINES=<N> git commit ...
+EOF
+  exit 1
+fi
+
 gate_script="$repo_root/scripts/gate.sh"
 if [[ ! -x "$gate_script" ]]; then
   echo "pre-commit: missing gate script: $gate_script" >&2
@@ -63,4 +89,3 @@ if [[ ! -x "$gate_script" ]]; then
 fi
 
 "$gate_script"
-

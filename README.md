@@ -121,3 +121,6 @@ Enable git hooks:
 ```bash
 git config core.hooksPath githooks
 ```
+
+The hooks enforce Conventional Commits and require `CHANGELOG.md` updates. The Rust file size guard
+can be overridden via `DB_VFS_MAX_RS_LINES=<N>`.

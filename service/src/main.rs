@@ -76,7 +76,9 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     } else {
-        let sqlite = args.sqlite.expect("clap enforces exactly one DB backend");
+        let Some(sqlite) = args.sqlite else {
+            anyhow::bail!("missing --sqlite argument (clap should enforce exactly one DB backend)");
+        };
         db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;

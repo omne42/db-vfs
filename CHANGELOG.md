@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
+- Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
 
 ### Changed
 
@@ -44,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
+- `db-vfs-service`: avoid panic on invalid/missing DB backend args.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.
