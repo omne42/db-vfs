@@ -324,6 +324,7 @@ dependencies = [
  "r2d2_postgres",
  "r2d2_sqlite",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

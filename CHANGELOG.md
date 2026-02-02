@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: validate bearer token before parsing JSON request bodies.
 - `db-vfs-service`: use r2d2 connection pooling for SQLite/Postgres stores.
 - `db-vfs-service`: apply request timeouts for IO endpoints and set Postgres `statement_timeout`.
+- `db-vfs-service`: apply a small service timeout headroom over `limits.max_io_ms` (to allow DB timeouts to fire first).
 - `db-vfs-service`: add per-IP token-bucket rate limiting middleware.
 - `db-vfs-service`: restrict `--unsafe-no-auth` to loopback binds by default.
 - Policy: `auth.tokens[].token` now requires `sha256:<64 hex chars>` (use `token_env_var` for plaintext tokens).
@@ -46,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
 - `db-vfs-service`: avoid panic on invalid/missing DB backend args.
+- `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.

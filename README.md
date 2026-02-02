@@ -58,7 +58,9 @@ Notes:
 - Scan traversal skipping is controlled by policy `traversal`:
   - `traversal.skip_globs` (performance only; does not deny direct access)
 - Timeout semantics:
-  - Timeouts are best-effort wall-clock budgets at the service layer; a timed-out request may return early while the underlying blocking DB work continues briefly in the background (especially for SQLite).
+  - Timeouts are best-effort wall-clock budgets at the service layer.
+  - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
+  - A timed-out request may still return early while some cleanup continues briefly in the background.
 - Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
 
 ### SQLite

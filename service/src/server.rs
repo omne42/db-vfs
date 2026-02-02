@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -56,21 +56,40 @@ enum BackendStore {
     Postgres(Box<PostgresStore<PostgresConn>>),
 }
 
+enum CancelHandle {
+    Sqlite(rusqlite::InterruptHandle),
+}
+
+impl CancelHandle {
+    fn cancel(&self) {
+        match self {
+            CancelHandle::Sqlite(handle) => handle.interrupt(),
+        }
+    }
+}
+
 impl BackendStore {
-    fn open(backend: Backend) -> db_vfs::Result<Self> {
+    fn open(backend: Backend) -> db_vfs::Result<(Self, Option<CancelHandle>)> {
         match backend {
             Backend::Sqlite { pool } => {
                 let conn = pool
                     .get()
                     .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                Ok(Self::Sqlite(Box::new(SqliteStore::from_connection(conn))))
+                let cancel = Some(CancelHandle::Sqlite(conn.get_interrupt_handle()));
+                Ok((
+                    Self::Sqlite(Box::new(SqliteStore::from_connection(conn))),
+                    cancel,
+                ))
             }
             #[cfg(feature = "postgres")]
             Backend::Postgres { pool } => {
                 let client = pool
                     .get()
                     .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                Ok(Self::Postgres(Box::new(PostgresStore::from_client(client))))
+                Ok((
+                    Self::Postgres(Box::new(PostgresStore::from_client(client))),
+                    None,
+                ))
             }
         }
     }
@@ -670,7 +689,7 @@ pub fn build_app(
 }
 
 fn io_timeout(policy: &VfsPolicy) -> Duration {
-    Duration::from_millis(policy.limits.max_io_ms)
+    Duration::from_millis(policy.limits.max_io_ms.saturating_add(250))
 }
 
 fn scan_timeout(policy: &VfsPolicy) -> Option<Duration> {
@@ -682,6 +701,7 @@ fn scan_timeout(policy: &VfsPolicy) -> Option<Duration> {
 
 async fn run_blocking<T>(
     timeout: Option<Duration>,
+    cancel: Option<Arc<Mutex<Option<CancelHandle>>>>,
     f: impl FnOnce() -> db_vfs::Result<T> + Send + 'static,
 ) -> Result<T, (StatusCode, Json<ErrorBody>)>
 where
@@ -694,6 +714,12 @@ where
         tokio::select! {
             res = &mut handle => res,
             _ = &mut sleep => {
+                if let Some(cancel) = cancel
+                    && let Ok(mut slot) = cancel.lock()
+                    && let Some(handle) = slot.take()
+                {
+                    handle.cancel();
+                }
                 handle.abort();
                 tracing::warn!(timeout_ms = timeout.as_millis() as u64, "db-vfs request timed out");
                 return Err(err(StatusCode::REQUEST_TIMEOUT, "timeout", "request timed out"));
@@ -721,12 +747,25 @@ where
     let redactor = state.inner.redactor.clone();
     let traversal = state.inner.traversal.clone();
 
-    run_blocking(timeout, move || -> db_vfs::Result<T> {
-        let _permit = permit;
-        let store = BackendStore::open(backend)?;
-        let mut vfs = DbVfs::new_with_matchers(store, policy, redactor, traversal)?;
-        op(&mut vfs)
-    })
+    let cancel = Arc::new(Mutex::new(None::<CancelHandle>));
+    let cancel_for_timeout = cancel.clone();
+    let cancel_for_worker = cancel.clone();
+
+    run_blocking(
+        timeout,
+        Some(cancel_for_timeout),
+        move || -> db_vfs::Result<T> {
+            let _permit = permit;
+            let (store, cancel_handle) = BackendStore::open(backend)?;
+            if let Some(cancel_handle) = cancel_handle
+                && let Ok(mut slot) = cancel_for_worker.lock()
+            {
+                *slot = Some(cancel_handle);
+            }
+            let mut vfs = DbVfs::new_with_matchers(store, policy, redactor, traversal)?;
+            op(&mut vfs)
+        },
+    )
     .await
 }
 

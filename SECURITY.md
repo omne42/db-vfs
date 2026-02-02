@@ -43,7 +43,8 @@ mitigations (load balancers, WAF, reverse proxy rate limits, etc.).
 ## Timeout semantics
 
 Service-layer timeouts return early to the client, but the underlying blocking DB operation may
-continue briefly in the background (especially for SQLite). Treat timeouts as a *budgeting* and
+continue briefly in the background. For SQLite, the service attempts to interrupt in-flight queries
+on timeout; for Postgres, `statement_timeout` is configured. Treat timeouts as a *budgeting* and
 *backpressure* mechanism, not a hard cancel.
 
 ## Path probing side-channels
@@ -60,4 +61,3 @@ If you discover a security issue, please open an issue with:
 - Minimal reproduction
 - Expected vs actual behavior
 - Environment details (OS, Rust toolchain, DB backend)
-
