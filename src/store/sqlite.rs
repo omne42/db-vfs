@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 
@@ -7,20 +8,26 @@ use db_vfs_core::{Error, Result};
 
 use super::{DeleteOutcome, FileMeta, FileRecord, Store, db_err, make_prefix_bounds};
 
-pub struct SqliteStore {
-    conn: rusqlite::Connection,
+pub struct SqliteStoreWithConn<C> {
+    conn: C,
 }
 
-impl SqliteStore {
+pub type SqliteStore<C = Box<rusqlite::Connection>> = SqliteStoreWithConn<C>;
+
+impl SqliteStoreWithConn<Box<rusqlite::Connection>> {
     pub fn new(conn: rusqlite::Connection) -> Result<Self> {
         let _ = conn.busy_timeout(Duration::from_secs(5));
         crate::migrations::migrate_sqlite(&conn).map_err(db_err)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Box::new(conn),
+        })
     }
 
     pub fn new_no_migrate(conn: rusqlite::Connection) -> Result<Self> {
         let _ = conn.busy_timeout(Duration::from_secs(5));
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Box::new(conn),
+        })
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -39,7 +46,16 @@ impl SqliteStore {
     }
 }
 
-impl Store for SqliteStore {
+impl<C> SqliteStoreWithConn<C> {
+    pub fn from_connection(conn: C) -> Self {
+        Self { conn }
+    }
+}
+
+impl<C> Store for SqliteStoreWithConn<C>
+where
+    C: Deref<Target = rusqlite::Connection>,
+{
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let mut stmt = self
             .conn

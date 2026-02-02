@@ -6,7 +6,7 @@ description = "HTTP service for db-vfs (SQLite/Postgres-backed virtual filesyste
 
 [features]
 default = []
-postgres = ["db-vfs/postgres"]
+postgres = ["db-vfs/postgres", "dep:r2d2_postgres"]
 
 [dependencies]
 anyhow = "1"
@@ -14,8 +14,13 @@ axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 db-vfs = { path = "..", features = ["sqlite"] }
 db-vfs-core = { path = "../core" }
+hex = "0.4"
+r2d2 = "0.8"
+r2d2_postgres = { version = "0.18", optional = true }
+r2d2_sqlite = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
 tracing = "0.1"

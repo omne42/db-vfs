@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::Error;
 use crate::Result;
@@ -42,6 +43,15 @@ pub struct Limits {
     pub max_walk_ms: Option<u64>,
     #[serde(default = "default_max_line_bytes")]
     pub max_line_bytes: usize,
+    /// Max in-flight non-scan requests (read/write/patch/delete).
+    #[serde(default = "default_max_concurrency_io")]
+    pub max_concurrency_io: usize,
+    /// Max in-flight scan requests (glob/grep).
+    #[serde(default = "default_max_concurrency_scan")]
+    pub max_concurrency_scan: usize,
+    /// Max DB connections in the service pool.
+    #[serde(default = "default_max_db_connections")]
+    pub max_db_connections: u32,
 }
 
 const fn default_max_read_bytes() -> u64 {
@@ -68,6 +78,18 @@ const fn default_max_line_bytes() -> usize {
     4096
 }
 
+const fn default_max_concurrency_io() -> usize {
+    16
+}
+
+const fn default_max_concurrency_scan() -> usize {
+    8
+}
+
+const fn default_max_db_connections() -> u32 {
+    16
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -79,6 +101,9 @@ impl Default for Limits {
             max_walk_files: default_max_walk_files(),
             max_walk_ms: None,
             max_line_bytes: default_max_line_bytes(),
+            max_concurrency_io: default_max_concurrency_io(),
+            max_concurrency_scan: default_max_concurrency_scan(),
+            max_db_connections: default_max_db_connections(),
         }
     }
 }
@@ -126,12 +151,21 @@ pub struct AuthPolicy {
     pub tokens: Vec<AuthToken>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthToken {
     pub token: String,
     #[serde(default)]
     pub allowed_workspaces: Vec<String>,
+}
+
+impl fmt::Debug for AuthToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthToken")
+            .field("token", &"<redacted>")
+            .field("allowed_workspaces", &self.allowed_workspaces)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -186,6 +220,26 @@ impl VfsPolicy {
                 "limits.max_line_bytes must be > 0".to_string(),
             ));
         }
+        if self.limits.max_concurrency_io == 0 {
+            return Err(Error::InvalidPolicy(
+                "limits.max_concurrency_io must be > 0".to_string(),
+            ));
+        }
+        if self.limits.max_concurrency_scan == 0 {
+            return Err(Error::InvalidPolicy(
+                "limits.max_concurrency_scan must be > 0".to_string(),
+            ));
+        }
+        if self.limits.max_db_connections == 0 {
+            return Err(Error::InvalidPolicy(
+                "limits.max_db_connections must be > 0".to_string(),
+            ));
+        }
+        if self.limits.max_db_connections > 1024 {
+            return Err(Error::InvalidPolicy(
+                "limits.max_db_connections is too large (max 1024)".to_string(),
+            ));
+        }
 
         if self.auth.tokens.len() > 256 {
             return Err(Error::InvalidPolicy(
@@ -196,6 +250,18 @@ impl VfsPolicy {
             if rule.token.trim().is_empty() {
                 return Err(Error::InvalidPolicy(format!(
                     "auth.tokens[{idx}].token must be non-empty"
+                )));
+            }
+            if rule.token.len() > 4096 {
+                return Err(Error::InvalidPolicy(format!(
+                    "auth.tokens[{idx}].token is too large (max 4096 bytes)"
+                )));
+            }
+            if let Some(hex) = rule.token.strip_prefix("sha256:")
+                && (hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+            {
+                return Err(Error::InvalidPolicy(format!(
+                    "auth.tokens[{idx}].token must be sha256:<64 hex chars>"
                 )));
             }
             if rule.allowed_workspaces.is_empty() {

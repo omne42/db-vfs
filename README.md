@@ -37,6 +37,17 @@ By default the service requires an auth token configured in the policy file (`[a
 token can be restricted to a workspace allowlist. For local development only, you can run with
 `--unsafe-no-auth`.
 
+Notes:
+
+- Token values can be plaintext or a SHA-256 hash: `sha256:<64 hex chars>` (recommended for stored policies).
+- Request tracing uses `x-request-id`:
+  - If the client sets it, the service echoes it back.
+  - Otherwise the service generates one and returns it in the response headers.
+- Concurrency and pooling are controlled by policy `limits`:
+  - `max_concurrency_io` (read/write/patch/delete)
+  - `max_concurrency_scan` (glob/grep)
+  - `max_db_connections` (SQLite/Postgres pool size)
+
 ### SQLite
 
 Run:

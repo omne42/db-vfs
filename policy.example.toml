@@ -17,6 +17,9 @@ allow_full_scan = false
 # - prefix: "team1-*"
 # - all: "*"
 #
+# Token values can be plaintext or a SHA-256 hash:
+#   token = "sha256:<64 hex chars>"
+#
 # NOTE: don't commit real tokens.
 [auth]
 [[auth.tokens]]
@@ -33,6 +36,9 @@ allowed_workspaces = ["*"]
 # max_walk_entries = 500000
 # max_walk_ms = 2000
 # max_line_bytes = 4096
+# max_concurrency_io = 16
+# max_concurrency_scan = 8
+# max_db_connections = 16
 
 # Secrets are enabled by default in code, but can be customized here:
 #

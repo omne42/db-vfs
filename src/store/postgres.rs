@@ -1,19 +1,27 @@
 use db_vfs_core::{Error, Result};
 
+use std::ops::DerefMut;
+
 use super::{DeleteOutcome, FileMeta, FileRecord, Store, db_err, make_prefix_bounds};
 
-pub struct PostgresStore {
-    client: postgres::Client,
+pub struct PostgresStoreWithClient<C> {
+    client: C,
 }
 
-impl PostgresStore {
+pub type PostgresStore<C = Box<postgres::Client>> = PostgresStoreWithClient<C>;
+
+impl PostgresStoreWithClient<Box<postgres::Client>> {
     pub fn new(mut client: postgres::Client) -> Result<Self> {
         crate::migrations::migrate_postgres(&mut client).map_err(db_err)?;
-        Ok(Self { client })
+        Ok(Self {
+            client: Box::new(client),
+        })
     }
 
     pub fn new_no_migrate(client: postgres::Client) -> Result<Self> {
-        Ok(Self { client })
+        Ok(Self {
+            client: Box::new(client),
+        })
     }
 
     pub fn connect(url: &str) -> Result<Self> {
@@ -27,7 +35,16 @@ impl PostgresStore {
     }
 }
 
-impl Store for PostgresStore {
+impl<C> PostgresStoreWithClient<C> {
+    pub fn from_client(client: C) -> Self {
+        Self { client }
+    }
+}
+
+impl<C> Store for PostgresStoreWithClient<C>
+where
+    C: DerefMut<Target = postgres::Client>,
+{
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let row = self
             .client
