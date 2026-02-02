@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: apply a small service timeout headroom over `limits.max_io_ms` (to allow DB timeouts to fire first).
 - `db-vfs-service`: add per-IP token-bucket rate limiting middleware.
 - `db-vfs-service`: restrict `--unsafe-no-auth` to loopback binds by default.
+- `db-vfs-service`: refactor server module into submodules to keep Rust files small.
 - Policy: `auth.tokens[].token` now requires `sha256:<64 hex chars>` (use `token_env_var` for plaintext tokens).
 - `db-vfs-core`: expand default `secrets.deny_globs` (e.g. `.omne_agent_data/**`, `.ssh/**`, `.aws/**`, `.kube/**`).
 - `db-vfs-service`: bound the in-memory rate limiter map to avoid unbounded growth.
@@ -48,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
 - `db-vfs-service`: avoid panic on invalid/missing DB backend args.
 - `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
+- `db-vfs-service`: avoid blocking the async runtime when attempting SQLite timeout interrupts.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.
