@@ -55,6 +55,10 @@ Notes:
   - `max_requests_per_ip_per_sec`
   - `max_requests_burst_per_ip`
   - Note: the limiter uses the TCP peer address (it does not parse `x-forwarded-for`), so configure it appropriately when running behind a reverse proxy.
+- Scan traversal skipping is controlled by policy `traversal`:
+  - `traversal.skip_globs` (performance only; does not deny direct access)
+- Timeout semantics:
+  - Timeouts are best-effort wall-clock budgets at the service layer; a timed-out request may return early while the underlying blocking DB work continues briefly in the background (especially for SQLite).
 - Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
 
 ### SQLite

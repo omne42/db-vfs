@@ -7,7 +7,9 @@ use db_vfs::store::sqlite::SqliteStore;
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
-use db_vfs_core::policy::{AuthPolicy, Limits, Permissions, SecretRules, VfsPolicy};
+use db_vfs_core::policy::{
+    AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
+};
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -33,6 +35,7 @@ fn policy_all_perms() -> VfsPolicy {
         },
         limits: Limits::default(),
         secrets: SecretRules::default(),
+        traversal: TraversalRules::default(),
         auth: AuthPolicy::default(),
     }
 }
@@ -231,6 +234,7 @@ fn deny_globs_hide_descendants_via_probe() {
             deny_globs: vec!["dir/*".to_string()],
             ..SecretRules::default()
         },
+        traversal: TraversalRules::default(),
         auth: AuthPolicy::default(),
     };
 
@@ -253,4 +257,67 @@ fn deny_globs_hide_descendants_via_probe() {
         })
         .unwrap();
     assert!(listed.matches.is_empty());
+    assert_eq!(listed.scanned_files, 0);
+    assert!(listed.scanned_entries > 0);
+}
+
+#[test]
+fn traversal_skip_globs_do_not_affect_direct_read() {
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.traversal.skip_globs = vec!["node_modules/*".to_string()];
+    let mut vfs = open_vfs(policy);
+
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "keep.txt".to_string(),
+        content: "keep\n".to_string(),
+        expected_version: None,
+    })
+    .unwrap();
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "node_modules/skip.txt".to_string(),
+        content: "skip\n".to_string(),
+        expected_version: None,
+    })
+    .unwrap();
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "node_modules/sub/keep2.txt".to_string(),
+        content: "keep\n".to_string(),
+        expected_version: None,
+    })
+    .unwrap();
+
+    let globbed = vfs
+        .glob(GlobRequest {
+            workspace_id: "ws".to_string(),
+            pattern: "**/*.txt".to_string(),
+            path_prefix: Some("".to_string()),
+        })
+        .unwrap();
+    assert_eq!(globbed.matches, vec!["keep.txt".to_string()]);
+
+    let grepped = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "keep".to_string(),
+            regex: false,
+            glob: None,
+            path_prefix: Some("".to_string()),
+        })
+        .unwrap();
+    assert_eq!(grepped.matches.len(), 1);
+    assert_eq!(grepped.matches[0].path, "keep.txt");
+
+    let read = vfs
+        .read(ReadRequest {
+            workspace_id: "ws".to_string(),
+            path: "node_modules/skip.txt".to_string(),
+            start_line: None,
+            end_line: None,
+        })
+        .unwrap();
+    assert_eq!(read.content, "skip\n");
 }

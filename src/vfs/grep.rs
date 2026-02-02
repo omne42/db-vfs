@@ -154,6 +154,10 @@ pub(super) fn grep<S: crate::store::Store>(
             break;
         }
 
+        if vfs.traversal.is_path_skipped(&meta.path) {
+            continue;
+        }
+
         if vfs.redactor.is_path_denied(&meta.path) {
             continue;
         }

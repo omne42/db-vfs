@@ -66,6 +66,11 @@ pub struct Limits {
     /// - `0` disables rate limiting (must match `max_requests_per_ip_per_sec = 0`).
     #[serde(default = "default_max_requests_burst_per_ip")]
     pub max_requests_burst_per_ip: u32,
+    /// Max number of distinct IPs tracked by the per-IP rate limiter.
+    ///
+    /// When `max_requests_per_ip_per_sec > 0`, this must be > 0.
+    #[serde(default = "default_max_rate_limit_ips")]
+    pub max_rate_limit_ips: u32,
 }
 
 const fn default_max_read_bytes() -> u64 {
@@ -116,6 +121,10 @@ const fn default_max_requests_burst_per_ip() -> u32 {
     200
 }
 
+const fn default_max_rate_limit_ips() -> u32 {
+    65_536
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -133,8 +142,19 @@ impl Default for Limits {
             max_db_connections: default_max_db_connections(),
             max_requests_per_ip_per_sec: default_max_requests_per_ip_per_sec(),
             max_requests_burst_per_ip: default_max_requests_burst_per_ip(),
+            max_rate_limit_ips: default_max_rate_limit_ips(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TraversalRules {
+    /// Glob patterns that should be skipped during scan traversal (`glob`/`grep`) for performance.
+    ///
+    /// Unlike `secrets.deny_globs`, this does **not** deny direct access to the path.
+    #[serde(default)]
+    pub skip_globs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +259,8 @@ pub struct VfsPolicy {
     pub limits: Limits,
     #[serde(default)]
     pub secrets: SecretRules,
+    #[serde(default)]
+    pub traversal: TraversalRules,
     #[serde(default)]
     pub auth: AuthPolicy,
 }
@@ -445,6 +467,17 @@ impl VfsPolicy {
                 return Err(Error::InvalidPolicy(
                     "limits.max_requests_burst_per_ip must be >= max_requests_per_ip_per_sec"
                         .to_string(),
+                ));
+            }
+            if self.limits.max_rate_limit_ips == 0 {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_rate_limit_ips must be > 0 when max_requests_per_ip_per_sec is enabled"
+                        .to_string(),
+                ));
+            }
+            if self.limits.max_rate_limit_ips > 1_000_000 {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_rate_limit_ips is too large (max 1000000)".to_string(),
                 ));
             }
         }

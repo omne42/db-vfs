@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `limits.max_concurrency_io`, `limits.max_concurrency_scan`, and `limits.max_db_connections`.
 - Policy: `limits.max_io_ms` for service IO timeouts.
 - Policy: `limits.max_requests_per_ip_per_sec` and `limits.max_requests_burst_per_ip` for per-IP rate limiting.
+- Policy: `limits.max_rate_limit_ips` to cap tracked IPs for rate limiting.
+- Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
+- Docs: add `SECURITY.md` threat model and guidance.
 
 ### Changed
 
@@ -32,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: restrict `--unsafe-no-auth` to loopback binds by default.
 - Policy: `auth.tokens[].token` now requires `sha256:<64 hex chars>` (use `token_env_var` for plaintext tokens).
 - `db-vfs-core`: expand default `secrets.deny_globs` (e.g. `.omne_agent_data/**`, `.ssh/**`, `.aws/**`, `.kube/**`).
+- `db-vfs-service`: bound the in-memory rate limiter map to avoid unbounded growth.
 - Policy parsing: deny unknown fields (`serde(deny_unknown_fields)`).
 - `policy.example.toml`: safer defaults (no write/patch/delete; auth enabled; full scan disabled).
 - Store API: split file reads into `get_meta` + `get_content`.
@@ -46,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: validate `limits.max_io_ms` and cap request size limits to 256MB.
 - `db-vfs-service`: map `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
 - `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
+- `db-vfs`: cap `read` retries when content cannot be loaded to avoid infinite loops.
+- `glob`: report `scanned_files` separately from `scanned_entries` and respect `traversal.skip_globs`.
+- `patch`: fetch existing content using `limits.max_read_bytes` (consistent with read limits).
 - Lint: fix `clippy::large_enum_variant`.
 
 ## [0.1.0] - 2026-01-31

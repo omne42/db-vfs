@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 
 use axum::Router;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
-use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions, SecretRules, VfsPolicy};
+use db_vfs_core::policy::{
+    AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
+};
 
 const DEV_TOKEN: &str = "dev-token";
 const DEV_TOKEN_SHA256: &str =
@@ -21,6 +23,7 @@ fn policy_allow_all() -> VfsPolicy {
         },
         limits: Limits::default(),
         secrets: SecretRules::default(),
+        traversal: TraversalRules::default(),
         auth: AuthPolicy {
             tokens: vec![AuthToken {
                 token: Some(DEV_TOKEN_SHA256.to_string()),

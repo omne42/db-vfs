@@ -54,11 +54,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         return Err(Error::Conflict("version mismatch".to_string()));
     }
 
-    let max_fetch_bytes = vfs
-        .policy
-        .limits
-        .max_read_bytes
-        .max(vfs.policy.limits.max_write_bytes);
+    let max_fetch_bytes = vfs.policy.limits.max_read_bytes;
     if meta.size_bytes > max_fetch_bytes {
         return Err(Error::FileTooLarge {
             path,

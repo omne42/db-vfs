@@ -5,6 +5,8 @@ use db_vfs_core::{Error, Result};
 
 use super::DbVfs;
 
+const MAX_CONTENT_LOAD_ATTEMPTS: usize = 8;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
     pub workspace_id: String,
@@ -55,7 +57,14 @@ pub(super) fn read<S: crate::store::Store>(
                 });
             }
 
+            let mut attempts: usize = 0;
             let content = loop {
+                if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
+                    return Err(Error::Db(
+                        "file content could not be loaded (too many retries)".to_string(),
+                    ));
+                }
+                attempts += 1;
                 if meta.size_bytes > vfs.policy.limits.max_read_bytes {
                     return Err(Error::FileTooLarge {
                         path,
@@ -89,7 +98,14 @@ pub(super) fn read<S: crate::store::Store>(
                 });
             }
 
+            let mut attempts: usize = 0;
             let content = loop {
+                if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
+                    return Err(Error::Db(
+                        "file content could not be loaded (too many retries)".to_string(),
+                    ));
+                }
+                attempts += 1;
                 if meta.size_bytes > vfs.policy.limits.max_read_bytes {
                     return Err(Error::FileTooLarge {
                         path,
@@ -212,4 +228,95 @@ fn extract_line_range(
 
     let slice = &content[start_pos..end_pos];
     Ok(slice.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::store::{DeleteOutcome, FileMeta, FileRecord, Store};
+    use db_vfs_core::policy::VfsPolicy;
+
+    struct MissingContentStore {
+        meta: FileMeta,
+    }
+
+    impl Store for MissingContentStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            Ok(Some(self.meta.clone()))
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn read_fails_after_retry_cap_when_content_missing() {
+        let store = MissingContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 4,
+                version: 1,
+                updated_at_ms: 0,
+            },
+        };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "db");
+    }
 }

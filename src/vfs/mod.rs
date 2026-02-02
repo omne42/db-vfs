@@ -8,6 +8,7 @@ mod write;
 
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
+use db_vfs_core::traversal::TraversalSkipper;
 use db_vfs_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,7 @@ pub use write::{WriteRequest, WriteResponse};
 pub struct DbVfs<S> {
     policy: VfsPolicy,
     redactor: SecretRedactor,
+    traversal: TraversalSkipper,
     store: S,
 }
 
@@ -31,9 +33,11 @@ impl<S: Store> DbVfs<S> {
     pub fn new(store: S, policy: VfsPolicy) -> Result<Self> {
         policy.validate()?;
         let redactor = SecretRedactor::from_rules(&policy.secrets)?;
+        let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
             policy,
             redactor,
+            traversal,
             store,
         })
     }
@@ -44,9 +48,26 @@ impl<S: Store> DbVfs<S> {
         redactor: SecretRedactor,
     ) -> Result<Self> {
         policy.validate()?;
+        let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
             policy,
             redactor,
+            traversal,
+            store,
+        })
+    }
+
+    pub fn new_with_matchers(
+        store: S,
+        policy: VfsPolicy,
+        redactor: SecretRedactor,
+        traversal: TraversalSkipper,
+    ) -> Result<Self> {
+        policy.validate()?;
+        Ok(Self {
+            policy,
+            redactor,
+            traversal,
             store,
         })
     }

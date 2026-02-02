@@ -83,6 +83,7 @@ pub(super) fn glob<S: crate::store::Store>(
     };
 
     let mut matches = Vec::<String>::new();
+    let mut scanned_files: u64 = 0;
     let mut scanned_entries: u64 = 0;
     let mut scan_limit_reached = truncated_by_store_limit;
     let mut scan_limit_reason: Option<ScanLimitReason> =
@@ -95,9 +96,13 @@ pub(super) fn glob<S: crate::store::Store>(
             scan_limit_reason = Some(ScanLimitReason::Time);
             break;
         }
+        if vfs.traversal.is_path_skipped(&meta.path) {
+            continue;
+        }
         if vfs.redactor.is_path_denied(&meta.path) {
             continue;
         }
+        scanned_files = scanned_files.saturating_add(1);
         if glob_is_match(&matcher, &meta.path) {
             matches.push(meta.path);
             if matches.len() >= vfs.policy.limits.max_results {
@@ -112,7 +117,7 @@ pub(super) fn glob<S: crate::store::Store>(
     Ok(GlobResponse {
         matches,
         truncated: scan_limit_reached,
-        scanned_files: scanned_entries,
+        scanned_files,
         scan_limit_reached,
         scan_limit_reason,
         elapsed_ms: elapsed_ms(&started),

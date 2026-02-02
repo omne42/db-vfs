@@ -24,6 +24,7 @@ use db_vfs::vfs::{
 };
 use db_vfs_core::policy::{AuthToken, VfsPolicy};
 use db_vfs_core::redaction::SecretRedactor;
+use db_vfs_core::traversal::TraversalSkipper;
 
 type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 type SqliteConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
@@ -174,6 +175,7 @@ struct AppInner {
     backend: Backend,
     policy: VfsPolicy,
     redactor: SecretRedactor,
+    traversal: TraversalSkipper,
     auth: AuthMode,
     rate_limiter: RateLimiter,
     io_concurrency: Arc<tokio::sync::Semaphore>,
@@ -191,6 +193,7 @@ struct RateLimitConfig {
     enabled: bool,
     refill_per_sec: f64,
     capacity: f64,
+    max_ips: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +210,7 @@ impl RateLimiter {
             enabled,
             refill_per_sec: policy.limits.max_requests_per_ip_per_sec as f64,
             capacity: policy.limits.max_requests_burst_per_ip as f64,
+            max_ips: policy.limits.max_rate_limit_ips as usize,
         };
         Self {
             cfg,
@@ -230,6 +234,19 @@ impl RateLimiter {
 
         if buckets.len() > MAX_BUCKETS_BEFORE_PRUNE {
             buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= BUCKET_TTL);
+        }
+
+        if self.cfg.max_ips > 0 && buckets.len() >= self.cfg.max_ips && !buckets.contains_key(&ip) {
+            buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= BUCKET_TTL);
+            if buckets.len() >= self.cfg.max_ips {
+                if let Some((&victim, _)) =
+                    buckets.iter().min_by_key(|(_, bucket)| bucket.last_seen)
+                {
+                    buckets.remove(&victim);
+                } else {
+                    return false;
+                }
+            }
         }
 
         let bucket = buckets.entry(ip).or_insert(RateLimitBucket {
@@ -487,6 +504,7 @@ fn build_state(
 ) -> anyhow::Result<(AppState, usize)> {
     policy.validate().map_err(anyhow::Error::msg)?;
     let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
+    let traversal = TraversalSkipper::from_rules(&policy.traversal).map_err(anyhow::Error::msg)?;
     let io_concurrency = policy.limits.max_concurrency_io;
     let scan_concurrency = policy.limits.max_concurrency_scan;
     let rate_limiter = RateLimiter::new(&policy);
@@ -540,6 +558,7 @@ fn build_state(
             backend,
             policy,
             redactor,
+            traversal,
             auth,
             rate_limiter,
             io_concurrency: Arc::new(tokio::sync::Semaphore::new(io_concurrency)),
@@ -700,11 +719,12 @@ where
     let backend = state.inner.backend.clone();
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
+    let traversal = state.inner.traversal.clone();
 
     run_blocking(timeout, move || -> db_vfs::Result<T> {
         let _permit = permit;
         let store = BackendStore::open(backend)?;
-        let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
+        let mut vfs = DbVfs::new_with_matchers(store, policy, redactor, traversal)?;
         op(&mut vfs)
     })
     .await
@@ -879,4 +899,32 @@ async fn grep(
     let result = run_vfs(state, permit, timeout, move |vfs| vfs.grep(req)).await?;
 
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limiter_caps_tracked_ips() {
+        let policy = VfsPolicy {
+            limits: db_vfs_core::policy::Limits {
+                max_requests_per_ip_per_sec: 10,
+                max_requests_burst_per_ip: 10,
+                max_rate_limit_ips: 4,
+                ..db_vfs_core::policy::Limits::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let limiter = RateLimiter::new(&policy);
+
+        for idx in 1u8..=5 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, idx));
+            assert!(limiter.allow(Some(ip)).await);
+        }
+
+        let buckets = limiter.buckets.lock().await;
+        assert!(buckets.len() <= 4);
+        assert!(buckets.contains_key(&IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 5))));
+    }
 }
