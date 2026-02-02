@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMRD || true)"
+if [[ -z "${staged_files//[[:space:]]/}" ]]; then
+  exit 0
+fi
+
+has_changelog=0
+other_count=0
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  if [[ "$path" == "CHANGELOG.md" ]]; then
+    has_changelog=1
+  else
+    other_count=$((other_count + 1))
+  fi
+done <<<"$staged_files"
+
+if [[ "$has_changelog" -ne 1 ]]; then
+  cat >&2 <<'EOF'
+pre-commit: CHANGELOG.md must be updated in the same commit.
+
+- Add an entry under [Unreleased] in CHANGELOG.md.
+- Stage it: git add CHANGELOG.md
+EOF
+  exit 1
+fi
+
+if [[ "$other_count" -eq 0 ]]; then
+  echo "pre-commit: refusing changelog-only commit; commit the actual change together with CHANGELOG.md." >&2
+  exit 1
+fi
+
+if [[ "${DB_VFS_ALLOW_CHANGELOG_RELEASE_EDIT:-}" != "1" ]]; then
+  head_changelog="$(git show HEAD:CHANGELOG.md 2>/dev/null || true)"
+  index_changelog="$(git show :CHANGELOG.md 2>/dev/null || true)"
+
+  if [[ -n "${head_changelog}" && -n "${index_changelog}" ]]; then
+    head_released="$(printf '%s\n' "${head_changelog}" | awk 'BEGIN{s=0} /^## \\[[0-9]/{s=1} s{print}')"
+    index_released="$(printf '%s\n' "${index_changelog}" | awk 'BEGIN{s=0} /^## \\[[0-9]/{s=1} s{print}')"
+
+    if [[ "${head_released}" != "${index_released}" ]]; then
+      cat >&2 <<'EOF'
+pre-commit: refusing to modify released CHANGELOG sections.
+
+Only edit entries under [Unreleased]. Released version sections (e.g. [0.x.y]) are immutable.
+
+If you are cutting a release and intentionally updating versioned sections, re-run with:
+  DB_VFS_ALLOW_CHANGELOG_RELEASE_EDIT=1 git commit ...
+EOF
+      exit 1
+    fi
+  fi
+fi
+
+gate_script="$repo_root/scripts/gate.sh"
+if [[ ! -x "$gate_script" ]]; then
+  echo "pre-commit: missing gate script: $gate_script" >&2
+  exit 1
+fi
+
+"$gate_script"
+

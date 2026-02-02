@@ -2,6 +2,7 @@
 name = "db-vfs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "DB-backed virtual filesystem (read/glob/grep/write/patch/delete) with explicit safety policy."
 readme = "README.md"
 

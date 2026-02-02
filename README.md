@@ -107,3 +107,17 @@ curl -sS http://127.0.0.1:8080/v1/grep \
   -H "authorization: Bearer ${DB_VFS_TOKEN}" \
   -d '{"workspace_id":"w1","query":"hello","regex":false,"glob":"docs/**/*.txt","path_prefix":null}'
 ```
+
+## Development
+
+Run gates (fmt/check/clippy/test):
+
+```bash
+./scripts/gate.sh
+```
+
+Enable git hooks:
+
+```bash
+git config core.hooksPath githooks
+```
