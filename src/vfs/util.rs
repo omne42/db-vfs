@@ -4,6 +4,8 @@ use globset::{GlobSet, GlobSetBuilder};
 
 use db_vfs_core::{Error, Result};
 
+const MAX_GLOB_PATTERN_BYTES: usize = 4096;
+
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -21,6 +23,13 @@ pub(super) fn elapsed_ms(started: &Instant) -> u64 {
 }
 
 pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
+    if pattern.len() > MAX_GLOB_PATTERN_BYTES {
+        return Err(Error::InvalidPath(format!(
+            "glob pattern is too large ({} bytes; max {} bytes)",
+            pattern.len(),
+            MAX_GLOB_PATTERN_BYTES
+        )));
+    }
     let normalized = normalize_glob_pattern_for_matching(pattern);
     validate_root_relative_glob_pattern(&normalized)
         .map_err(|msg| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {msg}")))?;

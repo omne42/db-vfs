@@ -93,6 +93,13 @@ pub(super) fn grep<S: crate::store::Store>(
         ));
     }
 
+    if !request.regex && request.query.len() > MAX_GREP_REGEX_PATTERN_BYTES {
+        return Err(Error::InputTooLarge {
+            size_bytes: request.query.len() as u64,
+            max_bytes: MAX_GREP_REGEX_PATTERN_BYTES as u64,
+        });
+    }
+
     let regex = if request.regex {
         if request.query.len() > MAX_GREP_REGEX_PATTERN_BYTES {
             return Err(Error::InvalidRegex(format!(

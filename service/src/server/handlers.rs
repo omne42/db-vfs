@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -6,6 +9,34 @@ use db_vfs::vfs::{
     DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
     PatchRequest, PatchResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
+
+async fn acquire_permit_with_budget(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    budget: Option<Duration>,
+) -> Result<
+    (tokio::sync::OwnedSemaphorePermit, Option<Duration>),
+    (StatusCode, Json<super::ErrorBody>),
+> {
+    match budget {
+        Some(budget) => {
+            let deadline = tokio::time::Instant::now() + budget;
+            let permit = tokio::time::timeout_at(deadline, semaphore.acquire_owned())
+                .await
+                .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?
+                .map_err(|_| {
+                    super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
+                })?;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            Ok((permit, Some(remaining)))
+        }
+        None => {
+            let permit = semaphore.acquire_owned().await.map_err(|_| {
+                super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
+            })?;
+            Ok((permit, None))
+        }
+    }
+}
 
 pub(super) async fn read(
     State(state): State<super::AppState>,
@@ -21,16 +52,12 @@ pub(super) async fn read(
         ));
     }
 
-    let permit = state
-        .inner
-        .io_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = Some(super::runner::io_timeout(&state.inner.policy));
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| vfs.read(req)).await?;
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.io_concurrency.clone(),
+        Some(super::runner::io_timeout(&state.inner.policy)),
+    )
+    .await?;
+    let result = super::runner::run_vfs(state, permit, remaining, move |vfs| vfs.read(req)).await?;
 
     Ok(Json(result))
 }
@@ -49,16 +76,13 @@ pub(super) async fn write(
         ));
     }
 
-    let permit = state
-        .inner
-        .io_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = Some(super::runner::io_timeout(&state.inner.policy));
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| vfs.write(req)).await?;
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.io_concurrency.clone(),
+        Some(super::runner::io_timeout(&state.inner.policy)),
+    )
+    .await?;
+    let result =
+        super::runner::run_vfs(state, permit, remaining, move |vfs| vfs.write(req)).await?;
 
     Ok(Json(result))
 }
@@ -77,16 +101,12 @@ pub(super) async fn patch(
         ));
     }
 
-    let permit = state
-        .inner
-        .io_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = Some(super::runner::io_timeout(&state.inner.policy));
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| {
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.io_concurrency.clone(),
+        Some(super::runner::io_timeout(&state.inner.policy)),
+    )
+    .await?;
+    let result = super::runner::run_vfs(state, permit, remaining, move |vfs| {
         vfs.apply_unified_patch(req)
     })
     .await?;
@@ -108,16 +128,13 @@ pub(super) async fn delete(
         ));
     }
 
-    let permit = state
-        .inner
-        .io_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = Some(super::runner::io_timeout(&state.inner.policy));
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| vfs.delete(req)).await?;
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.io_concurrency.clone(),
+        Some(super::runner::io_timeout(&state.inner.policy)),
+    )
+    .await?;
+    let result =
+        super::runner::run_vfs(state, permit, remaining, move |vfs| vfs.delete(req)).await?;
 
     Ok(Json(result))
 }
@@ -136,16 +153,12 @@ pub(super) async fn glob(
         ));
     }
 
-    let permit = state
-        .inner
-        .scan_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = super::runner::scan_timeout(&state.inner.policy);
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| vfs.glob(req)).await?;
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.scan_concurrency.clone(),
+        super::runner::scan_timeout(&state.inner.policy),
+    )
+    .await?;
+    let result = super::runner::run_vfs(state, permit, remaining, move |vfs| vfs.glob(req)).await?;
 
     Ok(Json(result))
 }
@@ -164,16 +177,12 @@ pub(super) async fn grep(
         ));
     }
 
-    let permit = state
-        .inner
-        .scan_concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
-
-    let timeout = super::runner::scan_timeout(&state.inner.policy);
-    let result = super::runner::run_vfs(state, permit, timeout, move |vfs| vfs.grep(req)).await?;
+    let (permit, remaining) = acquire_permit_with_budget(
+        state.inner.scan_concurrency.clone(),
+        super::runner::scan_timeout(&state.inner.policy),
+    )
+    .await?;
+    let result = super::runner::run_vfs(state, permit, remaining, move |vfs| vfs.grep(req)).await?;
 
     Ok(Json(result))
 }

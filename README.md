@@ -59,6 +59,7 @@ Notes:
   - `traversal.skip_globs` (performance only; does not deny direct access)
 - Timeout semantics:
   - Timeouts are best-effort wall-clock budgets at the service layer.
+  - Timeouts include time spent waiting for the service concurrency semaphores; under sustained load a request may fail with `503 busy` rather than wait indefinitely.
   - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
   - A timed-out request may still return early while some cleanup continues briefly in the background.
 - Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.

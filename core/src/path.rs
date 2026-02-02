@@ -45,7 +45,22 @@ enum PathKind {
 }
 
 fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
-    let mut s = input.trim().replace('\\', "/");
+    const MAX_PATH_BYTES: usize = 4096;
+
+    let trimmed = input.trim();
+    let label = match kind {
+        PathKind::File => "path",
+        PathKind::Prefix => "path_prefix",
+    };
+    if trimmed.len() > MAX_PATH_BYTES {
+        return Err(Error::InvalidPath(format!(
+            "{label} is too large ({} bytes; max {} bytes)",
+            trimmed.len(),
+            MAX_PATH_BYTES
+        )));
+    }
+
+    let mut s = trimmed.replace('\\', "/");
     while s.starts_with("./") {
         s.drain(..2);
     }

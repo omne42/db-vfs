@@ -50,10 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: avoid panic on invalid/missing DB backend args.
 - `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
 - `db-vfs-service`: avoid blocking the async runtime when attempting SQLite timeout interrupts.
+- `db-vfs-service`: include semaphore queueing time in request timeouts (avoid unbounded waits under load).
+- `db-vfs-service`: ensure SQLite interrupts are still requested even if timeout races cancel-handle installation.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.
 - `db-vfs-service`: hash bearer tokens once and compare in constant time; avoid retaining plaintext tokens.
+- `db-vfs-core`: cap `path`/`path_prefix`, glob patterns, and grep queries to avoid oversized input allocations.
 - Policy: validate `limits.max_io_ms` and cap request size limits to 256MB.
 - `db-vfs-service`: map `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
 - `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
