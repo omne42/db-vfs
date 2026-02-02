@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `db-vfs-service`: optional Postgres backend via `--postgres` (build with `--features postgres`).
 - Policy: `auth` section with bearer tokens + per-token workspace allowlist.
+- Policy: `auth.tokens[].token_env_var` to load a plaintext token from an environment variable at runtime.
 - Policy: `auth.tokens[].token = "sha256:<64 hex>"` for storing hashed tokens.
 - Policy: `permissions.allow_full_scan` to gate `path_prefix = ""` scans for `glob`/`grep`.
 - `db-vfs-service`: `--unsafe-no-auth` for local development.
 - Policy: `limits.max_concurrency_io`, `limits.max_concurrency_scan`, and `limits.max_db_connections`.
 - Policy: `limits.max_io_ms` for service IO timeouts.
+- Policy: `limits.max_requests_per_ip_per_sec` and `limits.max_requests_burst_per_ip` for per-IP rate limiting.
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 
 ### Changed
@@ -26,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: validate bearer token before parsing JSON request bodies.
 - `db-vfs-service`: use r2d2 connection pooling for SQLite/Postgres stores.
 - `db-vfs-service`: apply request timeouts for IO endpoints and set Postgres `statement_timeout`.
-- `db-vfs-core`: default `secrets.deny_globs` also denies `.omne_agent_data/**`.
+- `db-vfs-service`: add per-IP token-bucket rate limiting middleware.
+- `db-vfs-service`: restrict `--unsafe-no-auth` to loopback binds by default.
+- Policy: `auth.tokens[].token` now requires `sha256:<64 hex chars>` (use `token_env_var` for plaintext tokens).
+- `db-vfs-core`: expand default `secrets.deny_globs` (e.g. `.omne_agent_data/**`, `.ssh/**`, `.aws/**`, `.kube/**`).
 - Policy parsing: deny unknown fields (`serde(deny_unknown_fields)`).
 - `policy.example.toml`: safer defaults (no write/patch/delete; auth enabled; full scan disabled).
 - Store API: split file reads into `get_meta` + `get_content`.

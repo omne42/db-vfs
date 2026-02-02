@@ -17,33 +17,31 @@ allow_full_scan = false
 # - prefix: "team1-*"
 # - all: "*"
 #
-# Token values can be plaintext or a SHA-256 hash:
-#   token = "sha256:<64 hex chars>"
+# Token values can be provided as plaintext (via env var) or stored as a SHA-256 hash:
+# - Prefer storing only a SHA-256 hash in committed policies:
+#     token = "sha256:<64 hex chars>"
+# - Or load a plaintext token from an environment variable at runtime:
+#     token_env_var = "DB_VFS_TOKEN"
 #
 # NOTE: don't commit real tokens.
 [auth]
 [[auth.tokens]]
-token = "CHANGE_ME"
+token_env_var = "DB_VFS_TOKEN"
 allowed_workspaces = ["*"]
 
 # All limits have defaults; override as needed.
 #
-# [limits]
-# max_read_bytes = 1048576
-# max_write_bytes = 1048576
-# max_results = 2000
-# max_walk_files = 200000
-# max_walk_entries = 500000
-# max_walk_ms = 2000
-# max_line_bytes = 4096
-# max_io_ms = 30000
-# max_concurrency_io = 16
-# max_concurrency_scan = 8
-# max_db_connections = 16
+[limits]
+# Recommended for production-ish deployments:
+max_walk_ms = 2000
+
+# Per-IP token-bucket rate limiting (set 0/0 to disable).
+max_requests_per_ip_per_sec = 100
+max_requests_burst_per_ip = 200
 
 # Secrets are enabled by default in code, but can be customized here:
 #
 # [secrets]
-# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".omne_agent_data/**", "**/.omne_agent_data/**"]
+# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".ssh/**", "**/.ssh/**", ".aws/**", "**/.aws/**", ".kube/**", "**/.kube/**", ".npmrc", "**/.npmrc", ".netrc", "**/.netrc", ".pypirc", "**/.pypirc", ".cargo/credentials", "**/.cargo/credentials", ".docker/config.json", "**/.docker/config.json", ".omne_agent_data/**", "**/.omne_agent_data/**"]
 # redact_regexes = []
 # replacement = "***REDACTED***"

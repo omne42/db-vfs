@@ -39,7 +39,10 @@ token can be restricted to a workspace allowlist. For local development only, yo
 
 Notes:
 
-- Token values can be plaintext or a SHA-256 hash: `sha256:<64 hex chars>` (recommended for stored policies).
+- Auth tokens:
+  - Prefer storing only a hash in the policy: `sha256:<64 hex chars>`.
+  - Or load a plaintext token from an environment variable: `auth.tokens[].token_env_var = "DB_VFS_TOKEN"`.
+  - `--unsafe-no-auth` is restricted to loopback binds by default; use `--unsafe-no-auth-allow-non-loopback` only if you fully understand the risk.
 - Request tracing uses `x-request-id`:
   - If the client sets it, the service echoes it back.
   - Otherwise the service generates one and returns it in the response headers.
@@ -48,7 +51,11 @@ Notes:
   - `max_concurrency_scan` (glob/grep)
   - `max_db_connections` (SQLite/Postgres pool size)
   - `max_io_ms` (service timeout for read/write/patch/delete; also used for Postgres `statement_timeout`)
-- Secrets are denied by default (e.g. `.env`, `.git/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
+- Rate limiting is controlled by policy `limits`:
+  - `max_requests_per_ip_per_sec`
+  - `max_requests_burst_per_ip`
+  - Note: the limiter uses the TCP peer address (it does not parse `x-forwarded-for`), so configure it appropriately when running behind a reverse proxy.
+- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
 
 ### SQLite
 
@@ -88,11 +95,11 @@ Minimal example:
 ```bash
 curl -sS http://127.0.0.1:8080/v1/write \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer CHANGE_ME' \
+  -H "authorization: Bearer ${DB_VFS_TOKEN}" \
   -d '{"workspace_id":"w1","path":"docs/a.txt","content":"hello","expected_version":null}'
 
 curl -sS http://127.0.0.1:8080/v1/grep \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer CHANGE_ME' \
+  -H "authorization: Bearer ${DB_VFS_TOKEN}" \
   -d '{"workspace_id":"w1","query":"hello","regex":false,"glob":"docs/**/*.txt","path_prefix":null}'
 ```

@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -15,6 +17,7 @@ use tracing::Instrument;
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
 use db_vfs::store::sqlite::SqliteStore;
+use db_vfs::store::{DeleteOutcome, FileMeta, FileRecord, Store};
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
     PatchRequest, PatchResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
@@ -23,10 +26,15 @@ use db_vfs_core::policy::{AuthToken, VfsPolicy};
 use db_vfs_core::redaction::SecretRedactor;
 
 type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
+type SqliteConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 #[cfg(feature = "postgres")]
 type PostgresPool =
     r2d2::Pool<r2d2_postgres::PostgresConnectionManager<r2d2_postgres::postgres::NoTls>>;
+#[cfg(feature = "postgres")]
+type PostgresConn = r2d2::PooledConnection<
+    r2d2_postgres::PostgresConnectionManager<r2d2_postgres::postgres::NoTls>,
+>;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,6 +49,122 @@ enum Backend {
     },
 }
 
+enum BackendStore {
+    Sqlite(Box<SqliteStore<SqliteConn>>),
+    #[cfg(feature = "postgres")]
+    Postgres(Box<PostgresStore<PostgresConn>>),
+}
+
+impl BackendStore {
+    fn open(backend: Backend) -> db_vfs::Result<Self> {
+        match backend {
+            Backend::Sqlite { pool } => {
+                let conn = pool
+                    .get()
+                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
+                Ok(Self::Sqlite(Box::new(SqliteStore::from_connection(conn))))
+            }
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { pool } => {
+                let client = pool
+                    .get()
+                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
+                Ok(Self::Postgres(Box::new(PostgresStore::from_client(client))))
+            }
+        }
+    }
+}
+
+impl Store for BackendStore {
+    fn get_meta(&mut self, workspace_id: &str, path: &str) -> db_vfs::Result<Option<FileMeta>> {
+        match self {
+            BackendStore::Sqlite(store) => store.get_meta(workspace_id, path),
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => store.get_meta(workspace_id, path),
+        }
+    }
+
+    fn get_content(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+    ) -> db_vfs::Result<Option<String>> {
+        match self {
+            BackendStore::Sqlite(store) => store.get_content(workspace_id, path, version),
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => store.get_content(workspace_id, path, version),
+        }
+    }
+
+    fn insert_file_new(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        content: &str,
+        now_ms: u64,
+    ) -> db_vfs::Result<FileRecord> {
+        match self {
+            BackendStore::Sqlite(store) => {
+                store.insert_file_new(workspace_id, path, content, now_ms)
+            }
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => {
+                store.insert_file_new(workspace_id, path, content, now_ms)
+            }
+        }
+    }
+
+    fn update_file_cas(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        content: &str,
+        expected_version: u64,
+        now_ms: u64,
+    ) -> db_vfs::Result<FileRecord> {
+        match self {
+            BackendStore::Sqlite(store) => {
+                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
+            }
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => {
+                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
+            }
+        }
+    }
+
+    fn delete_file(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        expected_version: Option<u64>,
+    ) -> db_vfs::Result<DeleteOutcome> {
+        match self {
+            BackendStore::Sqlite(store) => store.delete_file(workspace_id, path, expected_version),
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => {
+                store.delete_file(workspace_id, path, expected_version)
+            }
+        }
+    }
+
+    fn list_metas_by_prefix(
+        &mut self,
+        workspace_id: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> db_vfs::Result<Vec<FileMeta>> {
+        match self {
+            BackendStore::Sqlite(store) => store.list_metas_by_prefix(workspace_id, prefix, limit),
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => {
+                store.list_metas_by_prefix(workspace_id, prefix, limit)
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     inner: Arc<AppInner>,
@@ -51,8 +175,81 @@ struct AppInner {
     policy: VfsPolicy,
     redactor: SecretRedactor,
     auth: AuthMode,
+    rate_limiter: RateLimiter,
     io_concurrency: Arc<tokio::sync::Semaphore>,
     scan_concurrency: Arc<tokio::sync::Semaphore>,
+}
+
+#[derive(Clone)]
+struct RateLimiter {
+    cfg: RateLimitConfig,
+    buckets: Arc<tokio::sync::Mutex<HashMap<IpAddr, RateLimitBucket>>>,
+}
+
+#[derive(Clone, Copy)]
+struct RateLimitConfig {
+    enabled: bool,
+    refill_per_sec: f64,
+    capacity: f64,
+}
+
+#[derive(Clone, Copy)]
+struct RateLimitBucket {
+    tokens: f64,
+    last: Instant,
+    last_seen: Instant,
+}
+
+impl RateLimiter {
+    fn new(policy: &VfsPolicy) -> Self {
+        let enabled = policy.limits.max_requests_per_ip_per_sec > 0;
+        let cfg = RateLimitConfig {
+            enabled,
+            refill_per_sec: policy.limits.max_requests_per_ip_per_sec as f64,
+            capacity: policy.limits.max_requests_burst_per_ip as f64,
+        };
+        Self {
+            cfg,
+            buckets: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn allow(&self, ip: Option<IpAddr>) -> bool {
+        if !self.cfg.enabled {
+            return true;
+        }
+        let Some(ip) = ip else {
+            return true;
+        };
+
+        const MAX_BUCKETS_BEFORE_PRUNE: usize = 4096;
+        const BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
+
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().await;
+
+        if buckets.len() > MAX_BUCKETS_BEFORE_PRUNE {
+            buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= BUCKET_TTL);
+        }
+
+        let bucket = buckets.entry(ip).or_insert(RateLimitBucket {
+            tokens: self.cfg.capacity,
+            last: now,
+            last_seen: now,
+        });
+        bucket.last_seen = now;
+
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.cfg.refill_per_sec).min(self.cfg.capacity);
+        bucket.last = now;
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -154,6 +351,18 @@ fn hash_token_sha256(token: &str) -> [u8; 32] {
     digest.into()
 }
 
+fn parse_token_sha256(token: &str) -> anyhow::Result<[u8; 32]> {
+    let Some(hex) = token.strip_prefix("sha256:") else {
+        anyhow::bail!("auth token must be sha256:<64 hex chars>");
+    };
+    let bytes = hex::decode(hex).map_err(anyhow::Error::msg)?;
+    let hash: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid sha256 token hash length"))?;
+    Ok(hash)
+}
+
 fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff: u8 = 0;
     for idx in 0..32 {
@@ -167,6 +376,28 @@ fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
     rules
         .iter()
         .find(|rule| constant_time_eq_32(&rule.token_sha256, &actual))
+}
+
+fn peer_ip(req: &Request) -> Option<IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
+async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !state.inner.rate_limiter.allow(peer_ip(&req)).await {
+        return err_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate limit exceeded",
+        );
+    }
+
+    next.run(req).await
 }
 
 async fn auth_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
@@ -258,6 +489,7 @@ fn build_state(
     let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
     let io_concurrency = policy.limits.max_concurrency_io;
     let scan_concurrency = policy.limits.max_concurrency_scan;
+    let rate_limiter = RateLimiter::new(&policy);
 
     let auth = if unsafe_no_auth {
         AuthMode::Disabled
@@ -269,18 +501,27 @@ fn build_state(
         let mut rules = Vec::with_capacity(policy.auth.tokens.len());
         for AuthToken {
             token,
+            token_env_var,
             allowed_workspaces,
         } in &policy.auth.tokens
         {
-            let token_sha256 = if let Some(hex) = token.strip_prefix("sha256:") {
-                let bytes = hex::decode(hex).map_err(anyhow::Error::msg)?;
-                let hash: [u8; 32] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("invalid sha256 token hash length"))?;
-                hash
+            let token_sha256 = if let Some(token) = token.as_deref() {
+                parse_token_sha256(token)?
+            } else if let Some(env) = token_env_var.as_deref() {
+                let value = std::env::var(env).map_err(|_| {
+                    anyhow::anyhow!("auth token env var {env:?} is not set or not valid UTF-8")
+                })?;
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("auth token env var {env:?} must be non-empty");
+                }
+                if value.starts_with("sha256:") {
+                    parse_token_sha256(value)?
+                } else {
+                    hash_token_sha256(value)
+                }
             } else {
-                hash_token_sha256(token)
+                anyhow::bail!("auth token entry is missing token / token_env_var");
             };
             rules.push(AuthRule {
                 token_sha256,
@@ -300,6 +541,7 @@ fn build_state(
             policy,
             redactor,
             auth,
+            rate_limiter,
             io_concurrency: Arc::new(tokio::sync::Semaphore::new(io_concurrency)),
             scan_concurrency: Arc::new(tokio::sync::Semaphore::new(scan_concurrency)),
         }),
@@ -340,6 +582,10 @@ pub fn build_app_sqlite(
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state))
@@ -387,6 +633,10 @@ pub fn build_app_postgres(
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
         ))
         .layer(middleware::from_fn(request_id_middleware))
         .with_state(state))
@@ -438,6 +688,28 @@ where
     result.map_err(map_err)
 }
 
+async fn run_vfs<T>(
+    state: AppState,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    timeout: Option<Duration>,
+    op: impl FnOnce(&mut DbVfs<BackendStore>) -> db_vfs::Result<T> + Send + 'static,
+) -> Result<T, (StatusCode, Json<ErrorBody>)>
+where
+    T: Send + 'static,
+{
+    let backend = state.inner.backend.clone();
+    let policy = state.inner.policy.clone();
+    let redactor = state.inner.redactor.clone();
+
+    run_blocking(timeout, move || -> db_vfs::Result<T> {
+        let _permit = permit;
+        let store = BackendStore::open(backend)?;
+        let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
+        op(&mut vfs)
+    })
+    .await
+}
+
 async fn read(
     State(state): State<AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<AuthContext>,
@@ -460,34 +732,8 @@ async fn read(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = Some(io_timeout(&state.inner.policy));
-    let result = run_blocking(timeout, move || -> db_vfs::Result<ReadResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.read(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.read(req)
-            }
-        }
-    })
-    .await?;
+    let result = run_vfs(state, permit, timeout, move |vfs| vfs.read(req)).await?;
 
     Ok(Json(result))
 }
@@ -514,34 +760,8 @@ async fn write(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = Some(io_timeout(&state.inner.policy));
-    let result = run_blocking(timeout, move || -> db_vfs::Result<WriteResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.write(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.write(req)
-            }
-        }
-    })
-    .await?;
+    let result = run_vfs(state, permit, timeout, move |vfs| vfs.write(req)).await?;
 
     Ok(Json(result))
 }
@@ -568,32 +788,9 @@ async fn patch(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = Some(io_timeout(&state.inner.policy));
-    let result = run_blocking(timeout, move || -> db_vfs::Result<PatchResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.apply_unified_patch(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.apply_unified_patch(req)
-            }
-        }
+    let result = run_vfs(state, permit, timeout, move |vfs| {
+        vfs.apply_unified_patch(req)
     })
     .await?;
 
@@ -622,34 +819,8 @@ async fn delete(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = Some(io_timeout(&state.inner.policy));
-    let result = run_blocking(timeout, move || -> db_vfs::Result<DeleteResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.delete(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.delete(req)
-            }
-        }
-    })
-    .await?;
+    let result = run_vfs(state, permit, timeout, move |vfs| vfs.delete(req)).await?;
 
     Ok(Json(result))
 }
@@ -676,34 +847,8 @@ async fn glob(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = scan_timeout(&state.inner.policy);
-    let result = run_blocking(timeout, move || -> db_vfs::Result<GlobResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.glob(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.glob(req)
-            }
-        }
-    })
-    .await?;
+    let result = run_vfs(state, permit, timeout, move |vfs| vfs.glob(req)).await?;
 
     Ok(Json(result))
 }
@@ -730,34 +875,8 @@ async fn grep(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
 
-    let backend = state.inner.backend.clone();
-    let policy = state.inner.policy.clone();
-    let redactor = state.inner.redactor.clone();
-
     let timeout = scan_timeout(&state.inner.policy);
-    let result = run_blocking(timeout, move || -> db_vfs::Result<GrepResponse> {
-        let _permit = permit;
-        match backend {
-            Backend::Sqlite { pool } => {
-                let conn = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = SqliteStore::from_connection(conn);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.grep(req)
-            }
-            #[cfg(feature = "postgres")]
-            Backend::Postgres { pool } => {
-                let client = pool
-                    .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let store = PostgresStore::from_client(client);
-                let mut vfs = DbVfs::new_with_redactor(store, policy, redactor)?;
-                vfs.grep(req)
-            }
-        }
-    })
-    .await?;
+    let result = run_vfs(state, permit, timeout, move |vfs| vfs.grep(req)).await?;
 
     Ok(Json(result))
 }

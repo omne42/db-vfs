@@ -55,6 +55,17 @@ pub struct Limits {
     /// Max DB connections in the service pool.
     #[serde(default = "default_max_db_connections")]
     pub max_db_connections: u32,
+    /// Optional per-IP request rate limit (requests/second).
+    ///
+    /// - `0` disables rate limiting.
+    #[serde(default = "default_max_requests_per_ip_per_sec")]
+    pub max_requests_per_ip_per_sec: u32,
+    /// Optional per-IP request burst capacity (requests).
+    ///
+    /// - Must be > 0 when `max_requests_per_ip_per_sec > 0`.
+    /// - `0` disables rate limiting (must match `max_requests_per_ip_per_sec = 0`).
+    #[serde(default = "default_max_requests_burst_per_ip")]
+    pub max_requests_burst_per_ip: u32,
 }
 
 const fn default_max_read_bytes() -> u64 {
@@ -97,6 +108,14 @@ const fn default_max_db_connections() -> u32 {
     16
 }
 
+const fn default_max_requests_per_ip_per_sec() -> u32 {
+    100
+}
+
+const fn default_max_requests_burst_per_ip() -> u32 {
+    200
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -112,6 +131,8 @@ impl Default for Limits {
             max_concurrency_io: default_max_concurrency_io(),
             max_concurrency_scan: default_max_concurrency_scan(),
             max_db_connections: default_max_db_connections(),
+            max_requests_per_ip_per_sec: default_max_requests_per_ip_per_sec(),
+            max_requests_burst_per_ip: default_max_requests_burst_per_ip(),
         }
     }
 }
@@ -135,6 +156,26 @@ fn default_secret_deny_globs() -> Vec<String> {
         ".env.*".to_string(),
         "**/.env".to_string(),
         "**/.env.*".to_string(),
+        ".envrc".to_string(),
+        "**/.envrc".to_string(),
+        ".direnv/**".to_string(),
+        "**/.direnv/**".to_string(),
+        ".ssh/**".to_string(),
+        "**/.ssh/**".to_string(),
+        ".aws/**".to_string(),
+        "**/.aws/**".to_string(),
+        ".kube/**".to_string(),
+        "**/.kube/**".to_string(),
+        ".npmrc".to_string(),
+        "**/.npmrc".to_string(),
+        ".netrc".to_string(),
+        "**/.netrc".to_string(),
+        ".pypirc".to_string(),
+        "**/.pypirc".to_string(),
+        ".cargo/credentials".to_string(),
+        "**/.cargo/credentials".to_string(),
+        ".docker/config.json".to_string(),
+        "**/.docker/config.json".to_string(),
         ".omne_agent_data/**".to_string(),
         "**/.omne_agent_data/**".to_string(),
     ]
@@ -164,7 +205,10 @@ pub struct AuthPolicy {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthToken {
-    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env_var: Option<String>,
     #[serde(default)]
     pub allowed_workspaces: Vec<String>,
 }
@@ -172,7 +216,15 @@ pub struct AuthToken {
 impl fmt::Debug for AuthToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthToken")
-            .field("token", &"<redacted>")
+            .field(
+                "token",
+                &self
+                    .token
+                    .as_ref()
+                    .map(|_| "<redacted>")
+                    .unwrap_or("<none>"),
+            )
+            .field("token_env_var", &self.token_env_var)
             .field("allowed_workspaces", &self.allowed_workspaces)
             .finish()
     }
@@ -284,22 +336,67 @@ impl VfsPolicy {
             ));
         }
         for (idx, rule) in self.auth.tokens.iter().enumerate() {
-            if rule.token.trim().is_empty() {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].token must be non-empty"
-                )));
-            }
-            if rule.token.len() > 4096 {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].token is too large (max 4096 bytes)"
-                )));
-            }
-            if let Some(hex) = rule.token.strip_prefix("sha256:")
-                && (hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()))
-            {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].token must be sha256:<64 hex chars>"
-                )));
+            match (&rule.token, &rule.token_env_var) {
+                (Some(_), Some(_)) => {
+                    return Err(Error::InvalidPolicy(format!(
+                        "auth.tokens[{idx}] must set exactly one of token or token_env_var"
+                    )));
+                }
+                (None, None) => {
+                    return Err(Error::InvalidPolicy(format!(
+                        "auth.tokens[{idx}] must set token or token_env_var"
+                    )));
+                }
+                (Some(token), None) => {
+                    if token.trim().is_empty() {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token must be non-empty"
+                        )));
+                    }
+                    if token.len() > 4096 {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token is too large (max 4096 bytes)"
+                        )));
+                    }
+                    let Some(hex) = token.strip_prefix("sha256:") else {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token must be sha256:<64 hex chars> (use token_env_var for plaintext tokens)"
+                        )));
+                    };
+                    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token must be sha256:<64 hex chars>"
+                        )));
+                    }
+                }
+                (None, Some(env)) => {
+                    if env.trim().is_empty() {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token_env_var must be non-empty"
+                        )));
+                    }
+                    if env.len() > 128 {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token_env_var is too large (max 128 bytes)"
+                        )));
+                    }
+                    let mut chars = env.chars();
+                    let Some(first) = chars.next() else {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token_env_var must be non-empty"
+                        )));
+                    };
+                    if !(first.is_ascii_alphabetic() || first == '_') {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token_env_var must start with [A-Za-z_]"
+                        )));
+                    }
+                    if chars.any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_')) {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].token_env_var must contain only [A-Za-z0-9_]"
+                        )));
+                    }
+                }
             }
             if rule.allowed_workspaces.is_empty() {
                 return Err(Error::InvalidPolicy(format!(
@@ -329,6 +426,29 @@ impl VfsPolicy {
                 }
             }
         }
+
+        if self.limits.max_requests_per_ip_per_sec == 0 {
+            if self.limits.max_requests_burst_per_ip != 0 {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_requests_burst_per_ip must be 0 when max_requests_per_ip_per_sec is 0"
+                        .to_string(),
+                ));
+            }
+        } else {
+            if self.limits.max_requests_burst_per_ip == 0 {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_requests_burst_per_ip must be > 0 when max_requests_per_ip_per_sec is enabled"
+                        .to_string(),
+                ));
+            }
+            if self.limits.max_requests_burst_per_ip < self.limits.max_requests_per_ip_per_sec {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_requests_burst_per_ip must be >= max_requests_per_ip_per_sec"
+                        .to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }

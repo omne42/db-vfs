@@ -4,6 +4,10 @@ use axum::Router;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions, SecretRules, VfsPolicy};
 
+const DEV_TOKEN: &str = "dev-token";
+const DEV_TOKEN_SHA256: &str =
+    "sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712";
+
 fn policy_allow_all() -> VfsPolicy {
     VfsPolicy {
         permissions: Permissions {
@@ -19,7 +23,8 @@ fn policy_allow_all() -> VfsPolicy {
         secrets: SecretRules::default(),
         auth: AuthPolicy {
             tokens: vec![AuthToken {
-                token: "dev-token".to_string(),
+                token: Some(DEV_TOKEN_SHA256.to_string()),
+                token_env_var: None,
                 allowed_workspaces: vec!["ws".to_string()],
             }],
         },
@@ -49,7 +54,7 @@ async fn write_then_read() {
 
     let write = client
         .post(format!("{base}/v1/write"))
-        .header("authorization", "Bearer dev-token")
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
         .json(&WriteRequest {
             workspace_id: "ws".to_string(),
             path: "docs/a.txt".to_string(),
@@ -69,7 +74,7 @@ async fn write_then_read() {
 
     let read = client
         .post(format!("{base}/v1/read"))
-        .header("authorization", "Bearer dev-token")
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
         .json(&ReadRequest {
             workspace_id: "ws".to_string(),
             path: "docs/a.txt".to_string(),

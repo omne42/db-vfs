@@ -33,6 +33,10 @@ struct Args {
     /// Allow unauthenticated requests (unsafe; local dev only).
     #[arg(long)]
     unsafe_no_auth: bool,
+
+    /// Allow `--unsafe-no-auth` when binding to a non-loopback address (DANGEROUS).
+    #[arg(long)]
+    unsafe_no_auth_allow_non_loopback: bool,
 }
 
 #[tokio::main]
@@ -42,6 +46,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    if args.unsafe_no_auth_allow_non_loopback && !args.unsafe_no_auth {
+        anyhow::bail!("--unsafe-no-auth-allow-non-loopback requires --unsafe-no-auth");
+    }
+    if args.unsafe_no_auth
+        && !args.listen.ip().is_loopback()
+        && !args.unsafe_no_auth_allow_non_loopback
+    {
+        anyhow::bail!(
+            "--unsafe-no-auth is only permitted when binding to a loopback address (listen={}). Use auth tokens, or if you really must, also pass --unsafe-no-auth-allow-non-loopback (DANGEROUS).",
+            args.listen
+        );
+    }
+    if args.unsafe_no_auth && args.unsafe_no_auth_allow_non_loopback {
+        tracing::warn!(listen = %args.listen, "starting without auth on a non-loopback address (unsafe)");
+    }
     let policy = db_vfs_service::policy_io::load_policy(&args.policy)?;
 
     let app = if let Some(url) = args.postgres {
@@ -61,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
         db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
