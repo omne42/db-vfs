@@ -106,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
-- `db-vfs-service`: use `<audit.jsonl_path>.lock` for cross-process audit locking (avoid `.lock.lock` naming edge cases).
+- `db-vfs-service`: derive a lock path from `audit.jsonl_path` for cross-process audit locking (avoid `.lock.lock` naming edge cases).
 - Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
 - `db-vfs-service`: reject oversized bearer tokens in the `Authorization` header.
 - CI: docs workflow no longer fails when GitHub Pages is not enabled (skips deploy).

@@ -166,12 +166,13 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
 }
 
 fn lock_path_for(log_path: &Path) -> PathBuf {
-    if log_path.extension() == Some(std::ffi::OsStr::new("lock")) {
-        return log_path.to_path_buf();
-    }
-
+    let suffix = if log_path.extension() == Some(std::ffi::OsStr::new("lock")) {
+        ".audit-lock"
+    } else {
+        ".lock"
+    };
     let mut lock_path = log_path.as_os_str().to_owned();
-    lock_path.push(".lock");
+    lock_path.push(suffix);
     PathBuf::from(lock_path)
 }
 
@@ -248,5 +249,30 @@ fn audit_worker(
 
     if pending > 0 {
         let _ = out.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn lock_path_for_appends_lock_suffix() {
+        assert_eq!(
+            super::lock_path_for(Path::new("audit.jsonl")),
+            PathBuf::from("audit.jsonl.lock")
+        );
+        assert_eq!(
+            super::lock_path_for(Path::new("audit")),
+            PathBuf::from("audit.lock")
+        );
+    }
+
+    #[test]
+    fn lock_path_for_avoids_lock_lock_suffixes() {
+        assert_eq!(
+            super::lock_path_for(Path::new("audit.lock")),
+            PathBuf::from("audit.lock.audit-lock")
+        );
     }
 }
