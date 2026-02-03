@@ -23,4 +23,6 @@ Notes:
 
 - Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
 - Records do not include file content or grep query text (grep logs only query length + regex flag).
+- Requests rejected before the body is parsed (unauthorized, invalid JSON, rate limited) use `workspace_id="<unknown>"` and omit request-specific path fields.
+- Paths denied by secret rules are logged as `<secret>` in audit fields.
 - `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).

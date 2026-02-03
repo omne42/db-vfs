@@ -98,6 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
 - `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
 - `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
+- `db-vfs-service`: audit log now includes early rejections (unauthorized, invalid JSON, rate limited) with `workspace_id="<unknown>"`.
+- `db-vfs-service`: redact scan audit fields (`path_prefix`, `glob_pattern`) when they match secret deny rules.
+- `db-vfs-service`: warn once if the audit log worker thread stops (audit events will be dropped).
 - Policy: reject `audit.flush_*` when `audit.jsonl_path` is not set (service-only; avoids ignored settings).
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.

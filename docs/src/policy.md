@@ -41,6 +41,8 @@ Budgets to control CPU/memory/DB load, including:
 - service: `max_io_ms`, `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Note: `db-vfs-service --trust-mode untrusted` requires `max_walk_ms` and per-IP rate limiting (`max_requests_per_ip_per_sec > 0`).
+
 ### `[secrets]`
 
 Controls deny rules and text redaction:
@@ -65,3 +67,4 @@ Service-only observability:
 - `flush_max_interval_ms`: flush audit output at least every N milliseconds (default: `250`, range: `1..=60000`).
 
 Note: `flush_*` requires `jsonl_path` to be set. Flushing is `BufWriter::flush` (not `fsync`), and values are capped to keep audit output timely.
+For requests rejected before the body is parsed (e.g. unauthorized, invalid JSON, rate limited), the audit log uses `workspace_id="<unknown>"` and omits request-specific path fields.

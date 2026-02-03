@@ -442,6 +442,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
 - `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
 - `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
+- `db-vfs-service`: audit log now includes early rejections (unauthorized, invalid JSON, rate limited) with `workspace_id="<unknown>"`.
+- `db-vfs-service`: redact scan audit fields (`path_prefix`, `glob_pattern`) when they match secret deny rules.
+- `db-vfs-service`: warn once if the audit log worker thread stops (audit events will be dropped).
 - Policy: reject `audit.flush_*` when `audit.jsonl_path` is not set (service-only; avoids ignored settings).
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
@@ -712,6 +715,8 @@ Budgets to control CPU/memory/DB load, including:
 - service: `max_io_ms`, `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Note: `db-vfs-service --trust-mode untrusted` requires `max_walk_ms` and per-IP rate limiting (`max_requests_per_ip_per_sec > 0`).
+
 ### `[secrets]`
 
 Controls deny rules and text redaction:
@@ -736,6 +741,7 @@ Service-only observability:
 - `flush_max_interval_ms`: flush audit output at least every N milliseconds (default: `250`, range: `1..=60000`).
 
 Note: `flush_*` requires `jsonl_path` to be set. Flushing is `BufWriter::flush` (not `fsync`), and values are capped to keep audit output timely.
+For requests rejected before the body is parsed (e.g. unauthorized, invalid JSON, rate limited), the audit log uses `workspace_id="<unknown>"` and omits request-specific path fields.
 
 
 ---
@@ -836,7 +842,9 @@ Key points:
   - Note: deny/skip globs like `dir/*` also apply to descendants under `dir/**` (directory-probe semantics).
 - `glob`/`grep` require scoping (`path_prefix`) unless explicitly allowed.
 - Auth is required by default; `--unsafe-no-auth` is intended for local development only.
-- If the policy/config is not fully trusted, run the service with `--trust-mode untrusted` to disable risky features (env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`).
+- If the policy/config is not fully trusted, run the service with `--trust-mode untrusted`:
+  - forbids risky features (env interpolation, env-backed tokens, writes, full scans, `audit.jsonl_path`, and `--unsafe-no-auth`)
+  - requires `limits.max_walk_ms` and per-IP rate limiting (`limits.max_requests_per_ip_per_sec > 0`)
 - The rate limiter uses the TCP peer IP and does not parse `x-forwarded-for`.
 
 
@@ -870,6 +878,8 @@ Notes:
 
 - Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
 - Records do not include file content or grep query text (grep logs only query length + regex flag).
+- Requests rejected before the body is parsed (unauthorized, invalid JSON, rate limited) use `workspace_id="<unknown>"` and omit request-specific path fields.
+- Paths denied by secret rules are logged as `<secret>` in audit fields.
 - `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).
 
 

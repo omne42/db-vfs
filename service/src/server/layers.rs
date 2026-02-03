@@ -25,6 +25,18 @@ pub(super) async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     if !state.inner.rate_limiter.allow(peer_ip(&req)).await {
+        if let Some(audit) = state.inner.audit.as_ref()
+            && let Some(op) = super::audit::op_from_path(req.uri().path())
+            && let Some(request_id) = req.extensions().get::<RequestId>().map(|v| v.0.clone())
+        {
+            audit.log(super::audit::minimal_event(
+                request_id,
+                peer_ip(&req),
+                op,
+                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                Some("rate_limited"),
+            ));
+        }
         return super::err_response(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",

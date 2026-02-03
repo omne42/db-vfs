@@ -248,7 +248,27 @@ fn audit_ok_delete(state: &super::AppState, event: &mut AuditEvent, resp: &Delet
     event.deleted = Some(resp.deleted);
 }
 
-fn audit_ok_glob(_state: &super::AppState, event: &mut AuditEvent, resp: &GlobResponse) {
+fn audit_redact_scan_fields(state: &super::AppState, event: &mut AuditEvent) {
+    if let Some(prefix) = event.path_prefix.as_deref() {
+        event.path_prefix = Some(redact_path(&state.inner.redactor, prefix));
+    }
+    if let Some(pattern) = event.glob_pattern.as_deref() {
+        if state.inner.redactor.is_path_denied(pattern) {
+            event.glob_pattern = Some("<secret>".to_string());
+        }
+    }
+}
+
+fn audit_err_redact_scan_fields(
+    state: &super::AppState,
+    event: &mut AuditEvent,
+    _body: &super::ErrorBody,
+) {
+    audit_redact_scan_fields(state, event);
+}
+
+fn audit_ok_glob(state: &super::AppState, event: &mut AuditEvent, resp: &GlobResponse) {
+    audit_redact_scan_fields(state, event);
     event.matches = Some(resp.matches.len());
     event.truncated = Some(resp.truncated);
     event.scan_limit_reason = resp.scan_limit_reason;
@@ -258,7 +278,8 @@ fn audit_ok_glob(_state: &super::AppState, event: &mut AuditEvent, resp: &GlobRe
     event.skipped_secret_denied = Some(resp.skipped_secret_denied);
 }
 
-fn audit_ok_grep(_state: &super::AppState, event: &mut AuditEvent, resp: &GrepResponse) {
+fn audit_ok_grep(state: &super::AppState, event: &mut AuditEvent, resp: &GrepResponse) {
+    audit_redact_scan_fields(state, event);
     event.matches = Some(resp.matches.len());
     event.truncated = Some(resp.truncated);
     event.scan_limit_reason = resp.scan_limit_reason;
@@ -288,8 +309,6 @@ struct AuditHooks<Resp> {
     ok: fn(&super::AppState, &mut AuditEvent, &Resp),
     err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
 }
-
-fn audit_err_noop(_state: &super::AppState, _event: &mut AuditEvent, _body: &super::ErrorBody) {}
 
 fn request_ctx(
     peer: SocketAddr,
@@ -350,17 +369,36 @@ where
         err: audit_err,
     } = hooks;
 
-    let (req, audit_req) = {
-        let Json(req) = payload.map_err(map_json_rejection)?;
-        let audit_req = build_audit_req(&req);
-        (req, audit_req)
+    let (req, audit_req) = match payload {
+        Ok(Json(req)) => {
+            let audit_req = build_audit_req(&req);
+            (req, audit_req)
+        }
+        Err(err) => {
+            let (status, Json(body)) = map_json_rejection(err);
+            if let Some(audit) = state.inner.audit.as_ref() {
+                let audit_req = AuditRequest {
+                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                    requested_path: None,
+                    path_prefix: None,
+                    glob_pattern: None,
+                    grep_regex: None,
+                    grep_query_len: None,
+                };
+                let event =
+                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                audit.log(event);
+            }
+            return Err((status, Json(body)));
+        }
     };
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
         if let Some(audit) = state.inner.audit.as_ref() {
-            let event =
+            let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+            audit_err(&state, &mut event, &body);
             audit.log(event);
         }
         return Err((status, Json(body)));
@@ -372,8 +410,9 @@ where
             "workspace is not allowed for this token",
         );
         if let Some(audit) = state.inner.audit.as_ref() {
-            let event =
+            let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+            audit_err(&state, &mut event, &body);
             audit.log(event);
         }
         return Err((status, Json(body)));
@@ -383,8 +422,9 @@ where
         Ok(v) => v,
         Err((status, Json(body))) => {
             if let Some(audit) = state.inner.audit.as_ref() {
-                let event =
+                let mut event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                audit_err(&state, &mut event, &body);
                 audit.log(event);
             }
             return Err((status, Json(body)));
@@ -563,7 +603,7 @@ pub(super) async fn glob(
         |vfs, req| vfs.glob(req),
         AuditHooks {
             ok: audit_ok_glob,
-            err: audit_err_noop,
+            err: audit_err_redact_scan_fields,
         },
     )
     .await
@@ -599,7 +639,7 @@ pub(super) async fn grep(
         |vfs, req| vfs.grep(req),
         AuditHooks {
             ok: audit_ok_grep,
-            err: audit_err_noop,
+            err: audit_err_redact_scan_fields,
         },
     )
     .await

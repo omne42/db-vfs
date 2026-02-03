@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -146,12 +147,32 @@ pub(super) async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
             allowed_workspaces: allow_all_workspaces(),
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
+                if let Some(audit) = state.inner.audit.as_ref()
+                    && let Some(op) = super::audit::op_from_path(req.uri().path())
+                    && let Some(request_id) = req
+                        .extensions()
+                        .get::<super::layers::RequestId>()
+                        .map(|v| v.0.clone())
+                {
+                    audit.log(super::audit::minimal_event(
+                        request_id,
+                        peer_ip,
+                        op,
+                        StatusCode::UNAUTHORIZED.as_u16(),
+                        Some("unauthorized"),
+                    ));
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -160,6 +181,21 @@ pub(super) async fn auth_middleware(
             };
 
             let Some(rule) = match_token(rules, token) else {
+                if let Some(audit) = state.inner.audit.as_ref()
+                    && let Some(op) = super::audit::op_from_path(req.uri().path())
+                    && let Some(request_id) = req
+                        .extensions()
+                        .get::<super::layers::RequestId>()
+                        .map(|v| v.0.clone())
+                {
+                    audit.log(super::audit::minimal_event(
+                        request_id,
+                        peer_ip,
+                        op,
+                        StatusCode::UNAUTHORIZED.as_u16(),
+                        Some("unauthorized"),
+                    ));
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",

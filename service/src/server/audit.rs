@@ -1,7 +1,8 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,12 +12,65 @@ use serde::Serialize;
 const AUDIT_CHANNEL_CAPACITY: usize = 1024;
 pub(super) const DEFAULT_AUDIT_FLUSH_EVERY_EVENTS: usize = 32;
 pub(super) const DEFAULT_AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_millis(250);
+pub(super) const UNKNOWN_WORKSPACE_ID: &str = "<unknown>";
 
 static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static DISCONNECTED_AUDIT_LOGGER: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub(super) struct AuditLogger {
     sender: mpsc::SyncSender<AuditEvent>,
+}
+
+pub(super) fn op_from_path(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/read" => Some("read"),
+        "/v1/write" => Some("write"),
+        "/v1/patch" => Some("patch"),
+        "/v1/delete" => Some("delete"),
+        "/v1/glob" => Some("glob"),
+        "/v1/grep" => Some("grep"),
+        _ => None,
+    }
+}
+
+pub(super) fn minimal_event(
+    request_id: String,
+    peer_ip: Option<IpAddr>,
+    op: &'static str,
+    status: u16,
+    error_code: Option<&'static str>,
+) -> AuditEvent {
+    AuditEvent {
+        ts_ms: now_ms(),
+        request_id,
+        peer_ip: peer_ip.map(|ip| ip.to_string()),
+        op,
+        workspace_id: UNKNOWN_WORKSPACE_ID.to_string(),
+        requested_path: None,
+        path: None,
+        path_prefix: None,
+        glob_pattern: None,
+        grep_regex: None,
+        grep_query_len: None,
+        status,
+        error_code: error_code.map(ToString::to_string),
+        bytes_read: None,
+        bytes_written: None,
+        created: None,
+        deleted: None,
+        version: None,
+        matches: None,
+        truncated: None,
+        scan_limit_reason: None,
+        scanned_files: None,
+        scanned_entries: None,
+        skipped_too_large_files: None,
+        skipped_traversal_skipped: None,
+        skipped_secret_denied: None,
+        skipped_glob_mismatch: None,
+        skipped_missing_content: None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -122,7 +176,13 @@ impl AuditLogger {
                     tracing::warn!(dropped, "audit log channel is full; dropping audit events");
                 }
             }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                if !DISCONNECTED_AUDIT_LOGGER.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "audit log worker thread has stopped; audit events will be dropped"
+                    );
+                }
+            }
         }
     }
 }
