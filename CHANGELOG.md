@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
 - Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
 - Docs: add mdBook docs under `docs/` and an LLM-friendly bundle (`llms.txt`, `docs/llms.txt`).
+- Tests: add VFS regression coverage for grep/read redaction + limit semantics.
+- Tests: add auth parsing/allowlist unit tests in `db-vfs-service`.
+- Tests: add optional Postgres store integration test (requires `DB_VFS_TEST_POSTGRES_URL`).
 
 ### Changed
 
@@ -54,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy parsing: deny unknown fields (`serde(deny_unknown_fields)`).
 - `policy.example.toml`: safer defaults (no write/patch/delete; auth enabled; full scan disabled).
 - Store API: split file reads into `get_meta` + `get_content`.
+- `db-vfs-core`: `path`/`path_prefix` now reject leading/trailing whitespace (no implicit trimming).
+- `db-vfs-service`: log an auth configuration summary (counts) at startup without retaining tokens.
 
 ### Fixed
 
@@ -82,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: return JSON error bodies for invalid JSON / missing `content-type` (new codes: `invalid_json`, `unsupported_media_type`, `payload_too_large`).
 - `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
 - Docs: fix mdBook build (mdbook v0.5 config + SUMMARY nesting) and make `policy.example.toml` link work when building via `./scripts/docs.sh`.
+- `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
+- `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
+- `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
+- `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
 
 ## [0.1.0] - 2026-01-31
 

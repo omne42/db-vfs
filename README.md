@@ -22,6 +22,7 @@ filesystem semantics and a small dependency graph.
 - All `path`/`path_prefix` values are **root-relative**:
   - Must not start with `/`
   - Must not contain `..`
+  - Must not have leading/trailing whitespace
   - `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
     `policy.permissions.allow_full_scan = true`
 - Scope control (`path_prefix`):
@@ -29,12 +30,17 @@ filesystem semantics and a small dependency graph.
     `glob` (e.g. `"docs/**/*.md"` → `"docs/"`).
   - `glob` similarly requires `path_prefix` for broad patterns without a safe literal prefix (e.g.
     `"**/*.md"`).
+- `grep.query` must be non-empty (empty query is rejected).
 - Concurrency control (`expected_version` / CAS):
   - `read` returns a `version`.
   - `patch` requires `expected_version`.
   - `write(expected_version = None)` is **create-only**; updates require `expected_version`.
   - `delete(expected_version = Some(v))` enforces CAS; `delete(expected_version = None)` is
     unconditional.
+- Redaction and limits:
+  - `read.bytes_read` is the size of returned `content` (after redaction).
+  - `read` fails if redaction would expand output beyond `limits.max_read_bytes`.
+  - `grep` truncates matched-line output to `limits.max_line_bytes` after redaction (`line_truncated=true`).
 
 ## HTTP service
 
@@ -66,7 +72,7 @@ Notes:
   - Timeouts are best-effort wall-clock budgets at the service layer.
   - Timeouts include time spent waiting for the service concurrency semaphores; under sustained load a request may fail with `503 busy` rather than wait indefinitely.
   - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
-  - A timed-out request may still return early while some cleanup continues briefly in the background.
+  - A timed-out request returns early and releases its service concurrency slot; some DB work may still continue briefly in the background while cancellation/cleanup happens.
 - Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
 
 ### SQLite
@@ -83,6 +89,8 @@ cargo run -p db-vfs-service -- \
 
 Note: `policy.example.toml` disables `write`/`patch`/`delete` by default. For the smoke test below,
 set `permissions.write = true` in your policy (or create a dev policy).
+
+Security note (SQLite): file permissions depend on the process `umask`. For multi-user systems, set a restrictive `umask` (e.g. `077`) in your service manager / startup script.
 
 ### Postgres
 
@@ -104,6 +112,21 @@ Endpoints (JSON POST):
 - `/v1/delete`
 - `/v1/glob`
 - `/v1/grep`
+
+Error responses (JSON):
+
+```json
+{"code":"<stable_code>","message":"<human message>"}
+```
+
+Common `code` values:
+
+- `unauthorized` (401): missing/invalid auth header or invalid token
+- `forbidden` (403): workspace not allowed for token; or policy denied (`not_permitted`, `secret_path_denied`)
+- `invalid_json` (400) / `unsupported_media_type` (415) / `payload_too_large` (413): request parsing/body limits
+- `not_found` (404) / `conflict` (409)
+- `timeout` (408) / `busy` (503) / `rate_limited` (429)
+- `invalid_path` / `invalid_regex` / `patch` / `input_too_large` / `file_too_large` / `quota_exceeded` (mostly 400/413)
 
 Minimal example:
 

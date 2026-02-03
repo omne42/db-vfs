@@ -47,20 +47,24 @@ enum PathKind {
 fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
     const MAX_PATH_BYTES: usize = 4096;
 
-    let trimmed = input.trim();
     let label = match kind {
         PathKind::File => "path",
         PathKind::Prefix => "path_prefix",
     };
-    if trimmed.len() > MAX_PATH_BYTES {
+    if input != input.trim() {
+        return Err(Error::InvalidPath(format!(
+            "{label} must not have leading or trailing whitespace"
+        )));
+    }
+    if input.len() > MAX_PATH_BYTES {
         return Err(Error::InvalidPath(format!(
             "{label} is too large ({} bytes; max {} bytes)",
-            trimmed.len(),
+            input.len(),
             MAX_PATH_BYTES
         )));
     }
 
-    let mut s = trimmed.replace('\\', "/");
+    let mut s = input.replace('\\', "/");
     while s.starts_with("./") {
         s.drain(..2);
     }
@@ -141,5 +145,25 @@ mod tests {
     #[test]
     fn normalize_path_prefix_appends_trailing_slash() {
         assert_eq!(normalize_path_prefix("a").unwrap(), "a/");
+    }
+
+    #[test]
+    fn normalize_path_rejects_leading_or_trailing_whitespace() {
+        assert!(matches!(normalize_path(" a"), Err(Error::InvalidPath(_))));
+        assert!(matches!(normalize_path("a "), Err(Error::InvalidPath(_))));
+        assert!(matches!(
+            normalize_path_prefix(" a"),
+            Err(Error::InvalidPath(_))
+        ));
+        assert!(matches!(
+            normalize_path_prefix("a "),
+            Err(Error::InvalidPath(_))
+        ));
+    }
+
+    #[test]
+    fn normalize_path_allows_internal_whitespace() {
+        assert_eq!(normalize_path("a b.txt").unwrap(), "a b.txt");
+        assert_eq!(normalize_path_prefix("a b").unwrap(), "a b/");
     }
 }

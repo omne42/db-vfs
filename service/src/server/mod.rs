@@ -116,6 +116,20 @@ fn build_state(
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
     let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
 
+    let auth_token_count = policy.auth.tokens.len();
+    let auth_allowed_workspace_patterns: usize = policy
+        .auth
+        .tokens
+        .iter()
+        .map(|rule| rule.allowed_workspaces.len())
+        .sum();
+    tracing::info!(
+        auth_enabled = !unsafe_no_auth,
+        auth_token_count,
+        auth_allowed_workspace_patterns,
+        "auth configuration loaded"
+    );
+
     policy.auth.tokens.clear();
 
     let state = AppState {

@@ -20,6 +20,8 @@ inside an OS sandbox / container / VM and apply network controls.
 - For plaintext tokens, use `auth.tokens[].token_env_var` so secrets live in the process environment.
 - `--unsafe-no-auth` is restricted to loopback binds by default; using it on a public interface is
   dangerous.
+- For production deployments, enforce “no-unsafe-flags” in your service manager / startup scripts
+  (e.g. refuse `--unsafe-no-auth-allow-non-loopback`).
 
 Secrets are mitigated via:
 
@@ -39,6 +41,9 @@ Policy limits bound work and memory:
 
 These are best-effort safeguards, not a replacement for OS-level limits and network-level
 mitigations (load balancers, WAF, reverse proxy rate limits, etc.).
+
+SQLite note: database file permissions depend on the process `umask`; set a restrictive `umask`
+in your service manager / startup script on multi-user systems.
 
 ## Timeout semantics
 

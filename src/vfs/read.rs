@@ -43,92 +43,16 @@ pub(super) fn read<S: crate::store::Store>(
         return Err(Error::SecretPathDenied(path));
     }
 
-    let Some(mut meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
+    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
         return Err(Error::NotFound("file not found".to_string()));
     };
 
-    let (bytes_read, content, version) = match (request.start_line, request.end_line) {
+    let (mut content, version) = match (request.start_line, request.end_line) {
         (None, None) => {
-            if meta.size_bytes > vfs.policy.limits.max_read_bytes {
-                return Err(Error::FileTooLarge {
-                    path,
-                    size_bytes: meta.size_bytes,
-                    max_bytes: vfs.policy.limits.max_read_bytes,
-                });
-            }
-
-            let mut attempts: usize = 0;
-            let content = loop {
-                if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
-                    return Err(Error::Db(
-                        "file content could not be loaded (too many retries)".to_string(),
-                    ));
-                }
-                attempts += 1;
-                if meta.size_bytes > vfs.policy.limits.max_read_bytes {
-                    return Err(Error::FileTooLarge {
-                        path,
-                        size_bytes: meta.size_bytes,
-                        max_bytes: vfs.policy.limits.max_read_bytes,
-                    });
-                }
-                match vfs
-                    .store
-                    .get_content(&request.workspace_id, &path, meta.version)?
-                {
-                    Some(content) => break content,
-                    None => {
-                        meta = vfs
-                            .store
-                            .get_meta(&request.workspace_id, &path)?
-                            .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
-                        continue;
-                    }
-                }
-            };
-
-            (meta.size_bytes, content, meta.version)
+            let (meta, content) = load_content_with_retry(vfs, &request.workspace_id, &path, meta)?;
+            (content, meta.version)
         }
         (Some(start_line), Some(end_line)) => {
-            if meta.size_bytes > vfs.policy.limits.max_read_bytes {
-                return Err(Error::FileTooLarge {
-                    path,
-                    size_bytes: meta.size_bytes,
-                    max_bytes: vfs.policy.limits.max_read_bytes,
-                });
-            }
-
-            let mut attempts: usize = 0;
-            let content = loop {
-                if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
-                    return Err(Error::Db(
-                        "file content could not be loaded (too many retries)".to_string(),
-                    ));
-                }
-                attempts += 1;
-                if meta.size_bytes > vfs.policy.limits.max_read_bytes {
-                    return Err(Error::FileTooLarge {
-                        path,
-                        size_bytes: meta.size_bytes,
-                        max_bytes: vfs.policy.limits.max_read_bytes,
-                    });
-                }
-
-                match vfs
-                    .store
-                    .get_content(&request.workspace_id, &path, meta.version)?
-                {
-                    Some(content) => break content,
-                    None => {
-                        meta = vfs
-                            .store
-                            .get_meta(&request.workspace_id, &path)?
-                            .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
-                        continue;
-                    }
-                }
-            };
-
             if start_line == 0 || end_line == 0 || start_line > end_line {
                 return Err(Error::InvalidPath(format!(
                     "invalid line range {}..{}",
@@ -136,6 +60,7 @@ pub(super) fn read<S: crate::store::Store>(
                 )));
             }
 
+            let (meta, content) = load_content_with_retry(vfs, &request.workspace_id, &path, meta)?;
             let extracted = extract_line_range(
                 &content,
                 start_line,
@@ -144,8 +69,7 @@ pub(super) fn read<S: crate::store::Store>(
                 meta.size_bytes,
                 &path,
             )?;
-            let bytes_read = extracted.len() as u64;
-            (bytes_read, extracted, meta.version)
+            (extracted, meta.version)
         }
         _ => {
             return Err(Error::InvalidPath(
@@ -154,7 +78,15 @@ pub(super) fn read<S: crate::store::Store>(
         }
     };
 
-    let content = vfs.redactor.redact_text(&content);
+    content = vfs.redactor.redact_text(&content);
+    let bytes_read = content.len() as u64;
+    if bytes_read > vfs.policy.limits.max_read_bytes {
+        return Err(Error::FileTooLarge {
+            path,
+            size_bytes: bytes_read,
+            max_bytes: vfs.policy.limits.max_read_bytes,
+        });
+    }
     Ok(ReadResponse {
         path,
         bytes_read,
@@ -164,6 +96,50 @@ pub(super) fn read<S: crate::store::Store>(
         end_line: request.end_line,
         version,
     })
+}
+
+fn load_content_with_retry<S: crate::store::Store>(
+    vfs: &mut DbVfs<S>,
+    workspace_id: &str,
+    path: &str,
+    mut meta: crate::store::FileMeta,
+) -> Result<(crate::store::FileMeta, String)> {
+    let max_bytes = vfs.policy.limits.max_read_bytes;
+    let mut attempts: usize = 0;
+    loop {
+        if meta.size_bytes > max_bytes {
+            return Err(Error::FileTooLarge {
+                path: path.to_string(),
+                size_bytes: meta.size_bytes,
+                max_bytes,
+            });
+        }
+
+        if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
+            let now = vfs.store.get_meta(workspace_id, path)?;
+            return Err(match now {
+                None => Error::NotFound("file not found".to_string()),
+                Some(now) => {
+                    if now.version != meta.version {
+                        Error::Conflict("file changed during read; please retry".to_string())
+                    } else {
+                        Error::Db("file content could not be loaded".to_string())
+                    }
+                }
+            });
+        }
+        attempts += 1;
+
+        match vfs.store.get_content(workspace_id, path, meta.version)? {
+            Some(content) => return Ok((meta, content)),
+            None => {
+                meta = vfs
+                    .store
+                    .get_meta(workspace_id, path)?
+                    .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
+            }
+        }
+    }
 }
 
 fn extract_line_range(
@@ -318,5 +294,215 @@ mod tests {
             })
             .expect_err("should fail");
         assert_eq!(err.code(), "db");
+    }
+
+    struct FlappingMetaStore {
+        version: u64,
+    }
+
+    impl Store for FlappingMetaStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            let v = self.version;
+            self.version = self.version.saturating_add(1);
+            Ok(Some(FileMeta {
+                path: path.to_string(),
+                size_bytes: 1,
+                version: v,
+                updated_at_ms: 0,
+            }))
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn read_returns_conflict_when_file_changes_during_retries() {
+        let store = FlappingMetaStore { version: 1 };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "conflict");
+    }
+
+    struct StaticContentStore {
+        meta: FileMeta,
+        content: String,
+    }
+
+    impl Store for StaticContentStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.meta.path && version == self.meta.version {
+                Ok(Some(self.content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn read_fails_when_redaction_expands_beyond_max_read_bytes() {
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "a".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 5;
+        policy.secrets.redact_regexes = vec!["a".to_string()];
+        policy.secrets.replacement = "xxxxxx".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "file_too_large");
+    }
+
+    #[test]
+    fn read_bytes_read_counts_returned_bytes_after_redaction() {
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "secret".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+        policy.secrets.replacement = "x".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect("read");
+        assert_eq!(resp.content, "x");
+        assert_eq!(resp.bytes_read, 1);
     }
 }

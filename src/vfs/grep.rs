@@ -68,6 +68,14 @@ pub(super) fn grep<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.grep, "grep")?;
     validate_workspace_id(&request.workspace_id)?;
 
+    if request.query.is_empty() {
+        return Err(if request.regex {
+            Error::InvalidRegex("grep regex must be non-empty".to_string())
+        } else {
+            Error::InvalidPath("grep query must be non-empty".to_string())
+        });
+    }
+
     let started = std::time::Instant::now();
     let max_walk = vfs
         .policy
@@ -203,12 +211,21 @@ pub(super) fn grep<S: crate::store::Store>(
                 continue;
             }
 
-            let line_truncated = line.len() > vfs.policy.limits.max_line_bytes;
-            let mut end = line.len().min(vfs.policy.limits.max_line_bytes);
+            let max_line_bytes = vfs.policy.limits.max_line_bytes;
+            let mut line_truncated = line.len() > max_line_bytes;
+            let mut end = line.len().min(max_line_bytes);
             while end > 0 && !line.is_char_boundary(end) {
                 end = end.saturating_sub(1);
             }
-            let text = vfs.redactor.redact_text(&line[..end]);
+            let mut text = vfs.redactor.redact_text(&line[..end]);
+            if text.len() > max_line_bytes {
+                line_truncated = true;
+                let mut out_end = max_line_bytes;
+                while out_end > 0 && !text.is_char_boundary(out_end) {
+                    out_end = out_end.saturating_sub(1);
+                }
+                text.truncate(out_end);
+            }
             matches.push(GrepMatch {
                 path: meta.path.clone(),
                 line: idx.saturating_add(1) as u64,
@@ -239,4 +256,203 @@ pub(super) fn grep<S: crate::store::Store>(
         elapsed_ms: elapsed_ms(&started),
         scanned_entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::store::{DeleteOutcome, FileMeta, FileRecord, Store};
+    use db_vfs_core::policy::VfsPolicy;
+
+    struct DummyStore;
+
+    impl Store for DummyStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn grep_rejects_empty_query() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+
+        let mut vfs = DbVfs::new(DummyStore, policy).expect("vfs");
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "invalid_path");
+
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "".to_string(),
+                regex: true,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "invalid_regex");
+    }
+
+    struct SingleFileStore {
+        meta: FileMeta,
+        content: String,
+    }
+
+    impl Store for SingleFileStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.meta.path && version == self.meta.version {
+                Ok(Some(self.content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<FileRecord> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            if self.meta.path.starts_with(prefix) {
+                Ok(vec![self.meta.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[test]
+    fn grep_truncates_after_redaction_expansion() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 2,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "a\n".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.limits.max_line_bytes = 1;
+        policy.secrets.redact_regexes = vec!["a".to_string()];
+        policy.secrets.replacement = "XX".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "a".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].text, "X");
+        assert!(resp.matches[0].line_truncated);
+    }
 }

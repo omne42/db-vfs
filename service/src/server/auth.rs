@@ -171,3 +171,66 @@ pub(super) async fn auth_middleware(
     req.extensions_mut().insert(ctx);
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn bearer_token_parsing_is_case_insensitive_and_strict() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc"),
+        );
+        assert_eq!(parse_bearer_token(&headers), Some("abc"));
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer abc"),
+        );
+        assert_eq!(parse_bearer_token(&headers), Some("abc"));
+
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer"));
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer a b"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn workspace_allowlist_supports_star_and_prefix() {
+        assert!(workspace_allowed(&[String::from("*")], "ws"));
+        assert!(workspace_allowed(&[String::from("ws")], "ws"));
+        assert!(!workspace_allowed(&[String::from("ws")], "ws2"));
+        assert!(workspace_allowed(&[String::from("team-*")], "team-123"));
+        assert!(!workspace_allowed(&[String::from("team-*")], "other"));
+    }
+
+    #[test]
+    fn parse_sha256_token_requires_exact_length() {
+        assert!(parse_token_sha256("sha256:abcd").is_err());
+        assert!(parse_token_sha256("abcd").is_err());
+
+        let ok = parse_token_sha256(&format!("sha256:{}", "a".repeat(64))).unwrap();
+        assert_eq!(ok.len(), 32);
+    }
+
+    #[test]
+    fn build_auth_mode_allows_unsafe_no_auth_with_no_tokens() {
+        let policy = VfsPolicy::default();
+        let mode = build_auth_mode(&policy, true).unwrap();
+        assert!(matches!(mode, AuthMode::Disabled));
+
+        let err = build_auth_mode(&policy, false).err().expect("should fail");
+        assert!(err.to_string().contains("no auth tokens configured"));
+    }
+}

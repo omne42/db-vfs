@@ -92,6 +92,7 @@ pub(super) async fn run_vfs<T>(
 where
     T: Send + 'static,
 {
+    let _permit = permit;
     let backend = state.inner.backend.clone();
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
@@ -105,7 +106,6 @@ where
         timeout,
         Some(cancel_for_timeout),
         move || -> db_vfs::Result<T> {
-            let _permit = permit;
             let (store, cancel_handle) = super::backend::BackendStore::open(backend)?;
             if let Some(cancel_handle) = cancel_handle {
                 cancel_for_worker.set_handle(cancel_handle);
