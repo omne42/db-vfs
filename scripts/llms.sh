@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  ./scripts/llms.sh        # regenerate llms.txt
+  ./scripts/llms.sh --check  # verify llms.txt is up to date
+EOF
+}
+
+mode="write"
+case "${1:-}" in
+  "" ) ;;
+  --check )
+    mode="check"
+    shift
+    ;;
+  -h|--help )
+    usage
+    exit 0
+    ;;
+  * )
+    usage
+    exit 2
+    ;;
+esac
+
+if [[ "$#" -ne 0 ]]; then
+  usage
+  exit 2
+fi
+
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 out="$repo_root/llms.txt"
 tmp="$(mktemp "${out}.tmp.XXXXXX")"
@@ -47,6 +77,19 @@ emit_file "docs/src/observability.md"
 emit_file "docs/src/troubleshooting.md"
 emit_file "docs/src/development.md"
 emit_file "docs/src/llms.md"
+
+if [[ "$mode" == "check" ]]; then
+  if [[ ! -f "$out" ]]; then
+    echo "llms: missing $out; run ./scripts/llms.sh" >&2
+    exit 1
+  fi
+  if cmp -s "$tmp" "$out"; then
+    echo "llms: up to date" >&2
+    exit 0
+  fi
+  echo "llms: llms.txt is out of date; run ./scripts/llms.sh" >&2
+  exit 1
+fi
 
 mv "$tmp" "$out"
 trap - EXIT

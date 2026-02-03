@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -7,6 +7,14 @@ use axum::response::Response;
 use sha2::{Digest, Sha256};
 
 use db_vfs_core::policy::VfsPolicy;
+
+static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[String]>> = OnceLock::new();
+
+fn allow_all_workspaces() -> Arc<[String]> {
+    ALLOW_ALL_WORKSPACES
+        .get_or_init(|| Arc::from(vec!["*".to_string()]))
+        .clone()
+}
 
 #[derive(Clone)]
 pub(super) enum AuthMode {
@@ -135,7 +143,7 @@ pub(super) async fn auth_middleware(
 ) -> Response {
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
-            allowed_workspaces: Arc::from(vec!["*".to_string()]),
+            allowed_workspaces: allow_all_workspaces(),
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {

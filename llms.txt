@@ -671,6 +671,12 @@ Regenerate `llms.txt`:
 ./scripts/llms.sh
 ```
 
+Verify `llms.txt` is up to date:
+
+```bash
+./scripts/llms.sh --check
+```
+
 
 ---
 file: docs/src/llms.md

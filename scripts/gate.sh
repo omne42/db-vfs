@@ -8,6 +8,12 @@ if [[ ! -f "$repo_root/Cargo.toml" ]]; then
   exit 0
 fi
 
+llms_script="$repo_root/scripts/llms.sh"
+if [[ -x "$llms_script" ]]; then
+  echo "gate: llms (--check)" >&2
+  "$llms_script" --check
+fi
+
 echo "gate: rust (fmt/check/clippy/test)" >&2
 (
   cd "$repo_root"
@@ -17,4 +23,3 @@ echo "gate: rust (fmt/check/clippy/test)" >&2
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --workspace --all-features
 )
-

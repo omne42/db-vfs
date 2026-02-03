@@ -35,3 +35,9 @@ Regenerate `llms.txt`:
 ```bash
 ./scripts/llms.sh
 ```
+
+Verify `llms.txt` is up to date:
+
+```bash
+./scripts/llms.sh --check
+```

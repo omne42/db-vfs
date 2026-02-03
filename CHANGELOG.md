@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
+- Dev: `./scripts/gate.sh` checks that `llms.txt` is up to date.
 - `db-vfs-service`: require `Authorization: Bearer <token>` by default (configured via policy).
 - `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.
 - `db-vfs-service`: validate bearer token before parsing JSON request bodies.
