@@ -15,6 +15,7 @@ axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 db-vfs = { path = "..", features = ["sqlite"] }
 db-vfs-core = { path = "../core" }
+fs2 = "0.4"
 hex = "0.4"
 r2d2 = "0.8"
 r2d2_postgres = { version = "0.18", optional = true }

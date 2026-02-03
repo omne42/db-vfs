@@ -1,5 +1,6 @@
 //! HTTP server implementation.
 
+mod audit;
 mod auth;
 mod backend;
 mod handlers;
@@ -32,6 +33,7 @@ struct AppInner {
     policy: VfsPolicy,
     redactor: SecretRedactor,
     traversal: TraversalSkipper,
+    audit: Option<audit::AuditLogger>,
     auth: auth::AuthMode,
     rate_limiter: rate_limiter::RateLimiter,
     io_concurrency: Arc<tokio::sync::Semaphore>,
@@ -81,6 +83,8 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
     let message = if status.is_server_error() {
         tracing::error!(code, err = %err, "db-vfs request failed");
         "internal error".to_string()
+    } else if code == "secret_path_denied" {
+        "path is denied by secret rules".to_string()
     } else {
         err.to_string()
     };
@@ -115,6 +119,12 @@ fn build_state(
     let scan_concurrency = policy.limits.max_concurrency_scan;
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
     let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
+    let audit = policy
+        .audit
+        .jsonl_path
+        .as_deref()
+        .map(audit::AuditLogger::new)
+        .transpose()?;
 
     let auth_token_count = policy.auth.tokens.len();
     let auth_allowed_workspace_patterns: usize = policy
@@ -138,6 +148,7 @@ fn build_state(
             policy,
             redactor,
             traversal,
+            audit,
             auth,
             rate_limiter,
             io_concurrency: Arc::new(tokio::sync::Semaphore::new(io_concurrency)),

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use axum::Router;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{
-    AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
+    AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
 
 const DEV_TOKEN: &str = "dev-token";
@@ -24,6 +24,7 @@ fn policy_allow_all() -> VfsPolicy {
         limits: Limits::default(),
         secrets: SecretRules::default(),
         traversal: TraversalRules::default(),
+        audit: AuditPolicy::default(),
         auth: AuthPolicy {
             tokens: vec![AuthToken {
                 token: Some(DEV_TOKEN_SHA256.to_string()),
@@ -40,7 +41,12 @@ async fn serve(app: Router) -> SocketAddr {
         .expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .expect("serve");
     });
     addr
 }

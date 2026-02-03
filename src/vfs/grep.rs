@@ -34,6 +34,14 @@ pub struct GrepResponse {
     #[serde(default)]
     pub skipped_too_large_files: u64,
     #[serde(default)]
+    pub skipped_traversal_skipped: u64,
+    #[serde(default)]
+    pub skipped_secret_denied: u64,
+    #[serde(default)]
+    pub skipped_glob_mismatch: u64,
+    #[serde(default)]
+    pub skipped_missing_content: u64,
+    #[serde(default)]
     pub scanned_files: u64,
     #[serde(default)]
     pub scan_limit_reached: bool,
@@ -154,6 +162,10 @@ pub(super) fn grep<S: crate::store::Store>(
 
     let mut matches = Vec::<GrepMatch>::new();
     let mut skipped_too_large_files: u64 = 0;
+    let mut skipped_traversal_skipped: u64 = 0;
+    let mut skipped_secret_denied: u64 = 0;
+    let mut skipped_glob_mismatch: u64 = 0;
+    let mut skipped_missing_content: u64 = 0;
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: u64 = 0;
     let mut scan_limit_reached = truncated_by_store_limit;
@@ -170,16 +182,19 @@ pub(super) fn grep<S: crate::store::Store>(
         }
 
         if vfs.traversal.is_path_skipped(&meta.path) {
+            skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
             continue;
         }
 
         if vfs.redactor.is_path_denied(&meta.path) {
+            skipped_secret_denied = skipped_secret_denied.saturating_add(1);
             continue;
         }
 
         if let Some(glob) = &file_glob
             && !glob_is_match(glob, &meta.path)
         {
+            skipped_glob_mismatch = skipped_glob_mismatch.saturating_add(1);
             continue;
         }
 
@@ -199,6 +214,7 @@ pub(super) fn grep<S: crate::store::Store>(
             vfs.store
                 .get_content(&request.workspace_id, &meta.path, meta.version)?
         else {
+            skipped_missing_content = skipped_missing_content.saturating_add(1);
             continue;
         };
 
@@ -250,6 +266,10 @@ pub(super) fn grep<S: crate::store::Store>(
         matches,
         truncated: scan_limit_reached,
         skipped_too_large_files,
+        skipped_traversal_skipped,
+        skipped_secret_denied,
+        skipped_glob_mismatch,
+        skipped_missing_content,
         scanned_files,
         scan_limit_reached,
         scan_limit_reason,

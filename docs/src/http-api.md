@@ -14,6 +14,11 @@ All requests require:
 - `content-type: application/json`
 - `authorization: Bearer <token>` (unless started with `--unsafe-no-auth`)
 
+Notes on success responses:
+
+- `read`/`write`/`patch`/`delete` include `requested_path` (normalized input) and `path` (normalized stored path).
+- `glob`/`grep` include scan counters and `skipped_*` diagnostics to make partial results explainable.
+
 ## Errors
 
 Errors are returned as JSON with an HTTP status code:

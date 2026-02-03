@@ -41,6 +41,10 @@ filesystem semantics and a small dependency graph.
   - `read.bytes_read` is the size of returned `content` (after redaction).
   - `read` fails if redaction would expand output beyond `limits.max_read_bytes`.
   - `grep` truncates matched-line output to `limits.max_line_bytes` after redaction (`line_truncated=true`).
+- Response path echo:
+  - `read`/`write`/`patch`/`delete` responses include `requested_path` (normalized input) and `path` (normalized stored path).
+- Scan diagnostics:
+  - `glob`/`grep` responses include skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
 
 ## HTTP service
 
@@ -54,9 +58,15 @@ Notes:
   - Prefer storing only a hash in the policy: `sha256:<64 hex chars>`.
   - Or load a plaintext token from an environment variable: `auth.tokens[].token_env_var = "DB_VFS_TOKEN"`.
   - `--unsafe-no-auth` is restricted to loopback binds by default; use `--unsafe-no-auth-allow-non-loopback` only if you fully understand the risk.
+- Policy loading:
+  - `--trust-mode trusted|untrusted` controls whether risky policy features are allowed (default: `trusted`).
+  - In `trusted` mode, the service interpolates `${VAR}` in policy files from the process environment.
+  - In `untrusted` mode, the service refuses env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`.
 - Request tracing uses `x-request-id`:
   - If the client sets it, the service echoes it back.
   - Otherwise the service generates one and returns it in the response headers.
+- Optional JSONL audit log (policy `[audit]`):
+  - If `audit.jsonl_path` is set, the service appends one JSON object per request (does not include file content or grep query text).
 - Concurrency and pooling are controlled by policy `limits`:
   - `max_concurrency_io` (read/write/patch/delete)
   - `max_concurrency_scan` (glob/grep)

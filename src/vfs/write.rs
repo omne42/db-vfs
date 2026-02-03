@@ -17,6 +17,7 @@ pub struct WriteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteResponse {
+    pub requested_path: String,
     pub path: String,
     pub bytes_written: u64,
     pub created: bool,
@@ -30,7 +31,8 @@ pub(super) fn write<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.write, "write")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let path = normalize_path(&request.path)?;
+    let requested_path = normalize_path(&request.path)?;
+    let path = requested_path.clone();
     if vfs.redactor.is_path_denied(&path) {
         return Err(Error::SecretPathDenied(path));
     }
@@ -60,6 +62,7 @@ pub(super) fn write<S: crate::store::Store>(
     };
 
     Ok(WriteResponse {
+        requested_path,
         path,
         bytes_written,
         created: request.expected_version.is_none(),

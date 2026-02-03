@@ -54,3 +54,9 @@ Controls deny rules and text redaction:
 Scan-only skipping rules:
 
 - `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads)
+
+### `[audit]`
+
+Service-only observability:
+
+- `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.

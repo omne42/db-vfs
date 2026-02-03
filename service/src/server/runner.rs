@@ -34,18 +34,19 @@ impl CancelState {
 
     fn request_cancel(&self) {
         self.requested.store(true, Ordering::Release);
-        if let Ok(guard) = self.handle.try_lock()
-            && let Some(handle) = guard.as_ref()
-        {
-            handle.cancel();
+        if let Ok(guard) = self.handle.lock() {
+            if let Some(handle) = guard.as_ref() {
+                handle.cancel();
+            }
         }
     }
 
     fn set_handle(&self, handle: super::backend::CancelHandle) {
         if let Ok(mut guard) = self.handle.lock() {
-            let should_cancel = self.requested.load(Ordering::Acquire);
             *guard = Some(handle);
-            if should_cancel && let Some(handle) = guard.as_ref() {
+            if self.requested.load(Ordering::Acquire)
+                && let Some(handle) = guard.as_ref()
+            {
                 handle.cancel();
             }
         }

@@ -19,6 +19,7 @@ pub struct ReadRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
+    pub requested_path: String,
     pub path: String,
     pub bytes_read: u64,
     pub content: String,
@@ -38,7 +39,8 @@ pub(super) fn read<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.read, "read")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let path = normalize_path(&request.path)?;
+    let requested_path = normalize_path(&request.path)?;
+    let path = requested_path.clone();
     if vfs.redactor.is_path_denied(&path) {
         return Err(Error::SecretPathDenied(path));
     }
@@ -88,6 +90,7 @@ pub(super) fn read<S: crate::store::Store>(
         });
     }
     Ok(ReadResponse {
+        requested_path,
         path,
         bytes_read,
         content,

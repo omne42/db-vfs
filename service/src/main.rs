@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 
 use clap::{ArgGroup, Parser};
 
+use db_vfs_service::TrustMode;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "db-vfs-service",
@@ -29,6 +31,13 @@ struct Args {
     /// Policy file path (.toml or .json), parsed as db_vfs_core::policy::VfsPolicy.
     #[arg(long)]
     policy: std::path::PathBuf,
+
+    /// Trust mode for loading policy/configuration.
+    ///
+    /// - `trusted`: normal operation (default).
+    /// - `untrusted`: refuse risky policy features (env interpolation, env-backed tokens, writes, full scans, audit path, and unsafe-no-auth).
+    #[arg(long, value_enum, default_value_t = TrustMode::Trusted)]
+    trust_mode: TrustMode,
 
     /// Allow unauthenticated requests (unsafe; local dev only).
     #[arg(long)]
@@ -61,7 +70,8 @@ async fn main() -> anyhow::Result<()> {
     if args.unsafe_no_auth && args.unsafe_no_auth_allow_non_loopback {
         tracing::warn!(listen = %args.listen, "starting without auth on a non-loopback address (unsafe)");
     }
-    let policy = db_vfs_service::policy_io::load_policy(&args.policy)?;
+    let policy =
+        db_vfs_service::policy_io::load_policy(&args.policy, args.trust_mode, args.unsafe_no_auth)?;
 
     let app = if let Some(url) = args.postgres {
         #[cfg(feature = "postgres")]

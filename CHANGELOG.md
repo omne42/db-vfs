@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `limits.max_rate_limit_ips` to cap tracked IPs for rate limiting.
 - Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
+- Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
+- `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
+- `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
+- `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
 - `db-vfs-core`: `glob_utils` helpers for glob normalization/validation.
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
@@ -91,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
 - `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
+- `db-vfs`: `read`/`write`/`patch`/`delete` responses now include `requested_path` (normalized input).
+- `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
+- `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
+- `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
 
 ## [0.1.0] - 2026-01-31
 

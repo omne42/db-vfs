@@ -19,6 +19,7 @@ pub struct DeleteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteResponse {
+    pub requested_path: String,
     pub path: String,
     pub deleted: bool,
 }
@@ -30,7 +31,8 @@ pub(super) fn delete<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.delete, "delete")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let path = normalize_path(&request.path)?;
+    let requested_path = normalize_path(&request.path)?;
+    let path = requested_path.clone();
     if vfs.redactor.is_path_denied(&path) {
         return Err(Error::SecretPathDenied(path));
     }
@@ -41,10 +43,12 @@ pub(super) fn delete<S: crate::store::Store>(
 
     match outcome {
         DeleteOutcome::Deleted => Ok(DeleteResponse {
+            requested_path,
             path,
             deleted: true,
         }),
         DeleteOutcome::NotFound if request.ignore_missing => Ok(DeleteResponse {
+            requested_path,
             path,
             deleted: false,
         }),

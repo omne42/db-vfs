@@ -8,7 +8,7 @@ use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
 use db_vfs_core::policy::{
-    AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
+    AuditPolicy, AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -36,8 +36,37 @@ fn policy_all_perms() -> VfsPolicy {
         limits: Limits::default(),
         secrets: SecretRules::default(),
         traversal: TraversalRules::default(),
+        audit: AuditPolicy::default(),
         auth: AuthPolicy::default(),
     }
+}
+
+#[test]
+fn responses_echo_requested_path() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let write = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "./docs//a.txt".to_string(),
+            content: "hello\n".to_string(),
+            expected_version: None,
+        })
+        .expect("write");
+    assert_eq!(write.path, "docs/a.txt");
+    assert_eq!(write.requested_path, "docs/a.txt");
+
+    let read = vfs
+        .read(ReadRequest {
+            workspace_id: "ws".to_string(),
+            path: "./docs//a.txt".to_string(),
+            start_line: None,
+            end_line: None,
+        })
+        .expect("read");
+    assert_eq!(read.path, "docs/a.txt");
+    assert_eq!(read.requested_path, "docs/a.txt");
 }
 
 #[test]
@@ -53,6 +82,7 @@ fn write_read_patch_delete_roundtrip() {
             expected_version: None,
         })
         .expect("write");
+    assert_eq!(write.requested_path, "docs/a.txt");
     assert_eq!(write.path, "docs/a.txt");
     assert_eq!(write.version, 1);
     assert!(write.created);
@@ -65,6 +95,7 @@ fn write_read_patch_delete_roundtrip() {
             end_line: None,
         })
         .expect("read");
+    assert_eq!(read.requested_path, "docs/a.txt");
     assert_eq!(read.version, 1);
     assert_eq!(read.content, "hello\nworld\n");
 
@@ -84,6 +115,7 @@ fn write_read_patch_delete_roundtrip() {
             .to_string(),
         })
         .expect("patch");
+    assert_eq!(patched.requested_path, "docs/a.txt");
     assert_eq!(patched.version, 2);
 
     let read2 = vfs
@@ -94,6 +126,7 @@ fn write_read_patch_delete_roundtrip() {
             end_line: None,
         })
         .expect("read");
+    assert_eq!(read2.requested_path, "docs/a.txt");
     assert_eq!(read2.version, 2);
     assert!(read2.content.starts_with("hi\n"));
 
@@ -115,6 +148,7 @@ fn write_read_patch_delete_roundtrip() {
             ignore_missing: false,
         })
         .expect("delete");
+    assert_eq!(deleted.requested_path, "docs/a.txt");
     assert!(deleted.deleted);
 
     let err = vfs
@@ -235,6 +269,7 @@ fn deny_globs_hide_descendants_via_probe() {
             ..SecretRules::default()
         },
         traversal: TraversalRules::default(),
+        audit: AuditPolicy::default(),
         auth: AuthPolicy::default(),
     };
 

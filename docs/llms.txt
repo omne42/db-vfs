@@ -60,6 +60,10 @@ filesystem semantics and a small dependency graph.
   - `read.bytes_read` is the size of returned `content` (after redaction).
   - `read` fails if redaction would expand output beyond `limits.max_read_bytes`.
   - `grep` truncates matched-line output to `limits.max_line_bytes` after redaction (`line_truncated=true`).
+- Response path echo:
+  - `read`/`write`/`patch`/`delete` responses include `requested_path` (normalized input) and `path` (normalized stored path).
+- Scan diagnostics:
+  - `glob`/`grep` responses include skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
 
 ## HTTP service
 
@@ -73,9 +77,15 @@ Notes:
   - Prefer storing only a hash in the policy: `sha256:<64 hex chars>`.
   - Or load a plaintext token from an environment variable: `auth.tokens[].token_env_var = "DB_VFS_TOKEN"`.
   - `--unsafe-no-auth` is restricted to loopback binds by default; use `--unsafe-no-auth-allow-non-loopback` only if you fully understand the risk.
+- Policy loading:
+  - `--trust-mode trusted|untrusted` controls whether risky policy features are allowed (default: `trusted`).
+  - In `trusted` mode, the service interpolates `${VAR}` in policy files from the process environment.
+  - In `untrusted` mode, the service refuses env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`.
 - Request tracing uses `x-request-id`:
   - If the client sets it, the service echoes it back.
   - Otherwise the service generates one and returns it in the response headers.
+- Optional JSONL audit log (policy `[audit]`):
+  - If `audit.jsonl_path` is set, the service appends one JSON object per request (does not include file content or grep query text).
 - Concurrency and pooling are controlled by policy `limits`:
   - `max_concurrency_io` (read/write/patch/delete)
   - `max_concurrency_scan` (glob/grep)
@@ -238,6 +248,13 @@ max_rate_limit_ips = 65536
 # [traversal]
 # skip_globs = ["target/**", "**/target/**", "node_modules/**", "**/node_modules/**"]
 
+# Optional JSONL audit log (service-only).
+#
+# When set, `db-vfs-service` appends one JSON object per request.
+#
+# [audit]
+# jsonl_path = "./db-vfs-audit.jsonl"
+
 
 ---
 file: SECURITY.md
@@ -342,6 +359,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `limits.max_rate_limit_ips` to cap tracked IPs for rate limiting.
 - Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
+- Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
+- `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
+- `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
+- `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
 - `db-vfs-core`: `glob_utils` helpers for glob normalization/validation.
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
@@ -410,6 +431,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
 - `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
+- `db-vfs`: `read`/`write`/`patch`/`delete` responses now include `requested_path` (normalized input).
+- `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
+- `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
+- `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
 
 ## [0.1.0] - 2026-01-31
 
@@ -678,6 +703,12 @@ Scan-only skipping rules:
 
 - `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads)
 
+### `[audit]`
+
+Service-only observability:
+
+- `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
+
 
 ---
 file: docs/src/http-api.md
@@ -699,6 +730,11 @@ All requests require:
 
 - `content-type: application/json`
 - `authorization: Bearer <token>` (unless started with `--unsafe-no-auth`)
+
+Notes on success responses:
+
+- `read`/`write`/`patch`/`delete` include `requested_path` (normalized input) and `path` (normalized stored path).
+- `glob`/`grep` include scan counters and `skipped_*` diagnostics to make partial results explainable.
 
 ## Errors
 
@@ -771,6 +807,7 @@ Key points:
 - Secret deny rules apply to direct access; redaction applies to returned text.
 - `glob`/`grep` require scoping (`path_prefix`) unless explicitly allowed.
 - Auth is required by default; `--unsafe-no-auth` is intended for local development only.
+- If the policy/config is not fully trusted, run the service with `--trust-mode untrusted` to disable risky features (env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`).
 - The rate limiter uses the TCP peer IP and does not parse `x-forwarded-for`.
 
 
@@ -795,6 +832,15 @@ The service uses `tracing`; configure via `RUST_LOG`, for example:
 ```bash
 RUST_LOG=db_vfs_service=info cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.example.toml
 ```
+
+## JSONL audit log (optional)
+
+If `policy.audit.jsonl_path` is set, the service appends one JSON object per request (JSONL / ndjson).
+
+Notes:
+
+- Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
+- Records do not include file content or grep query text (grep logs only query length + regex flag).
 
 
 ---

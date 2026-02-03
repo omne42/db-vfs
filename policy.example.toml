@@ -52,3 +52,10 @@ max_rate_limit_ips = 65536
 #
 # [traversal]
 # skip_globs = ["target/**", "**/target/**", "node_modules/**", "**/node_modules/**"]
+
+# Optional JSONL audit log (service-only).
+#
+# When set, `db-vfs-service` appends one JSON object per request.
+#
+# [audit]
+# jsonl_path = "./db-vfs-audit.jsonl"

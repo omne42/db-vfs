@@ -8,6 +8,7 @@ const MAX_GLOB_PATTERN_BYTES: usize = 4096;
 const MAX_SECRET_DENY_GLOBS: usize = 4096;
 const MAX_TRAVERSAL_SKIP_GLOBS: usize = 4096;
 const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
+const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -267,7 +268,19 @@ pub struct VfsPolicy {
     #[serde(default)]
     pub traversal: TraversalRules,
     #[serde(default)]
+    pub audit: AuditPolicy,
+    #[serde(default)]
     pub auth: AuthPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AuditPolicy {
+    /// Optional JSONL audit log path (service-only).
+    ///
+    /// When set, `db-vfs-service` appends one JSON object per request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jsonl_path: Option<String>,
 }
 
 impl VfsPolicy {
@@ -529,6 +542,26 @@ impl VfsPolicy {
             }
         }
 
+        if let Some(path) = self.audit.jsonl_path.as_deref() {
+            if path.trim().is_empty() {
+                return Err(Error::InvalidPolicy(
+                    "audit.jsonl_path must be non-empty when set".to_string(),
+                ));
+            }
+            if path.len() > MAX_AUDIT_JSONL_PATH_BYTES {
+                return Err(Error::InvalidPolicy(format!(
+                    "audit.jsonl_path is too large ({} bytes; max {} bytes)",
+                    path.len(),
+                    MAX_AUDIT_JSONL_PATH_BYTES
+                )));
+            }
+            if path.contains('\0') {
+                return Err(Error::InvalidPolicy(
+                    "audit.jsonl_path must not contain NUL bytes".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -565,6 +598,14 @@ mod tests {
     fn validate_rejects_too_many_traversal_skip_globs() {
         let mut policy = VfsPolicy::default();
         policy.traversal.skip_globs = vec!["a".to_string(); MAX_TRAVERSAL_SKIP_GLOBS + 1];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_large_audit_path() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.jsonl_path = Some("x".repeat(MAX_AUDIT_JSONL_PATH_BYTES + 1));
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }

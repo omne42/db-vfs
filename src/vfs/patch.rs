@@ -16,6 +16,7 @@ pub struct PatchRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchResponse {
+    pub requested_path: String,
     pub path: String,
     pub bytes_written: u64,
     pub version: u64,
@@ -28,7 +29,8 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.patch, "patch")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let path = normalize_path(&request.path)?;
+    let requested_path = normalize_path(&request.path)?;
+    let path = requested_path.clone();
     if vfs.redactor.is_path_denied(&path) {
         return Err(Error::SecretPathDenied(path));
     }
@@ -100,6 +102,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     )?;
 
     Ok(PatchResponse {
+        requested_path,
         path,
         bytes_written,
         version: record.version,

@@ -10,6 +10,9 @@ use tracing::Instrument;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Debug)]
+pub(super) struct RequestId(pub String);
+
 fn peer_ip(req: &Request) -> Option<IpAddr> {
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -42,6 +45,9 @@ pub(super) async fn request_id_middleware(req: Request, next: Next) -> Response 
         .filter(|v| !v.is_empty() && v.len() <= 128)
         .map(ToString::to_string)
         .unwrap_or_else(generate_request_id);
+
+    let mut req = req;
+    req.extensions_mut().insert(RequestId(request_id.clone()));
 
     let span = tracing::info_span!(
         "http_request",

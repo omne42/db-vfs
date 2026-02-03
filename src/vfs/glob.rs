@@ -21,6 +21,10 @@ pub struct GlobResponse {
     #[serde(default)]
     pub scanned_files: u64,
     #[serde(default)]
+    pub skipped_traversal_skipped: u64,
+    #[serde(default)]
+    pub skipped_secret_denied: u64,
+    #[serde(default)]
     pub scan_limit_reached: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_limit_reason: Option<ScanLimitReason>,
@@ -85,6 +89,8 @@ pub(super) fn glob<S: crate::store::Store>(
     let mut matches = Vec::<String>::new();
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: u64 = 0;
+    let mut skipped_traversal_skipped: u64 = 0;
+    let mut skipped_secret_denied: u64 = 0;
     let mut scan_limit_reached = truncated_by_store_limit;
     let mut scan_limit_reason: Option<ScanLimitReason> =
         truncated_by_store_limit.then_some(truncated_reason);
@@ -97,9 +103,11 @@ pub(super) fn glob<S: crate::store::Store>(
             break;
         }
         if vfs.traversal.is_path_skipped(&meta.path) {
+            skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
             continue;
         }
         if vfs.redactor.is_path_denied(&meta.path) {
+            skipped_secret_denied = skipped_secret_denied.saturating_add(1);
             continue;
         }
         scanned_files = scanned_files.saturating_add(1);
@@ -118,6 +126,8 @@ pub(super) fn glob<S: crate::store::Store>(
         matches,
         truncated: scan_limit_reached,
         scanned_files,
+        skipped_traversal_skipped,
+        skipped_secret_denied,
         scan_limit_reached,
         scan_limit_reason,
         elapsed_ms: elapsed_ms(&started),
