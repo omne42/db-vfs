@@ -6,7 +6,8 @@ LLM/RAG ingestion:
 - `llms.txt` (repo root)
 - `docs/llms.txt` (same content, colocated with docs)
 
-Both are Markdown stored in a `.txt` file so they can be copied/pasted into LLM tools easily.
+Both are Markdown stored in a `.txt` file (with YAML front matter) so they can be copied/pasted into
+LLM tools easily.
 
 ## Regenerate
 

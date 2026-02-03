@@ -364,6 +364,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-core`: validate `secrets.deny_globs`, `traversal.skip_globs`, and `secrets.replacement` sizes to avoid pathological policies.
 - `db-vfs-service`: align SQLite `busy_timeout` with `limits.max_io_ms` (capped).
 - Docs: document HTTP status codes and `429 rate_limited`.
+- `db-vfs-service`: return JSON error bodies for invalid JSON / missing `content-type` (new codes: `invalid_json`, `unsupported_media_type`, `payload_too_large`).
+- `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
 
 ## [0.1.0] - 2026-01-31
 
@@ -646,13 +648,14 @@ Errors are returned as JSON with an HTTP status code:
 
 ### Status codes
 
-- `400`: `invalid_path`, `invalid_regex`
+- `400`: `invalid_path`, `invalid_regex`, `invalid_json`, `patch`
 - `401`: `unauthorized` (missing/invalid `Authorization`)
 - `403`: `forbidden`, `not_permitted`, `secret_path_denied`
 - `404`: `not_found`
 - `408`: `timeout`
 - `409`: `conflict`
-- `413`: `input_too_large`, `file_too_large`, `quota_exceeded`
+- `413`: `payload_too_large`, `input_too_large`, `file_too_large`, `quota_exceeded`
+- `415`: `unsupported_media_type` (missing/invalid `content-type`)
 - `429`: `rate_limited`
 - `503`: `busy`
 
@@ -756,6 +759,10 @@ title: Troubleshooting
 
 - Request exceeded `limits.max_read_bytes` / `max_write_bytes` / `max_patch_bytes`.
 
+## `415 unsupported media type`
+
+- Missing or invalid `content-type`; the API expects `application/json`.
+
 ## `429 too many requests`
 
 - Per-IP rate limit exceeded (`limits.max_requests_per_ip_per_sec` / `max_requests_burst_per_ip`).
@@ -828,7 +835,8 @@ LLM/RAG ingestion:
 - `llms.txt` (repo root)
 - `docs/llms.txt` (same content, colocated with docs)
 
-Both are Markdown stored in a `.txt` file so they can be copied/pasted into LLM tools easily.
+Both are Markdown stored in a `.txt` file (with YAML front matter) so they can be copied/pasted into
+LLM tools easily.
 
 ## Regenerate
 

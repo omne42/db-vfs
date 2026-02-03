@@ -95,3 +95,76 @@ async fn write_then_read() {
     assert_eq!(read["content"], "hello\n");
     assert_eq!(read["version"], 1);
 }
+
+#[tokio::test]
+async fn auth_is_checked_before_json_body_is_parsed() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), false)
+        .expect("build app");
+    let addr = serve(app).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let resp = client
+        .post(format!("{base}/v1/write"))
+        .header("content-type", "application/json")
+        .body("{") // invalid JSON
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), 401);
+    assert!(resp.headers().contains_key("x-request-id"));
+    let body = resp.json::<serde_json::Value>().await.expect("json");
+    assert_eq!(body["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn invalid_json_returns_json_error_body() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), false)
+        .expect("build app");
+    let addr = serve(app).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let resp = client
+        .post(format!("{base}/v1/write"))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body("{") // invalid JSON
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), 400);
+    assert!(resp.headers().contains_key("x-request-id"));
+    let body = resp.json::<serde_json::Value>().await.expect("json");
+    assert_eq!(body["code"], "invalid_json");
+}
+
+#[tokio::test]
+async fn missing_content_type_returns_json_error_body() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), false)
+        .expect("build app");
+    let addr = serve(app).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let resp = client
+        .post(format!("{base}/v1/write"))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .body("{}") // no content-type header
+        .send()
+        .await
+        .expect("send");
+
+    assert_eq!(resp.status(), 415);
+    assert!(resp.headers().contains_key("x-request-id"));
+    let body = resp.json::<serde_json::Value>().await.expect("json");
+    assert_eq!(body["code"], "unsupported_media_type");
+}

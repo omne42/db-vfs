@@ -26,13 +26,14 @@ Errors are returned as JSON with an HTTP status code:
 
 ### Status codes
 
-- `400`: `invalid_path`, `invalid_regex`
+- `400`: `invalid_path`, `invalid_regex`, `invalid_json`, `patch`
 - `401`: `unauthorized` (missing/invalid `Authorization`)
 - `403`: `forbidden`, `not_permitted`, `secret_path_denied`
 - `404`: `not_found`
 - `408`: `timeout`
 - `409`: `conflict`
-- `413`: `input_too_large`, `file_too_large`, `quota_exceeded`
+- `413`: `payload_too_large`, `input_too_large`, `file_too_large`, `quota_exceeded`
+- `415`: `unsupported_media_type` (missing/invalid `content-type`)
 - `429`: `rate_limited`
 - `503`: `busy`
 

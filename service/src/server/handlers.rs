@@ -3,12 +3,30 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 
 use db_vfs::vfs::{
     DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
     PatchRequest, PatchResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
+
+fn map_json_rejection(err: JsonRejection) -> (StatusCode, Json<super::ErrorBody>) {
+    if matches!(err, JsonRejection::MissingJsonContentType(_)) {
+        return super::err(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "missing or invalid content-type; expected application/json",
+        );
+    }
+
+    let status = err.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return super::err(status, "payload_too_large", "request body is too large");
+    }
+
+    super::err(StatusCode::BAD_REQUEST, "invalid_json", "invalid JSON body")
+}
 
 async fn acquire_permit_with_budget(
     semaphore: Arc<tokio::sync::Semaphore>,
@@ -41,8 +59,9 @@ async fn acquire_permit_with_budget(
 pub(super) async fn read(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<ReadRequest>,
+    payload: Result<Json<ReadRequest>, JsonRejection>,
 ) -> Result<Json<ReadResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(
@@ -65,8 +84,9 @@ pub(super) async fn read(
 pub(super) async fn write(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<WriteRequest>,
+    payload: Result<Json<WriteRequest>, JsonRejection>,
 ) -> Result<Json<WriteResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(
@@ -90,8 +110,9 @@ pub(super) async fn write(
 pub(super) async fn patch(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<PatchRequest>,
+    payload: Result<Json<PatchRequest>, JsonRejection>,
 ) -> Result<Json<PatchResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(
@@ -117,8 +138,9 @@ pub(super) async fn patch(
 pub(super) async fn delete(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<DeleteRequest>,
+    payload: Result<Json<DeleteRequest>, JsonRejection>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(
@@ -142,8 +164,9 @@ pub(super) async fn delete(
 pub(super) async fn glob(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<GlobRequest>,
+    payload: Result<Json<GlobRequest>, JsonRejection>,
 ) -> Result<Json<GlobResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(
@@ -166,8 +189,9 @@ pub(super) async fn glob(
 pub(super) async fn grep(
     State(state): State<super::AppState>,
     axum::extract::Extension(auth): axum::extract::Extension<super::auth::AuthContext>,
-    Json(req): Json<GrepRequest>,
+    payload: Result<Json<GrepRequest>, JsonRejection>,
 ) -> Result<Json<GrepResponse>, (StatusCode, Json<super::ErrorBody>)> {
+    let Json(req) = payload.map_err(map_json_rejection)?;
     db_vfs_core::path::validate_workspace_id(&req.workspace_id).map_err(super::map_err)?;
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, &req.workspace_id) {
         return Err(super::err(

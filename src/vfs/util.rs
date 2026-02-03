@@ -51,16 +51,13 @@ pub(super) fn glob_is_match(glob: &GlobSet, path: &str) -> bool {
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
-    let mut normalized = pattern.trim().replace('\\', "/");
-    while normalized.starts_with("./") {
-        normalized.drain(..2);
-    }
+    let normalized = normalize_glob_pattern_for_matching(pattern);
     if normalized.starts_with('/') {
         return None;
     }
 
     let mut out = Vec::<&str>::new();
-    let mut stopped_on_wildcard = false;
+    let mut stopped_on_wildcard = normalized.ends_with('/');
 
     for segment in normalized.split('/') {
         if segment.is_empty() || segment == "." {

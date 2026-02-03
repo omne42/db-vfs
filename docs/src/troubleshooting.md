@@ -19,6 +19,10 @@
 
 - Request exceeded `limits.max_read_bytes` / `max_write_bytes` / `max_patch_bytes`.
 
+## `415 unsupported media type`
+
+- Missing or invalid `content-type`; the API expects `application/json`.
+
 ## `429 too many requests`
 
 - Per-IP rate limit exceeded (`limits.max_requests_per_ip_per_sec` / `max_requests_burst_per_ip`).
