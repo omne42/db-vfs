@@ -14,7 +14,7 @@ filesystem semantics and a small dependency graph.
 ## Documentation
 
 - Human docs (mdBook sources): `docs/` (build with `./scripts/docs.sh`)
-- LLM/RAG bundle: `llms.txt` (regenerate with `./scripts/llms.sh`)
+- LLM/RAG bundle: `llms.txt` and `docs/llms.txt` (regenerate with `./scripts/llms.sh`)
 
 ## Semantics
 

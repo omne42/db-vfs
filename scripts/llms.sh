@@ -32,8 +32,11 @@ if [[ "$#" -ne 0 ]]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-out="$repo_root/llms.txt"
-tmp="$(mktemp "${out}.tmp.XXXXXX")"
+docs_src="$repo_root/docs/src"
+summary="$docs_src/SUMMARY.md"
+out_root="$repo_root/llms.txt"
+out_docs="$repo_root/docs/llms.txt"
+tmp="$(mktemp "${out_root}.tmp.XXXXXX")"
 
 cleanup() {
   rm -f "$tmp"
@@ -56,6 +59,7 @@ cat >"$tmp" <<'EOF'
 # db-vfs — LLM documentation bundle
 
 This file is generated from the repo sources to make RAG/LLM ingestion easier.
+It follows `docs/src/SUMMARY.md` for the docs ordering.
 
 Update it by running:
 
@@ -66,31 +70,45 @@ emit_file "README.md"
 emit_file "policy.example.toml"
 emit_file "SECURITY.md"
 emit_file "docs/src/SUMMARY.md"
-emit_file "docs/src/index.md"
-emit_file "docs/src/getting-started.md"
-emit_file "docs/src/concepts.md"
-emit_file "docs/src/policy.md"
-emit_file "docs/src/http-api.md"
-emit_file "docs/src/storage.md"
-emit_file "docs/src/security.md"
-emit_file "docs/src/observability.md"
-emit_file "docs/src/troubleshooting.md"
-emit_file "docs/src/development.md"
-emit_file "docs/src/llms.md"
 
-if [[ "$mode" == "check" ]]; then
-  if [[ ! -f "$out" ]]; then
-    echo "llms: missing $out; run ./scripts/llms.sh" >&2
-    exit 1
-  fi
-  if cmp -s "$tmp" "$out"; then
-    echo "llms: up to date" >&2
-    exit 0
-  fi
-  echo "llms: llms.txt is out of date; run ./scripts/llms.sh" >&2
+if [[ ! -f "$summary" ]]; then
+  echo "llms: missing docs summary: $summary" >&2
   exit 1
 fi
 
-mv "$tmp" "$out"
-trap - EXIT
-echo "llms: wrote $out" >&2
+while IFS=$'\t' read -r title file; do
+  [[ -z "${file}" ]] && continue
+
+  path="docs/src/${file}"
+  if [[ ! -f "$repo_root/$path" ]]; then
+    echo "llms: missing doc file referenced from SUMMARY.md: ${file}" >&2
+    exit 1
+  fi
+
+  printf '\n' >>"$tmp"
+  printf -- '---\n# %s (%s)\n---\n\n' "$title" "$file" >>"$tmp"
+  cat "$repo_root/$path" >>"$tmp"
+  printf '\n' >>"$tmp"
+done < <(sed -n 's/.*\\[\\(.*\\)\\](\\(.*\\.md\\)).*/\\1\\t\\2/p' "$summary")
+
+if [[ "$mode" == "check" ]]; then
+  if [[ ! -f "$out_root" || ! -f "$out_docs" ]]; then
+    echo "llms: missing llms.txt outputs; run ./scripts/llms.sh" >&2
+    exit 1
+  fi
+  if ! cmp -s "$tmp" "$out_root"; then
+    echo "llms: llms.txt is out of date; run ./scripts/llms.sh" >&2
+    exit 1
+  fi
+  if ! cmp -s "$tmp" "$out_docs"; then
+    echo "llms: docs/llms.txt is out of date; run ./scripts/llms.sh" >&2
+    exit 1
+  fi
+  echo "llms: up to date" >&2
+  exit 0
+fi
+
+cp "$tmp" "$out_root"
+cp "$tmp" "$out_docs"
+echo "llms: wrote $out_root" >&2
+echo "llms: wrote $out_docs" >&2

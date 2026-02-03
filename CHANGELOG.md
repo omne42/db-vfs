@@ -24,12 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
 - Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
-- Docs: add mdBook docs under `docs/` and an LLM-friendly bundle (`llms.txt`).
+- Docs: add mdBook docs under `docs/` and an LLM-friendly bundle (`llms.txt`, `docs/llms.txt`).
 
 ### Changed
 
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
-- Dev: `./scripts/gate.sh` checks that `llms.txt` is up to date.
+- Dev: `./scripts/gate.sh` checks that `llms.txt` outputs are up to date.
 - `db-vfs-service`: require `Authorization: Bearer <token>` by default (configured via policy).
 - `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.
 - `db-vfs-service`: validate bearer token before parsing JSON request bodies.
