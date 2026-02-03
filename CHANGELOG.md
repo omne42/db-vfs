@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
+- Docs: clarify that GitHub Pages deploy requires enabling Pages (workflow skips deploy otherwise).
 - Dev: `./scripts/gate.sh` checks that `llms.txt` outputs are up to date.
 - `db-vfs-service`: require `Authorization: Bearer <token>` by default (configured via policy).
 - `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.

@@ -30,6 +30,10 @@ Build the mdBook (requires `mdbook`):
 ./scripts/docs.sh
 ```
 
+GitHub Actions also builds docs on pushes; deploying to GitHub Pages requires enabling Pages for the repo
+(Settings → Pages → Source: GitHub Actions). If Pages is not enabled, the workflow still builds but
+skips deploy.
+
 Regenerate `llms.txt`:
 
 ```bash
