@@ -2,7 +2,7 @@
 
 The service loads a policy file (`.toml` or `.json`) into `db_vfs_core::policy::VfsPolicy`.
 
-Start from `policy.example.toml`.
+Start from `policy.example.toml` (also linked as [`policy.example.toml`](policy.example.toml) in the built docs).
 
 ## Sections
 

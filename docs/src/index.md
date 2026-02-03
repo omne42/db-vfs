@@ -26,6 +26,6 @@ Non-goals:
 
 - New users: [`Getting started`](getting-started.md)
 - Understanding semantics: [`Concepts`](concepts.md)
-- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](../../policy.example.toml)
+- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](policy.example.toml)
 - Integrating over HTTP: [`HTTP API`](http-api.md)
 - LLM/RAG ingestion: [`llms.txt`](llms.md)

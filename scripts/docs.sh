@@ -15,4 +15,9 @@ EOF
 fi
 
 mdbook build "$docs_dir"
+
+# Copy a few helpful repo files into the built book output so in-book links work when hosting
+# `docs/book/` as a standalone static directory.
+cp "$repo_root/policy.example.toml" "$docs_dir/book/policy.example.toml"
+
 echo "docs: built $docs_dir/book" >&2

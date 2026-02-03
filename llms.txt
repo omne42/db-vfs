@@ -366,6 +366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: document HTTP status codes and `429 rate_limited`.
 - `db-vfs-service`: return JSON error bodies for invalid JSON / missing `content-type` (new codes: `invalid_json`, `unsupported_media_type`, `payload_too_large`).
 - `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
+- Docs: fix mdBook link to `policy.example.toml` when building via `./scripts/docs.sh`.
 
 ## [0.1.0] - 2026-01-31
 
@@ -433,7 +434,7 @@ Non-goals:
 
 - New users: [`Getting started`](getting-started.md)
 - Understanding semantics: [`Concepts`](concepts.md)
-- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](../../policy.example.toml)
+- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](policy.example.toml)
 - Integrating over HTTP: [`HTTP API`](http-api.md)
 - LLM/RAG ingestion: [`llms.txt`](llms.md)
 
@@ -561,7 +562,7 @@ title: Policy
 
 The service loads a policy file (`.toml` or `.json`) into `db_vfs_core::policy::VfsPolicy`.
 
-Start from `policy.example.toml`.
+Start from `policy.example.toml` (also linked as [`policy.example.toml`](policy.example.toml) in the built docs).
 
 ## Sections
 
