@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CI: add GitHub Actions workflows for gates/tests and docs deploy (mdBook → GitHub Pages).
+- Dev: add `./scripts/setup-githooks.sh` helper to enable repo git hooks.
 - `db-vfs-service`: optional Postgres backend via `--postgres` (build with `--features postgres`).
 - Policy: `auth` section with bearer tokens + per-token workspace allowlist.
 - Policy: `auth.tokens[].token_env_var` to load a plaintext token from an environment variable at runtime.
@@ -29,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Docs: include `llms.txt` in the built mdBook output (`docs/book/llms.txt`) for easy download when hosted.
+- `db-vfs-service`: build with bundled SQLite (`rusqlite` feature `bundled`) for portability.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.

@@ -13,7 +13,7 @@ Run format/check/clippy/test:
 Enable local hooks:
 
 ```bash
-git config core.hooksPath githooks
+./scripts/setup-githooks.sh
 ```
 
 The hooks enforce:

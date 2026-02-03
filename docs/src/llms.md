@@ -9,6 +9,12 @@ LLM/RAG ingestion:
 Both are Markdown stored in a `.txt` file (with YAML front matter) so they can be copied/pasted into
 LLM tools easily.
 
+## Download
+
+If you build the docs with `./scripts/docs.sh`, the rendered book output includes:
+
+- [`llms.txt`](llms.txt)
+
 ## Regenerate
 
 After documentation changes:

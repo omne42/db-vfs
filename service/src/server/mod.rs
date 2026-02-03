@@ -110,7 +110,6 @@ fn build_state(
     mut policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<(AppState, usize)> {
-    policy.validate().map_err(anyhow::Error::msg)?;
     let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
     let traversal = TraversalSkipper::from_rules(&policy.traversal).map_err(anyhow::Error::msg)?;
     let io_concurrency = policy.limits.max_concurrency_io;
