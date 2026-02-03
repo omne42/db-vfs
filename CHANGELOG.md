@@ -101,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
 - Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
+- CI: docs workflow no longer fails when GitHub Pages is not enabled (skips deploy).
 
 ## [0.1.0] - 2026-01-31
 
