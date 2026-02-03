@@ -166,6 +166,10 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
 }
 
 fn lock_path_for(log_path: &Path) -> PathBuf {
+    if log_path.extension() == Some(std::ffi::OsStr::new("lock")) {
+        return log_path.to_path_buf();
+    }
+
     let mut lock_path = log_path.as_os_str().to_owned();
     lock_path.push(".lock");
     PathBuf::from(lock_path)
