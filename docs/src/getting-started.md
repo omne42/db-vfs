@@ -12,6 +12,14 @@ Create a policy file (start from `policy.example.toml`) and set a bearer token a
 export DB_VFS_TOKEN='dev-token-change-me'
 ```
 
+For local development, enable writes in your policy:
+
+```toml
+# In your policy's `[permissions]` section (e.g. `policy.example.toml`)
+[permissions]
+write = true
+```
+
 Run:
 
 ```bash

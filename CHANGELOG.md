@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`: report `scanned_files` separately from `scanned_entries` and respect `traversal.skip_globs`.
 - `patch`: fetch existing content using `limits.max_read_bytes` (consistent with read limits).
 - Lint: fix `clippy::large_enum_variant`.
+- Docs: fix `Getting started` instructions to enable `permissions.write` when using `policy.example.toml`.
 
 ## [0.1.0] - 2026-01-31
 

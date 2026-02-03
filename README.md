@@ -81,6 +81,9 @@ cargo run -p db-vfs-service -- \
   --listen 127.0.0.1:8080
 ```
 
+Note: `policy.example.toml` disables `write`/`patch`/`delete` by default. For the smoke test below,
+set `permissions.write = true` in your policy (or create a dev policy).
+
 ### Postgres
 
 Run (requires building with `postgres` enabled):
