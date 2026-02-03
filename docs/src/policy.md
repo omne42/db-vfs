@@ -45,7 +45,7 @@ Budgets to control CPU/memory/DB load, including:
 
 Controls deny rules and text redaction:
 
-- `deny_globs`: deny direct access to matching paths
+- `deny_globs`: deny direct access to matching paths (note: `dir/*` also denies descendants under `dir/**`)
 - `redact_regexes`: applied to returned text
 - `replacement`: string used to replace redacted matches
 
@@ -53,7 +53,7 @@ Controls deny rules and text redaction:
 
 Scan-only skipping rules:
 
-- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads)
+- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads). Note: `dir/*` also skips descendants under `dir/**`.
 
 ### `[audit]`
 

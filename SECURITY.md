@@ -26,6 +26,7 @@ inside an OS sandbox / container / VM and apply network controls.
 Secrets are mitigated via:
 
 - Path deny rules (`policy.secrets.deny_globs`) to block direct access.
+  - Note: deny globs like `dir/*` also deny descendants under `dir/**` (directory-probe semantics).
 - Regex redaction (`policy.secrets.redact_regexes`) applied to `read`/`grep` output.
 
 ## Resource limits & DoS

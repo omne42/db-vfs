@@ -3,12 +3,14 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::Serialize;
 
 const AUDIT_CHANNEL_CAPACITY: usize = 1024;
+const AUDIT_FLUSH_EVERY_EVENTS: usize = 32;
+const AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_millis(250);
 
 static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
 
@@ -163,33 +165,68 @@ fn audit_worker(
 ) {
     let mut out = BufWriter::new(file);
     let mut write_failures: u64 = 0;
-    for event in receiver {
-        let mut event = event;
-        event.ts_ms = event.ts_ms.max(now_ms());
+    let mut pending: usize = 0;
+    let mut last_flush: Instant = Instant::now();
 
-        if let Err(err) = serde_json::to_writer(&mut out, &event) {
-            write_failures = write_failures.saturating_add(1);
-            if write_failures == 1 || write_failures % 1000 == 0 {
-                tracing::warn!(
-                    err = %err,
-                    audit_path = ?path,
-                    write_failures,
-                    "failed to serialize audit event"
-                );
+    loop {
+        match receiver.recv_timeout(AUDIT_FLUSH_MAX_INTERVAL) {
+            Ok(mut event) => {
+                event.ts_ms = event.ts_ms.max(now_ms());
+
+                if let Err(err) = serde_json::to_writer(&mut out, &event) {
+                    write_failures = write_failures.saturating_add(1);
+                    if write_failures == 1 || write_failures % 1000 == 0 {
+                        tracing::warn!(
+                            err = %err,
+                            audit_path = ?path,
+                            write_failures,
+                            "failed to serialize audit event"
+                        );
+                    }
+                    continue;
+                }
+
+                if let Err(err) = out.write_all(b"\n") {
+                    write_failures = write_failures.saturating_add(1);
+                    if write_failures == 1 || write_failures % 1000 == 0 {
+                        tracing::warn!(
+                            err = %err,
+                            audit_path = ?path,
+                            write_failures,
+                            "failed to write audit event newline"
+                        );
+                    }
+                    continue;
+                }
+
+                pending = pending.saturating_add(1);
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if pending == 0 {
             continue;
         }
 
-        if let Err(err) = out.write_all(b"\n").and_then(|_| out.flush()) {
-            write_failures = write_failures.saturating_add(1);
-            if write_failures == 1 || write_failures % 1000 == 0 {
-                tracing::warn!(
-                    err = %err,
-                    audit_path = ?path,
-                    write_failures,
-                    "failed to write audit event"
-                );
+        if pending >= AUDIT_FLUSH_EVERY_EVENTS || last_flush.elapsed() >= AUDIT_FLUSH_MAX_INTERVAL {
+            if let Err(err) = out.flush() {
+                write_failures = write_failures.saturating_add(1);
+                if write_failures == 1 || write_failures % 1000 == 0 {
+                    tracing::warn!(
+                        err = %err,
+                        audit_path = ?path,
+                        write_failures,
+                        "failed to flush audit log"
+                    );
+                }
             }
+            pending = 0;
+            last_flush = Instant::now();
         }
+    }
+
+    if pending > 0 {
+        let _ = out.flush();
     }
 }

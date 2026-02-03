@@ -42,6 +42,7 @@ filesystem semantics and a small dependency graph.
   - Must not start with `/`
   - Must not contain `..`
   - Must not have leading/trailing whitespace
+  - Must not contain control characters
   - `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
     `policy.permissions.allow_full_scan = true`
 - Scope control (`path_prefix`):
@@ -103,7 +104,7 @@ Notes:
   - Timeouts include time spent waiting for the service concurrency semaphores; under sustained load a request may fail with `503 busy` rather than wait indefinitely.
   - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
   - A timed-out request returns early and releases its service concurrency slot; some DB work may still continue briefly in the background while cancellation/cleanup happens.
-- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
+- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed. Note: deny globs like `dir/*` also deny descendants under `dir/**` (to avoid leaking nested paths when a directory is denied).
 
 ### SQLite
 
@@ -238,6 +239,7 @@ max_requests_burst_per_ip = 200
 max_rate_limit_ips = 65536
 
 # Secrets are enabled by default in code, but can be customized here:
+# Note: deny globs like "dir/*" also deny descendants under "dir/**".
 #
 # [secrets]
 # deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".ssh/**", "**/.ssh/**", ".aws/**", "**/.aws/**", ".kube/**", "**/.kube/**", ".npmrc", "**/.npmrc", ".netrc", "**/.netrc", ".pypirc", "**/.pypirc", ".cargo/credentials", "**/.cargo/credentials", ".docker/config.json", "**/.docker/config.json", ".omne_agent_data/**", "**/.omne_agent_data/**"]
@@ -245,6 +247,7 @@ max_rate_limit_ips = 65536
 # replacement = "***REDACTED***"
 
 # Scan traversal skip globs (performance only; does not deny direct access).
+# Note: skip globs like "dir/*" also skip descendants under "dir/**".
 #
 # [traversal]
 # skip_globs = ["target/**", "**/target/**", "node_modules/**", "**/node_modules/**"]
@@ -290,6 +293,7 @@ inside an OS sandbox / container / VM and apply network controls.
 Secrets are mitigated via:
 
 - Path deny rules (`policy.secrets.deny_globs`) to block direct access.
+  - Note: deny globs like `dir/*` also deny descendants under `dir/**` (directory-probe semantics).
 - Regex redaction (`policy.secrets.redact_regexes`) applied to `read`/`grep` output.
 
 ## Resource limits & DoS
@@ -382,6 +386,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: run SQLite migrations with `busy_timeout` aligned to `limits.max_io_ms` (capped).
 - Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
+- Docs: clarify that deny/skip globs like `dir/*` also apply to descendants under `dir/**`.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
 - Docs: clarify that GitHub Pages deploy requires enabling Pages (workflow skips deploy otherwise).
@@ -432,6 +437,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
 - Docs: fix mdBook build (mdbook v0.5 config + SUMMARY nesting) and make `policy.example.toml` link work when building via `./scripts/docs.sh`.
 - `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
+- `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
+- `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
 - `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
@@ -440,7 +447,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
 - Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
+- `db-vfs-service`: reject oversized bearer tokens in the `Authorization` header.
 - CI: docs workflow no longer fails when GitHub Pages is not enabled (skips deploy).
+- SQLite store: treat only UNIQUE/PRIMARYKEY constraint violations as `conflict` on create.
+- `db-vfs-core`: `path`/`path_prefix` now reject control characters.
 
 ## [0.1.0] - 2026-01-31
 
@@ -590,6 +600,8 @@ All `path` / `path_prefix` values are root-relative:
 
 - Must not start with `/`
 - Must not contain `..`
+- Must not have leading/trailing whitespace
+- Must not contain control characters
 
 `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
 `policy.permissions.allow_full_scan = true`.
@@ -699,7 +711,7 @@ Budgets to control CPU/memory/DB load, including:
 
 Controls deny rules and text redaction:
 
-- `deny_globs`: deny direct access to matching paths
+- `deny_globs`: deny direct access to matching paths (note: `dir/*` also denies descendants under `dir/**`)
 - `redact_regexes`: applied to returned text
 - `replacement`: string used to replace redacted matches
 
@@ -707,7 +719,7 @@ Controls deny rules and text redaction:
 
 Scan-only skipping rules:
 
-- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads)
+- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads). Note: `dir/*` also skips descendants under `dir/**`.
 
 ### `[audit]`
 
@@ -812,6 +824,7 @@ Key points:
 
 - Root-relative path normalization rejects `/`-absolute paths and `..` segments.
 - Secret deny rules apply to direct access; redaction applies to returned text.
+  - Note: deny/skip globs like `dir/*` also apply to descendants under `dir/**` (directory-probe semantics).
 - `glob`/`grep` require scoping (`path_prefix`) unless explicitly allowed.
 - Auth is required by default; `--unsafe-no-auth` is intended for local development only.
 - If the policy/config is not fully trusted, run the service with `--trust-mode untrusted` to disable risky features (env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`).

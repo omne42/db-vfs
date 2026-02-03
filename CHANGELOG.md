@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: run SQLite migrations with `busy_timeout` aligned to `limits.max_io_ms` (capped).
 - Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
+- Docs: clarify that deny/skip globs like `dir/*` also apply to descendants under `dir/**`.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
 - Docs: clarify that GitHub Pages deploy requires enabling Pages (workflow skips deploy otherwise).
@@ -94,6 +95,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
 - Docs: fix mdBook build (mdbook v0.5 config + SUMMARY nesting) and make `policy.example.toml` link work when building via `./scripts/docs.sh`.
 - `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
+- `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
+- `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
 - `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
@@ -102,7 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
 - Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
+- `db-vfs-service`: reject oversized bearer tokens in the `Authorization` header.
 - CI: docs workflow no longer fails when GitHub Pages is not enabled (skips deploy).
+- SQLite store: treat only UNIQUE/PRIMARYKEY constraint violations as `conflict` on create.
+- `db-vfs-core`: `path`/`path_prefix` now reject control characters.
 
 ## [0.1.0] - 2026-01-31
 

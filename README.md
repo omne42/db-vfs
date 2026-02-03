@@ -23,6 +23,7 @@ filesystem semantics and a small dependency graph.
   - Must not start with `/`
   - Must not contain `..`
   - Must not have leading/trailing whitespace
+  - Must not contain control characters
   - `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
     `policy.permissions.allow_full_scan = true`
 - Scope control (`path_prefix`):
@@ -84,7 +85,7 @@ Notes:
   - Timeouts include time spent waiting for the service concurrency semaphores; under sustained load a request may fail with `503 busy` rather than wait indefinitely.
   - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
   - A timed-out request returns early and releases its service concurrency slot; some DB work may still continue briefly in the background while cancellation/cleanup happens.
-- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed.
+- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed. Note: deny globs like `dir/*` also deny descendants under `dir/**` (to avoid leaking nested paths when a directory is denied).
 
 ### SQLite
 

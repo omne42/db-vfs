@@ -10,6 +10,8 @@ use db_vfs_core::policy::VfsPolicy;
 
 static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[String]>> = OnceLock::new();
 
+const MAX_BEARER_TOKEN_BYTES: usize = 4096;
+
 fn allow_all_workspaces() -> Arc<[String]> {
     ALLOW_ALL_WORKSPACES
         .get_or_init(|| Arc::from(vec!["*".to_string()]))
@@ -87,6 +89,9 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
         return None;
     }
     if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    if token.len() > MAX_BEARER_TOKEN_BYTES {
         return None;
     }
     Some(token)
@@ -202,6 +207,13 @@ mod tests {
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer a b"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        let long = format!("Bearer {}", "a".repeat(MAX_BEARER_TOKEN_BYTES + 1));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&long).expect("header value"),
         );
         assert_eq!(parse_bearer_token(&headers), None);
     }

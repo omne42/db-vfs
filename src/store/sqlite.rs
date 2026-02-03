@@ -337,9 +337,56 @@ fn i64_to_u64_sql(value: i64, field: &'static str) -> rusqlite::Result<u64> {
 fn is_unique_constraint_violation(err: &rusqlite::Error) -> bool {
     use rusqlite::Error::SqliteFailure;
     match err {
-        SqliteFailure(code, _) => {
-            matches!(code.code, rusqlite::ErrorCode::ConstraintViolation)
-        }
+        SqliteFailure(err, _) => matches!(
+            err.extended_code,
+            rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+        ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rusqlite::ffi::{Error as SqliteError, ErrorCode};
+
+    #[test]
+    fn unique_constraint_detection_is_precise() {
+        let unique = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+            },
+            None,
+        );
+        assert!(is_unique_constraint_violation(&unique));
+
+        let primary_key = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
+            },
+            None,
+        );
+        assert!(is_unique_constraint_violation(&primary_key));
+
+        let not_null = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL,
+            },
+            None,
+        );
+        assert!(!is_unique_constraint_violation(&not_null));
+
+        let other = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::Unknown,
+                extended_code: rusqlite::ffi::SQLITE_ERROR,
+            },
+            None,
+        );
+        assert!(!is_unique_constraint_violation(&other));
     }
 }

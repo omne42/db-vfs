@@ -76,6 +76,11 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
     if s.contains('\0') {
         return Err(Error::InvalidPath("NUL bytes are not allowed".to_string()));
     }
+    if s.chars().any(|ch| ch.is_control()) {
+        return Err(Error::InvalidPath(format!(
+            "{label} must not contain control characters"
+        )));
+    }
 
     let ends_with_slash = s.ends_with('/');
     let mut out = Vec::<&str>::new();
@@ -165,5 +170,14 @@ mod tests {
     fn normalize_path_allows_internal_whitespace() {
         assert_eq!(normalize_path("a b.txt").unwrap(), "a b.txt");
         assert_eq!(normalize_path_prefix("a b").unwrap(), "a b/");
+    }
+
+    #[test]
+    fn normalize_path_rejects_control_characters() {
+        assert!(matches!(normalize_path("a\nb"), Err(Error::InvalidPath(_))));
+        assert!(matches!(
+            normalize_path_prefix("a\tb"),
+            Err(Error::InvalidPath(_))
+        ));
     }
 }

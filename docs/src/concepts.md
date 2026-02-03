@@ -13,6 +13,8 @@ All `path` / `path_prefix` values are root-relative:
 
 - Must not start with `/`
 - Must not contain `..`
+- Must not have leading/trailing whitespace
+- Must not contain control characters
 
 `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
 `policy.permissions.allow_full_scan = true`.
