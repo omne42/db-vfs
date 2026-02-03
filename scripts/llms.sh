@@ -56,6 +56,12 @@ emit_file() {
 }
 
 cat >"$tmp" <<'EOF'
+---
+title: db-vfs docs bundle
+description: DB-backed virtual filesystem with explicit Policy + Secrets + Limits, plus an HTTP service.
+tags: [rust, sqlite, postgres, vfs, security, policy, http]
+---
+
 # db-vfs — LLM documentation bundle
 
 This file is generated from the repo sources to make RAG/LLM ingestion easier.
@@ -69,6 +75,7 @@ EOF
 emit_file "README.md"
 emit_file "policy.example.toml"
 emit_file "SECURITY.md"
+emit_file "CHANGELOG.md"
 emit_file "docs/src/SUMMARY.md"
 
 if [[ ! -f "$summary" ]]; then

@@ -4,6 +4,11 @@ use std::fmt;
 use crate::Error;
 use crate::Result;
 
+const MAX_GLOB_PATTERN_BYTES: usize = 4096;
+const MAX_SECRET_DENY_GLOBS: usize = 4096;
+const MAX_TRAVERSAL_SKIP_GLOBS: usize = 4096;
+const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
@@ -482,6 +487,85 @@ impl VfsPolicy {
             }
         }
 
+        if self.secrets.replacement.len() > MAX_SECRET_REPLACEMENT_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "secrets.replacement is too large ({} bytes; max {} bytes)",
+                self.secrets.replacement.len(),
+                MAX_SECRET_REPLACEMENT_BYTES
+            )));
+        }
+
+        if self.secrets.deny_globs.len() > MAX_SECRET_DENY_GLOBS {
+            return Err(Error::InvalidPolicy(format!(
+                "secrets.deny_globs has too many entries ({} > {})",
+                self.secrets.deny_globs.len(),
+                MAX_SECRET_DENY_GLOBS
+            )));
+        }
+        for (idx, pattern) in self.secrets.deny_globs.iter().enumerate() {
+            if pattern.len() > MAX_GLOB_PATTERN_BYTES {
+                return Err(Error::InvalidPolicy(format!(
+                    "secrets.deny_globs[{idx}] is too large ({} bytes; max {} bytes)",
+                    pattern.len(),
+                    MAX_GLOB_PATTERN_BYTES
+                )));
+            }
+        }
+
+        if self.traversal.skip_globs.len() > MAX_TRAVERSAL_SKIP_GLOBS {
+            return Err(Error::InvalidPolicy(format!(
+                "traversal.skip_globs has too many entries ({} > {})",
+                self.traversal.skip_globs.len(),
+                MAX_TRAVERSAL_SKIP_GLOBS
+            )));
+        }
+        for (idx, pattern) in self.traversal.skip_globs.iter().enumerate() {
+            if pattern.len() > MAX_GLOB_PATTERN_BYTES {
+                return Err(Error::InvalidPolicy(format!(
+                    "traversal.skip_globs[{idx}] is too large ({} bytes; max {} bytes)",
+                    pattern.len(),
+                    MAX_GLOB_PATTERN_BYTES
+                )));
+            }
+        }
+
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_large_secrets_replacement() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.replacement = "x".repeat(MAX_SECRET_REPLACEMENT_BYTES + 1);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_deny_globs() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.deny_globs = vec!["a".to_string(); MAX_SECRET_DENY_GLOBS + 1];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_long_deny_glob_pattern() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.deny_globs = vec!["a".repeat(MAX_GLOB_PATTERN_BYTES + 1)];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_traversal_skip_globs() {
+        let mut policy = VfsPolicy::default();
+        policy.traversal.skip_globs = vec!["a".to_string(); MAX_TRAVERSAL_SKIP_GLOBS + 1];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
     }
 }

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `limits.max_rate_limit_ips` to cap tracked IPs for rate limiting.
 - Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
+- `db-vfs-core`: `glob_utils` helpers for glob normalization/validation.
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
 - Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
@@ -30,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
+- Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
 - Dev: `./scripts/gate.sh` checks that `llms.txt` outputs are up to date.
 - `db-vfs-service`: require `Authorization: Bearer <token>` by default (configured via policy).
 - `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.
@@ -61,13 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: hash bearer tokens once and compare in constant time; avoid retaining plaintext tokens.
 - `db-vfs-core`: cap `path`/`path_prefix`, glob patterns, and grep queries to avoid oversized input allocations.
 - Policy: validate `limits.max_io_ms` and cap request size limits to 256MB.
-- `db-vfs-service`: map `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
+- `db-vfs-service`: map `input_too_large`, `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
 - `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
 - `db-vfs`: cap `read` retries when content cannot be loaded to avoid infinite loops.
 - `glob`: report `scanned_files` separately from `scanned_entries` and respect `traversal.skip_globs`.
 - `patch`: fetch existing content using `limits.max_read_bytes` (consistent with read limits).
 - Lint: fix `clippy::large_enum_variant`.
 - Docs: fix `Getting started` instructions to enable `permissions.write` when using `policy.example.toml`.
+- `db-vfs-core`: validate `secrets.deny_globs`, `traversal.skip_globs`, and `secrets.replacement` sizes to avoid pathological policies.
+- `db-vfs-service`: align SQLite `busy_timeout` with `limits.max_io_ms` (capped).
+- Docs: document HTTP status codes and `429 rate_limited`.
 
 ## [0.1.0] - 2026-01-31
 

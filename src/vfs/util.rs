@@ -2,6 +2,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use globset::{GlobSet, GlobSetBuilder};
 
+use db_vfs_core::glob_utils::{
+    build_glob_from_normalized, normalize_glob_pattern_for_matching,
+    validate_root_relative_glob_pattern,
+};
 use db_vfs_core::{Error, Result};
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
@@ -84,31 +88,4 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
         prefix.push('/');
     }
     Some(prefix)
-}
-
-fn validate_root_relative_glob_pattern(pattern: &str) -> std::result::Result<(), &'static str> {
-    if pattern.starts_with('/') {
-        return Err("glob patterns must be root-relative (must not start with '/')");
-    }
-    if pattern.split('/').any(|segment| segment == "..") {
-        return Err("glob patterns must not contain '..' segments");
-    }
-    Ok(())
-}
-
-fn build_glob_from_normalized(pattern: &str) -> std::result::Result<globset::Glob, globset::Error> {
-    let mut builder = globset::GlobBuilder::new(pattern);
-    builder.literal_separator(true);
-    builder.build()
-}
-
-fn normalize_glob_pattern_for_matching(pattern: &str) -> String {
-    let mut normalized = pattern.trim().replace('\\', "/");
-    while normalized.starts_with("./") {
-        normalized.drain(..2);
-    }
-    if normalized.is_empty() {
-        normalized.push('.');
-    }
-    normalized
 }

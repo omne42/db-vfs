@@ -24,6 +24,18 @@ Errors are returned as JSON with an HTTP status code:
 
 5xx errors use a non-leaky `"internal error"` message.
 
+### Status codes
+
+- `400`: `invalid_path`, `invalid_regex`
+- `401`: `unauthorized` (missing/invalid `Authorization`)
+- `403`: `forbidden`, `not_permitted`, `secret_path_denied`
+- `404`: `not_found`
+- `408`: `timeout`
+- `409`: `conflict`
+- `413`: `input_too_large`, `file_too_large`, `quota_exceeded`
+- `429`: `rate_limited`
+- `503`: `busy`
+
 ## Tracing
 
 - The service accepts and returns `x-request-id`.

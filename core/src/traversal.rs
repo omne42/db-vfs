@@ -1,5 +1,9 @@
 use globset::{GlobSet, GlobSetBuilder};
 
+use crate::glob_utils::{
+    build_glob_from_normalized, normalize_glob_pattern_for_matching,
+    validate_root_relative_glob_pattern,
+};
 use crate::policy::TraversalRules;
 use crate::{Error, Result};
 
@@ -20,33 +24,6 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
         end = end.saturating_sub(1);
     }
     format!("{}…", &pattern[..end])
-}
-
-fn validate_root_relative_glob_pattern(pattern: &str) -> std::result::Result<(), &'static str> {
-    if pattern.starts_with('/') {
-        return Err("glob patterns must be root-relative (must not start with '/')");
-    }
-    if pattern.split('/').any(|seg| seg == "..") {
-        return Err("glob patterns must not contain '..' segments");
-    }
-    Ok(())
-}
-
-fn build_glob_from_normalized(pattern: &str) -> std::result::Result<globset::Glob, globset::Error> {
-    let mut builder = globset::GlobBuilder::new(pattern);
-    builder.literal_separator(true);
-    builder.build()
-}
-
-fn normalize_glob_pattern_for_matching(pattern: &str) -> String {
-    let mut normalized = pattern.trim().replace('\\', "/");
-    while normalized.starts_with("./") {
-        normalized.drain(..2);
-    }
-    if normalized.is_empty() {
-        normalized.push('.');
-    }
-    normalized
 }
 
 impl TraversalSkipper {

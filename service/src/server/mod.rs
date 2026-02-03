@@ -68,12 +68,11 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
     let status = match code {
         "not_permitted" => StatusCode::FORBIDDEN,
         "secret_path_denied" => StatusCode::FORBIDDEN,
-        "invalid_path" | "invalid_policy" | "invalid_regex" | "input_too_large" => {
-            StatusCode::BAD_REQUEST
-        }
+        "invalid_path" | "invalid_policy" | "invalid_regex" => StatusCode::BAD_REQUEST,
         "patch" => StatusCode::BAD_REQUEST,
         "not_found" => StatusCode::NOT_FOUND,
         "conflict" => StatusCode::CONFLICT,
+        "input_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
         "file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
         "quota_exceeded" => StatusCode::PAYLOAD_TOO_LARGE,
         "timeout" => StatusCode::REQUEST_TIMEOUT,
@@ -146,8 +145,11 @@ pub fn build_app_sqlite(
     policy.validate().map_err(anyhow::Error::msg)?;
     let _ = SqliteStore::open(&db_path)?;
 
-    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path).with_init(|conn| {
-        conn.busy_timeout(Duration::from_secs(5))?;
+    const SQLITE_BUSY_TIMEOUT_CAP_MS: u64 = 5_000;
+    let busy_timeout =
+        Duration::from_millis(policy.limits.max_io_ms.min(SQLITE_BUSY_TIMEOUT_CAP_MS));
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path).with_init(move |conn| {
+        conn.busy_timeout(busy_timeout)?;
         Ok(())
     });
     let pool = r2d2::Pool::builder()
