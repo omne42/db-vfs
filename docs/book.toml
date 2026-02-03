@@ -1,0 +1,10 @@
+[book]
+title = "db-vfs Docs"
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+no-section-label = true

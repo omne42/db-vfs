@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: add `SECURITY.md` threat model and guidance.
 - Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
 - Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
+- Docs: add mdBook docs under `docs/` and an LLM-friendly bundle (`llms.txt`).
 
 ### Changed
 

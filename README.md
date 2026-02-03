@@ -11,6 +11,11 @@ Goals:
 This is intentionally *not* part of `safe-fs-tools` to keep that crate focused on local OS
 filesystem semantics and a small dependency graph.
 
+## Documentation
+
+- Human docs (mdBook sources): `docs/` (build with `./scripts/docs.sh`)
+- LLM/RAG bundle: `llms.txt` (regenerate with `./scripts/llms.sh`)
+
 ## Semantics
 
 - `workspace_id` is the namespace boundary (like a “workspace root”).
