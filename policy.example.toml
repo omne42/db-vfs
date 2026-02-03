@@ -62,3 +62,5 @@ max_rate_limit_ips = 65536
 # [audit]
 # jsonl_path = "./db-vfs-audit.jsonl"
 # required = true # fail startup if audit log can't be opened (default: true)
+# flush_every_events = 32 # flush after this many events (default: 32, 1..=65536; requires jsonl_path)
+# flush_max_interval_ms = 250 # flush at least every N milliseconds (default: 250, 1..=60000; requires jsonl_path)

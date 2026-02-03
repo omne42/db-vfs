@@ -9,6 +9,9 @@ const MAX_SECRET_DENY_GLOBS: usize = 4096;
 const MAX_TRAVERSAL_SKIP_GLOBS: usize = 4096;
 const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
 const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
+const MAX_AUDIT_FLUSH_EVERY_EVENTS: usize = 65_536;
+// Cap flush interval so policies can't defer audit flushes for arbitrarily long periods.
+const MAX_AUDIT_FLUSH_MAX_INTERVAL_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -285,6 +288,18 @@ pub struct AuditPolicy {
     /// Whether audit initialization failures should fail the service startup.
     #[serde(default = "default_audit_required")]
     pub required: bool,
+
+    /// Flush audit output after this many events (service-only).
+    ///
+    /// When unset, the service uses a default value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_every_events: Option<usize>,
+
+    /// Flush audit output at least every N milliseconds (service-only).
+    ///
+    /// When unset, the service uses a default value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flush_max_interval_ms: Option<u64>,
 }
 
 const fn default_audit_required() -> bool {
@@ -296,6 +311,8 @@ impl Default for AuditPolicy {
         Self {
             jsonl_path: None,
             required: default_audit_required(),
+            flush_every_events: None,
+            flush_max_interval_ms: None,
         }
     }
 }
@@ -589,6 +606,43 @@ impl VfsPolicy {
             }
         }
 
+        if self.audit.jsonl_path.is_none()
+            && (self.audit.flush_every_events.is_some()
+                || self.audit.flush_max_interval_ms.is_some())
+        {
+            return Err(Error::InvalidPolicy(
+                "audit.flush_* requires audit.jsonl_path to be set".to_string(),
+            ));
+        }
+
+        if let Some(flush_every_events) = self.audit.flush_every_events {
+            if flush_every_events == 0 {
+                return Err(Error::InvalidPolicy(
+                    "audit.flush_every_events must be > 0 when set".to_string(),
+                ));
+            }
+            if flush_every_events > MAX_AUDIT_FLUSH_EVERY_EVENTS {
+                return Err(Error::InvalidPolicy(format!(
+                    "audit.flush_every_events is too large (max {})",
+                    MAX_AUDIT_FLUSH_EVERY_EVENTS
+                )));
+            }
+        }
+
+        if let Some(flush_max_interval_ms) = self.audit.flush_max_interval_ms {
+            if flush_max_interval_ms == 0 {
+                return Err(Error::InvalidPolicy(
+                    "audit.flush_max_interval_ms must be > 0 when set".to_string(),
+                ));
+            }
+            if flush_max_interval_ms > MAX_AUDIT_FLUSH_MAX_INTERVAL_MS {
+                return Err(Error::InvalidPolicy(format!(
+                    "audit.flush_max_interval_ms is too large (max {} ms)",
+                    MAX_AUDIT_FLUSH_MAX_INTERVAL_MS
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -649,6 +703,54 @@ mod tests {
     fn validate_rejects_audit_path_with_control_characters() {
         let mut policy = VfsPolicy::default();
         policy.audit.jsonl_path = Some("audit\nlog.jsonl".to_string());
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_every_events_zero() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_every_events = Some(0);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_every_events_without_jsonl_path() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_every_events = Some(32);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_every_events_too_large() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_every_events = Some(MAX_AUDIT_FLUSH_EVERY_EVENTS + 1);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_max_interval_ms_zero() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_max_interval_ms = Some(0);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_max_interval_ms_without_jsonl_path() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_max_interval_ms = Some(250);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_flush_max_interval_ms_too_large() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.flush_max_interval_ms = Some(MAX_AUDIT_FLUSH_MAX_INTERVAL_MS + 1);
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }

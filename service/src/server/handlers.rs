@@ -291,6 +291,36 @@ struct AuditHooks<Resp> {
 
 fn audit_err_noop(_state: &super::AppState, _event: &mut AuditEvent, _body: &super::ErrorBody) {}
 
+fn request_ctx(
+    peer: SocketAddr,
+    state: super::AppState,
+    request_id: String,
+    auth: super::auth::AuthContext,
+    op: &'static str,
+) -> RequestContext {
+    RequestContext {
+        peer,
+        state,
+        request_id,
+        auth,
+        op,
+    }
+}
+
+fn io_limits(state: &super::AppState) -> VfsLimits {
+    VfsLimits {
+        semaphore: state.inner.io_concurrency.clone(),
+        budget: Some(super::runner::io_timeout(&state.inner.policy)),
+    }
+}
+
+fn scan_limits(state: &super::AppState) -> VfsLimits {
+    VfsLimits {
+        semaphore: state.inner.scan_concurrency.clone(),
+        budget: super::runner::scan_timeout(&state.inner.policy),
+    }
+}
+
 async fn handle_vfs_request<Req, Resp, BuildAuditReq, Run>(
     ctx: RequestContext,
     payload: Result<Json<Req>, JsonRejection>,
@@ -393,17 +423,8 @@ pub(super) async fn read(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<ReadRequest>, JsonRejection>,
 ) -> Result<Json<ReadResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.io_concurrency.clone(),
-        budget: Some(super::runner::io_timeout(&state.inner.policy)),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "read",
-    };
+    let limits = io_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "read");
     handle_vfs_request(
         ctx,
         payload,
@@ -432,17 +453,8 @@ pub(super) async fn write(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<WriteRequest>, JsonRejection>,
 ) -> Result<Json<WriteResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.io_concurrency.clone(),
-        budget: Some(super::runner::io_timeout(&state.inner.policy)),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "write",
-    };
+    let limits = io_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "write");
     handle_vfs_request(
         ctx,
         payload,
@@ -471,17 +483,8 @@ pub(super) async fn patch(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<PatchRequest>, JsonRejection>,
 ) -> Result<Json<PatchResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.io_concurrency.clone(),
-        budget: Some(super::runner::io_timeout(&state.inner.policy)),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "patch",
-    };
+    let limits = io_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "patch");
     handle_vfs_request(
         ctx,
         payload,
@@ -510,17 +513,8 @@ pub(super) async fn delete(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<DeleteRequest>, JsonRejection>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.io_concurrency.clone(),
-        budget: Some(super::runner::io_timeout(&state.inner.policy)),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "delete",
-    };
+    let limits = io_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "delete");
     handle_vfs_request(
         ctx,
         payload,
@@ -549,17 +543,8 @@ pub(super) async fn glob(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<GlobRequest>, JsonRejection>,
 ) -> Result<Json<GlobResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.scan_concurrency.clone(),
-        budget: super::runner::scan_timeout(&state.inner.policy),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "glob",
-    };
+    let limits = scan_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "glob");
     handle_vfs_request(
         ctx,
         payload,
@@ -591,17 +576,8 @@ pub(super) async fn grep(
     Extension(auth): Extension<super::auth::AuthContext>,
     payload: Result<Json<GrepRequest>, JsonRejection>,
 ) -> Result<Json<GrepResponse>, (StatusCode, Json<super::ErrorBody>)> {
-    let limits = VfsLimits {
-        semaphore: state.inner.scan_concurrency.clone(),
-        budget: super::runner::scan_timeout(&state.inner.policy),
-    };
-    let ctx = RequestContext {
-        peer,
-        state,
-        request_id,
-        auth,
-        op: "grep",
-    };
+    let limits = scan_limits(&state);
+    let ctx = request_ctx(peer, state, request_id, auth, "grep");
     handle_vfs_request(
         ctx,
         payload,

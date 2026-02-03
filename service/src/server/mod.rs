@@ -120,7 +120,17 @@ fn build_state(
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
     let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
     let audit = if let Some(path) = policy.audit.jsonl_path.as_deref() {
-        match audit::AuditLogger::new(path) {
+        let flush_every_events = policy
+            .audit
+            .flush_every_events
+            .unwrap_or(audit::DEFAULT_AUDIT_FLUSH_EVERY_EVENTS);
+        let flush_max_interval = policy
+            .audit
+            .flush_max_interval_ms
+            .map(Duration::from_millis)
+            .unwrap_or(audit::DEFAULT_AUDIT_FLUSH_MAX_INTERVAL);
+
+        match audit::AuditLogger::new(path, flush_every_events, flush_max_interval) {
             Ok(logger) => Some(logger),
             Err(err) if policy.audit.required => return Err(err),
             Err(err) => {

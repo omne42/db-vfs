@@ -61,3 +61,7 @@ Service-only observability:
 
 - `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
 - `required`: whether audit initialization failures should fail service startup (default: `true`).
+- `flush_every_events`: flush audit output after this many events (default: `32`, range: `1..=65536`).
+- `flush_max_interval_ms`: flush audit output at least every N milliseconds (default: `250`, range: `1..=60000`).
+
+Note: `flush_*` requires `jsonl_path` to be set. Flushing is `BufWriter::flush` (not `fsync`), and values are capped to keep audit output timely.

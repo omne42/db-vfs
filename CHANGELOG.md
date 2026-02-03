@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 - Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
 - Policy: `audit.required` to control whether audit init failures should fail service startup (default: fail).
+- Policy: `audit.flush_every_events` and `audit.flush_max_interval_ms` to tune JSONL audit flush batching (default: 32 events or 250ms).
 - `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
 - `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
 - `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
@@ -97,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
 - `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
 - `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
+- Policy: reject `audit.flush_*` when `audit.jsonl_path` is not set (service-only; avoids ignored settings).
 - `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
 - `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
 - `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.

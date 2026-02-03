@@ -9,8 +9,8 @@ use fs2::FileExt;
 use serde::Serialize;
 
 const AUDIT_CHANNEL_CAPACITY: usize = 1024;
-const AUDIT_FLUSH_EVERY_EVENTS: usize = 32;
-const AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_millis(250);
+pub(super) const DEFAULT_AUDIT_FLUSH_EVERY_EVENTS: usize = 32;
+pub(super) const DEFAULT_AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_millis(250);
 
 static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
 
@@ -80,14 +80,34 @@ pub(super) struct AuditEvent {
 }
 
 impl AuditLogger {
-    pub(super) fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub(super) fn new(
+        path: impl AsRef<Path>,
+        flush_every_events: usize,
+        flush_max_interval: Duration,
+    ) -> anyhow::Result<Self> {
+        if flush_every_events == 0 {
+            anyhow::bail!("flush_every_events must be > 0");
+        }
+        if flush_max_interval.is_zero() {
+            anyhow::bail!("flush_max_interval must be > 0");
+        }
+
         let path = path.as_ref().to_path_buf();
         let (lock_file, file) = open_audit_file(&path)?;
         let (sender, receiver) = mpsc::sync_channel::<AuditEvent>(AUDIT_CHANNEL_CAPACITY);
 
         std::thread::Builder::new()
             .name("db-vfs-audit".to_string())
-            .spawn(move || audit_worker(file, receiver, path, lock_file))
+            .spawn(move || {
+                audit_worker(
+                    file,
+                    receiver,
+                    path,
+                    lock_file,
+                    flush_every_events,
+                    flush_max_interval,
+                )
+            })
             .map_err(anyhow::Error::msg)?;
 
         Ok(Self { sender })
@@ -162,6 +182,8 @@ fn audit_worker(
     receiver: mpsc::Receiver<AuditEvent>,
     path: PathBuf,
     _lock_file: std::fs::File,
+    flush_every_events: usize,
+    flush_max_interval: Duration,
 ) {
     let mut out = BufWriter::new(file);
     let mut write_failures: u64 = 0;
@@ -169,7 +191,7 @@ fn audit_worker(
     let mut last_flush: Instant = Instant::now();
 
     loop {
-        match receiver.recv_timeout(AUDIT_FLUSH_MAX_INTERVAL) {
+        match receiver.recv_timeout(flush_max_interval) {
             Ok(mut event) => {
                 event.ts_ms = event.ts_ms.max(now_ms());
 
@@ -209,7 +231,7 @@ fn audit_worker(
             continue;
         }
 
-        if pending >= AUDIT_FLUSH_EVERY_EVENTS || last_flush.elapsed() >= AUDIT_FLUSH_MAX_INTERVAL {
+        if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
             if let Err(err) = out.flush() {
                 write_failures = write_failures.saturating_add(1);
                 if write_failures == 1 || write_failures % 1000 == 0 {
