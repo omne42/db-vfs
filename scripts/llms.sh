@@ -36,7 +36,7 @@ docs_src="$repo_root/docs/src"
 summary="$docs_src/SUMMARY.md"
 out_root="$repo_root/llms.txt"
 out_docs="$repo_root/docs/llms.txt"
-tmp="$(mktemp "${out_root}.tmp.XXXXXX")"
+tmp="$(mktemp)"
 
 cleanup() {
   rm -f "$tmp"
@@ -76,20 +76,21 @@ if [[ ! -f "$summary" ]]; then
   exit 1
 fi
 
-while IFS=$'\t' read -r title file; do
-  [[ -z "${file}" ]] && continue
+sed -n 's/.*\[\(.*\)\](\(.*\.md\)).*/\1\t\2/p' "$summary" |
+  while IFS=$'\t' read -r title file; do
+    [[ -z "${file}" ]] && continue
 
-  path="docs/src/${file}"
-  if [[ ! -f "$repo_root/$path" ]]; then
-    echo "llms: missing doc file referenced from SUMMARY.md: ${file}" >&2
-    exit 1
-  fi
+    path="docs/src/${file}"
+    if [[ ! -f "$repo_root/$path" ]]; then
+      echo "llms: missing doc file referenced from SUMMARY.md: ${file}" >&2
+      exit 1
+    fi
 
-  printf '\n' >>"$tmp"
-  printf -- '---\n# %s (%s)\n---\n\n' "$title" "$file" >>"$tmp"
-  cat "$repo_root/$path" >>"$tmp"
-  printf '\n' >>"$tmp"
-done < <(sed -n 's/.*\\[\\(.*\\)\\](\\(.*\\.md\\)).*/\\1\\t\\2/p' "$summary")
+    printf '\n' >>"$tmp"
+    printf -- '---\nfile: %s\ntitle: %s\n---\n\n' "$path" "$title" >>"$tmp"
+    cat "$repo_root/$path" >>"$tmp"
+    printf '\n' >>"$tmp"
+  done
 
 if [[ "$mode" == "check" ]]; then
   if [[ ! -f "$out_root" || ! -f "$out_docs" ]]; then
