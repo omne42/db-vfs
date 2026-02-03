@@ -606,13 +606,20 @@ impl VfsPolicy {
             }
         }
 
-        if self.audit.jsonl_path.is_none()
-            && (self.audit.flush_every_events.is_some()
-                || self.audit.flush_max_interval_ms.is_some())
-        {
-            return Err(Error::InvalidPolicy(
-                "audit.flush_* requires audit.jsonl_path to be set".to_string(),
-            ));
+        if self.audit.jsonl_path.is_none() {
+            let mut fields = Vec::new();
+            if self.audit.flush_every_events.is_some() {
+                fields.push("audit.flush_every_events");
+            }
+            if self.audit.flush_max_interval_ms.is_some() {
+                fields.push("audit.flush_max_interval_ms");
+            }
+            if !fields.is_empty() {
+                return Err(Error::InvalidPolicy(format!(
+                    "{} requires audit.jsonl_path to be set",
+                    fields.join(" and ")
+                )));
+            }
         }
 
         if let Some(flush_every_events) = self.audit.flush_every_events {

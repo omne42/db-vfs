@@ -86,10 +86,10 @@ impl AuditLogger {
         flush_max_interval: Duration,
     ) -> anyhow::Result<Self> {
         if flush_every_events == 0 {
-            anyhow::bail!("flush_every_events must be > 0");
+            anyhow::bail!("flush_every_events must be > 0 (got {flush_every_events})");
         }
         if flush_max_interval.is_zero() {
-            anyhow::bail!("flush_max_interval must be > 0");
+            anyhow::bail!("flush_max_interval must be > 0 (got {flush_max_interval:?})");
         }
 
         let path = path.as_ref().to_path_buf();
@@ -166,15 +166,9 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
 }
 
 fn lock_path_for(log_path: &Path) -> PathBuf {
-    let mut lock_path = log_path.to_path_buf();
-    lock_path.set_extension(format!(
-        "{}.lock",
-        log_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("lock")
-    ));
-    lock_path
+    let mut lock_path = log_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
 }
 
 fn audit_worker(
