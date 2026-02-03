@@ -3,7 +3,7 @@
 * [Introduction](index.md)
 * [Getting started](getting-started.md)
 * [Concepts](concepts.md)
-* Guides
+* [Guides](guides.md)
   * [Policy](policy.md)
   * [HTTP API](http-api.md)
   * [Storage backends](storage.md)

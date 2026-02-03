@@ -1,7 +1,6 @@
 [book]
 title = "db-vfs Docs"
 language = "en"
-multilingual = false
 src = "src"
 
 [output.html]

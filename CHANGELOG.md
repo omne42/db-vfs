@@ -75,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: document HTTP status codes and `429 rate_limited`.
 - `db-vfs-service`: return JSON error bodies for invalid JSON / missing `content-type` (new codes: `invalid_json`, `unsupported_media_type`, `payload_too_large`).
 - `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
-- Docs: fix mdBook link to `policy.example.toml` when building via `./scripts/docs.sh`.
+- Docs: fix mdBook build (mdbook v0.5 config + SUMMARY nesting) and make `policy.example.toml` link work when building via `./scripts/docs.sh`.
 
 ## [0.1.0] - 2026-01-31
 
