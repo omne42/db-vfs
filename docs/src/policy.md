@@ -60,3 +60,4 @@ Scan-only skipping rules:
 Service-only observability:
 
 - `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
+- `required`: whether audit initialization failures should fail service startup (default: `true`).

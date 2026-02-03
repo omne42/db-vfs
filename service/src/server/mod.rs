@@ -119,12 +119,22 @@ fn build_state(
     let scan_concurrency = policy.limits.max_concurrency_scan;
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
     let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
-    let audit = policy
-        .audit
-        .jsonl_path
-        .as_deref()
-        .map(audit::AuditLogger::new)
-        .transpose()?;
+    let audit = if let Some(path) = policy.audit.jsonl_path.as_deref() {
+        match audit::AuditLogger::new(path) {
+            Ok(logger) => Some(logger),
+            Err(err) if policy.audit.required => return Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    err = %err,
+                    audit_path = %path,
+                    "failed to initialize audit log; continuing with audit disabled"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let auth_token_count = policy.auth.tokens.len();
     let auth_allowed_workspace_patterns: usize = policy
@@ -268,4 +278,42 @@ pub fn build_app(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     build_app_sqlite(db_path, policy, unsafe_no_auth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn audit_required_false_allows_startup_when_audit_path_invalid() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+        let audit_path = dir.path().join("audit.jsonl");
+        std::fs::create_dir_all(&audit_path).expect("create_dir_all");
+
+        let mut policy = VfsPolicy::default();
+        policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
+        policy.audit.required = false;
+
+        assert!(build_app_sqlite(db_path, policy, true).is_ok());
+    }
+
+    #[test]
+    fn audit_required_true_fails_startup_when_audit_path_invalid() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+        let audit_path = dir.path().join("audit.jsonl");
+        std::fs::create_dir_all(&audit_path).expect("create_dir_all");
+
+        let mut policy = VfsPolicy::default();
+        policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
+
+        let err = build_app_sqlite(db_path, policy, true).expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("audit.jsonl_path must be a regular file")
+        );
+    }
 }

@@ -273,7 +273,7 @@ pub struct VfsPolicy {
     pub auth: AuthPolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditPolicy {
     /// Optional JSONL audit log path (service-only).
@@ -281,6 +281,23 @@ pub struct AuditPolicy {
     /// When set, `db-vfs-service` appends one JSON object per request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jsonl_path: Option<String>,
+
+    /// Whether audit initialization failures should fail the service startup.
+    #[serde(default = "default_audit_required")]
+    pub required: bool,
+}
+
+const fn default_audit_required() -> bool {
+    true
+}
+
+impl Default for AuditPolicy {
+    fn default() -> Self {
+        Self {
+            jsonl_path: None,
+            required: default_audit_required(),
+        }
+    }
 }
 
 impl VfsPolicy {
@@ -548,6 +565,11 @@ impl VfsPolicy {
                     "audit.jsonl_path must be non-empty when set".to_string(),
                 ));
             }
+            if path != path.trim() {
+                return Err(Error::InvalidPolicy(
+                    "audit.jsonl_path must not have leading or trailing whitespace".to_string(),
+                ));
+            }
             if path.len() > MAX_AUDIT_JSONL_PATH_BYTES {
                 return Err(Error::InvalidPolicy(format!(
                     "audit.jsonl_path is too large ({} bytes; max {} bytes)",
@@ -558,6 +580,11 @@ impl VfsPolicy {
             if path.contains('\0') {
                 return Err(Error::InvalidPolicy(
                     "audit.jsonl_path must not contain NUL bytes".to_string(),
+                ));
+            }
+            if path.chars().any(|ch| ch.is_control()) {
+                return Err(Error::InvalidPolicy(
+                    "audit.jsonl_path must not contain control characters".to_string(),
                 ));
             }
         }
@@ -606,6 +633,22 @@ mod tests {
     fn validate_rejects_large_audit_path() {
         let mut policy = VfsPolicy::default();
         policy.audit.jsonl_path = Some("x".repeat(MAX_AUDIT_JSONL_PATH_BYTES + 1));
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_path_with_whitespace() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.jsonl_path = Some(" ./audit.jsonl".to_string());
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_audit_path_with_control_characters() {
+        let mut policy = VfsPolicy::default();
+        policy.audit.jsonl_path = Some("audit\nlog.jsonl".to_string());
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }

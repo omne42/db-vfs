@@ -67,6 +67,7 @@ Notes:
   - Otherwise the service generates one and returns it in the response headers.
 - Optional JSONL audit log (policy `[audit]`):
   - If `audit.jsonl_path` is set, the service appends one JSON object per request (does not include file content or grep query text).
+  - `audit.required` (default: `true`) controls whether audit initialization failures should fail service startup; set it to `false` to continue with audit disabled.
 - Concurrency and pooling are controlled by policy `limits`:
   - `max_concurrency_io` (read/write/patch/delete)
   - `max_concurrency_scan` (glob/grep)

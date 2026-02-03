@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 - Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
+- Policy: `audit.required` to control whether audit init failures should fail service startup (default: fail).
 - `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
 - `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
 - `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
@@ -99,6 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
+- Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
 
 ## [0.1.0] - 2026-01-31
 

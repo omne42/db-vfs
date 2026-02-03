@@ -23,3 +23,4 @@ Notes:
 
 - Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
 - Records do not include file content or grep query text (grep logs only query length + regex flag).
+- `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).

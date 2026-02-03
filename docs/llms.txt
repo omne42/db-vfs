@@ -86,6 +86,7 @@ Notes:
   - Otherwise the service generates one and returns it in the response headers.
 - Optional JSONL audit log (policy `[audit]`):
   - If `audit.jsonl_path` is set, the service appends one JSON object per request (does not include file content or grep query text).
+  - `audit.required` (default: `true`) controls whether audit initialization failures should fail service startup; set it to `false` to continue with audit disabled.
 - Concurrency and pooling are controlled by policy `limits`:
   - `max_concurrency_io` (read/write/patch/delete)
   - `max_concurrency_scan` (glob/grep)
@@ -254,6 +255,7 @@ max_rate_limit_ips = 65536
 #
 # [audit]
 # jsonl_path = "./db-vfs-audit.jsonl"
+# required = true # fail startup if audit log can't be opened (default: true)
 
 
 ---
@@ -360,6 +362,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
 - `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
 - Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
+- Policy: `audit.required` to control whether audit init failures should fail service startup (default: fail).
 - `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
 - `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
 - `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
@@ -435,6 +438,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
 - `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
 - `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
+- Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
 
 ## [0.1.0] - 2026-01-31
 
@@ -708,6 +712,7 @@ Scan-only skipping rules:
 Service-only observability:
 
 - `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
+- `required`: whether audit initialization failures should fail service startup (default: `true`).
 
 
 ---
@@ -841,6 +846,7 @@ Notes:
 
 - Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
 - Records do not include file content or grep query text (grep logs only query length + regex flag).
+- `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).
 
 
 ---

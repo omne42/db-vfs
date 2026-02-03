@@ -59,3 +59,4 @@ max_rate_limit_ips = 65536
 #
 # [audit]
 # jsonl_path = "./db-vfs-audit.jsonl"
+# required = true # fail startup if audit log can't be opened (default: true)
