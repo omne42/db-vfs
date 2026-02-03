@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Docs: include `llms.txt` in the built mdBook output (`docs/book/llms.txt`) for easy download when hosted.
 - `db-vfs-service`: build with bundled SQLite (`rusqlite` feature `bundled`) for portability.
+- `db-vfs-service`: run SQLite migrations with `busy_timeout` aligned to `limits.max_io_ms` (capped).
+- Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.

@@ -130,7 +130,7 @@ Run gates (fmt/check/clippy/test):
 Enable git hooks:
 
 ```bash
-git config core.hooksPath githooks
+./scripts/setup-githooks.sh
 ```
 
 The hooks enforce Conventional Commits and require `CHANGELOG.md` updates. The Rust file size guard

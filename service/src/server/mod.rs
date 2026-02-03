@@ -18,7 +18,6 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
-use db_vfs::store::sqlite::SqliteStore;
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
@@ -142,11 +141,17 @@ pub fn build_app_sqlite(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     policy.validate().map_err(anyhow::Error::msg)?;
-    let _ = SqliteStore::open(&db_path)?;
 
     const SQLITE_BUSY_TIMEOUT_CAP_MS: u64 = 5_000;
     let busy_timeout =
         Duration::from_millis(policy.limits.max_io_ms.min(SQLITE_BUSY_TIMEOUT_CAP_MS));
+
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.busy_timeout(busy_timeout)?;
+        db_vfs::migrations::migrate_sqlite(&conn).map_err(anyhow::Error::msg)?;
+    }
+
     let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path).with_init(move |conn| {
         conn.busy_timeout(busy_timeout)?;
         Ok(())
