@@ -15,8 +15,6 @@ const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
 const MAX_REDACT_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
 
-const PROBE_FILE_NAME: &str = ".db-vfs-probe";
-
 #[derive(Debug, Clone)]
 pub struct SecretRedactor {
     deny: GlobSet,
@@ -48,6 +46,19 @@ impl SecretRedactor {
                 Error::InvalidPolicy(format!("invalid deny glob {pattern:?}: {err}"))
             })?;
             deny_builder.add(glob);
+
+            if normalized.ends_with("/*") {
+                let expanded = format!(
+                    "{}**",
+                    normalized
+                        .strip_suffix('*')
+                        .expect("ends_with(\"/*\") implies a trailing '*'")
+                );
+                let glob = build_glob_from_normalized(&expanded).map_err(|err| {
+                    Error::InvalidPolicy(format!("invalid deny glob {pattern:?}: {err}"))
+                })?;
+                deny_builder.add(glob);
+            }
         }
         let deny = deny_builder
             .build()
@@ -91,32 +102,8 @@ impl SecretRedactor {
     }
 
     pub fn is_path_denied(&self, path: &str) -> bool {
-        if self.deny.is_match(std::path::Path::new(path)) {
-            return true;
-        }
-
-        // Directory probe trick: deny `dir/*` should hide everything under `dir/**`.
-        let is_dir = path.ends_with('/');
         let path = path.trim_start_matches('/');
-        let segments: Vec<&str> = path.split('/').filter(|seg| !seg.is_empty()).collect();
-        let probe_depth = if is_dir {
-            segments.len()
-        } else {
-            segments.len().saturating_sub(1)
-        };
-
-        let mut current = String::new();
-        for segment in segments.into_iter().take(probe_depth) {
-            if !current.is_empty() {
-                current.push('/');
-            }
-            current.push_str(segment);
-            let probe = format!("{current}/{PROBE_FILE_NAME}");
-            if self.deny.is_match(std::path::Path::new(&probe)) {
-                return true;
-            }
-        }
-        false
+        self.deny.is_match(std::path::Path::new(path))
     }
 
     pub fn redact_text(&self, input: &str) -> String {

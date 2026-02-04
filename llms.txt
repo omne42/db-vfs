@@ -418,6 +418,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Dev: align Cargo `rust-version` with the pinned toolchain/CI (Rust 1.91).
+- Policy: cap scan-related limits (`max_results`, `max_walk_files`, `max_walk_entries`, `max_line_bytes`) to avoid pathological policies.
 - Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
 - `db-vfs-service`: avoid panic on invalid/missing DB backend args.
 - `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
@@ -435,6 +436,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: map `input_too_large`, `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
 - `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
 - `db-vfs`: cap `read` retries when content cannot be loaded to avoid infinite loops.
+- `db-vfs-core`: pre-expand deny/skip globs ending with `/*` to also match descendants (`/**`) without per-path probe allocations.
 - `glob`: report `scanned_files` separately from `scanned_entries` and respect `traversal.skip_globs`.
 - `patch`: fetch existing content using `limits.max_read_bytes` (consistent with read limits).
 - Lint: fix `clippy::large_enum_variant`.

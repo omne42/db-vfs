@@ -7,8 +7,6 @@ use crate::glob_utils::{
 use crate::policy::TraversalRules;
 use crate::{Error, Result};
 
-const PROBE_FILE_NAME: &str = ".db-vfs-probe";
-
 #[derive(Debug, Clone)]
 pub struct TraversalSkipper {
     skip: Option<GlobSet>,
@@ -48,6 +46,22 @@ impl TraversalSkipper {
                 ))
             })?;
             builder.add(glob);
+
+            if normalized.ends_with("/*") {
+                let expanded = format!(
+                    "{}**",
+                    normalized
+                        .strip_suffix('*')
+                        .expect("ends_with(\"/*\") implies a trailing '*'")
+                );
+                let glob = build_glob_from_normalized(&expanded).map_err(|err| {
+                    Error::InvalidPolicy(format!(
+                        "invalid traversal.skip_globs glob {:?}: {err}",
+                        summarize_pattern_for_error(pattern)
+                    ))
+                })?;
+                builder.add(glob);
+            }
         }
         let skip = builder
             .build()
@@ -59,33 +73,7 @@ impl TraversalSkipper {
         let Some(skip) = &self.skip else {
             return false;
         };
-
-        if skip.is_match(std::path::Path::new(path)) {
-            return true;
-        }
-
-        // Directory probe trick: `dir/*` should skip everything under `dir/**`.
-        let is_dir = path.ends_with('/');
         let path = path.trim_start_matches('/');
-        let segments: Vec<&str> = path.split('/').filter(|seg| !seg.is_empty()).collect();
-        let probe_depth = if is_dir {
-            segments.len()
-        } else {
-            segments.len().saturating_sub(1)
-        };
-
-        let mut current = String::new();
-        for segment in segments.into_iter().take(probe_depth) {
-            if !current.is_empty() {
-                current.push('/');
-            }
-            current.push_str(segment);
-            let probe = format!("{current}/{PROBE_FILE_NAME}");
-            if skip.is_match(std::path::Path::new(&probe)) {
-                return true;
-            }
-        }
-
-        false
+        skip.is_match(std::path::Path::new(path))
     }
 }

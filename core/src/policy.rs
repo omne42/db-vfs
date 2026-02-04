@@ -10,6 +10,10 @@ const MAX_TRAVERSAL_SKIP_GLOBS: usize = 4096;
 const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
 const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
 const MAX_AUDIT_FLUSH_EVERY_EVENTS: usize = 65_536;
+const MAX_LIMIT_MAX_RESULTS: usize = 100_000;
+const MAX_LIMIT_MAX_WALK_FILES: usize = 500_000;
+const MAX_LIMIT_MAX_WALK_ENTRIES: usize = 1_000_000;
+const MAX_LIMIT_MAX_LINE_BYTES: usize = 64 * 1024;
 // Cap flush interval so policies can't defer audit flushes for arbitrarily long periods.
 const MAX_AUDIT_FLUSH_MAX_INTERVAL_MS: u64 = 60_000;
 
@@ -402,20 +406,44 @@ impl VfsPolicy {
                 "limits.max_results must be > 0".to_string(),
             ));
         }
+        if self.limits.max_results > MAX_LIMIT_MAX_RESULTS {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_results is too large (max {})",
+                MAX_LIMIT_MAX_RESULTS
+            )));
+        }
         if self.limits.max_walk_files == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_walk_files must be > 0".to_string(),
             ));
+        }
+        if self.limits.max_walk_files > MAX_LIMIT_MAX_WALK_FILES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_walk_files is too large (max {})",
+                MAX_LIMIT_MAX_WALK_FILES
+            )));
         }
         if self.limits.max_walk_entries == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_walk_entries must be > 0".to_string(),
             ));
         }
+        if self.limits.max_walk_entries > MAX_LIMIT_MAX_WALK_ENTRIES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_walk_entries is too large (max {})",
+                MAX_LIMIT_MAX_WALK_ENTRIES
+            )));
+        }
         if self.limits.max_line_bytes == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_line_bytes must be > 0".to_string(),
             ));
+        }
+        if self.limits.max_line_bytes > MAX_LIMIT_MAX_LINE_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_line_bytes is too large (max {})",
+                MAX_LIMIT_MAX_LINE_BYTES
+            )));
         }
         if self.limits.max_io_ms == 0 {
             return Err(Error::InvalidPolicy(
@@ -696,6 +724,38 @@ impl VfsPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_large_max_results() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_results = MAX_LIMIT_MAX_RESULTS + 1;
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_large_max_walk_files() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_walk_files = MAX_LIMIT_MAX_WALK_FILES + 1;
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_large_max_walk_entries() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_walk_entries = MAX_LIMIT_MAX_WALK_ENTRIES + 1;
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_large_max_line_bytes() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_line_bytes = MAX_LIMIT_MAX_LINE_BYTES + 1;
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
 
     #[test]
     fn validate_rejects_large_secrets_replacement() {
