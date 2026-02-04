@@ -2,7 +2,7 @@
 name = "db-vfs-service"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "HTTP service for db-vfs (SQLite/Postgres-backed virtual filesystem)."
 
 [features]

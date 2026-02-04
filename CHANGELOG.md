@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dev: align Cargo `rust-version` with the pinned toolchain/CI (Rust 1.91).
 - Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
 - `db-vfs-service`: avoid panic on invalid/missing DB backend args.
 - `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
@@ -80,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: include semaphore queueing time in request timeouts (avoid unbounded waits under load).
 - `db-vfs-service`: ensure SQLite interrupts are still requested even if timeout races cancel-handle installation.
 - Store: reject CAS updates when the version would overflow the DB's 64-bit signed integer storage.
+- `write`/`delete`: reject `expected_version` values that exceed the DB's 64-bit signed integer storage.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.

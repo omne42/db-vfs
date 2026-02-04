@@ -34,10 +34,10 @@ impl CancelState {
 
     fn request_cancel(&self) {
         self.requested.store(true, Ordering::Release);
-        if let Ok(guard) = self.handle.lock() {
-            if let Some(handle) = guard.as_ref() {
-                handle.cancel();
-            }
+        if let Ok(guard) = self.handle.lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            handle.cancel();
         }
     }
 

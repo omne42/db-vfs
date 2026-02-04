@@ -37,6 +37,15 @@ pub(super) fn write<S: crate::store::Store>(
         return Err(Error::SecretPathDenied(path));
     }
 
+    if let Some(expected_version) = request.expected_version
+        && expected_version > i64::MAX as u64
+    {
+        return Err(Error::InvalidPath(format!(
+            "expected_version is too large (max {})",
+            i64::MAX
+        )));
+    }
+
     let bytes_written = request.content.len() as u64;
     if bytes_written > vfs.policy.limits.max_write_bytes {
         return Err(Error::FileTooLarge {

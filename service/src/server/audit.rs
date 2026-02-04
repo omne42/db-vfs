@@ -172,7 +172,7 @@ impl AuditLogger {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 let dropped = DROPPED_AUDIT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
-                if dropped == 1 || dropped % 1000 == 0 {
+                if dropped == 1 || dropped.is_multiple_of(1000) {
                     tracing::warn!(dropped, "audit log channel is full; dropping audit events");
                 }
             }
@@ -256,7 +256,7 @@ fn audit_worker(
 
                 if let Err(err) = serde_json::to_writer(&mut out, &event) {
                     write_failures = write_failures.saturating_add(1);
-                    if write_failures == 1 || write_failures % 1000 == 0 {
+                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
                             err = %err,
                             audit_path = ?path,
@@ -269,7 +269,7 @@ fn audit_worker(
 
                 if let Err(err) = out.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
-                    if write_failures == 1 || write_failures % 1000 == 0 {
+                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
                             err = %err,
                             audit_path = ?path,
@@ -293,7 +293,7 @@ fn audit_worker(
         if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
             if let Err(err) = out.flush() {
                 write_failures = write_failures.saturating_add(1);
-                if write_failures == 1 || write_failures % 1000 == 0 {
+                if write_failures == 1 || write_failures.is_multiple_of(1000) {
                     tracing::warn!(
                         err = %err,
                         audit_path = ?path,

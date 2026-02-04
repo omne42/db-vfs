@@ -252,10 +252,10 @@ fn audit_redact_scan_fields(state: &super::AppState, event: &mut AuditEvent) {
     if let Some(prefix) = event.path_prefix.as_deref() {
         event.path_prefix = Some(redact_path(&state.inner.redactor, prefix));
     }
-    if let Some(pattern) = event.glob_pattern.as_deref() {
-        if state.inner.redactor.is_path_denied(pattern) {
-            event.glob_pattern = Some("<secret>".to_string());
-        }
+    if let Some(pattern) = event.glob_pattern.as_deref()
+        && state.inner.redactor.is_path_denied(pattern)
+    {
+        event.glob_pattern = Some("<secret>".to_string());
     }
 }
 

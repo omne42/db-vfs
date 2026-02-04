@@ -163,6 +163,40 @@ fn write_read_patch_delete_roundtrip() {
 }
 
 #[test]
+fn write_rejects_expected_version_overflow() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let too_large = i64::MAX as u64 + 1;
+    let err = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "hello".to_string(),
+            expected_version: Some(too_large),
+        })
+        .expect_err("should reject expected_version overflow");
+    assert_eq!(err.code(), "invalid_path");
+}
+
+#[test]
+fn delete_rejects_expected_version_overflow() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let too_large = i64::MAX as u64 + 1;
+    let err = vfs
+        .delete(DeleteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            expected_version: Some(too_large),
+            ignore_missing: true,
+        })
+        .expect_err("should reject expected_version overflow");
+    assert_eq!(err.code(), "invalid_path");
+}
+
+#[test]
 fn glob_requires_scope_for_broad_patterns() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);

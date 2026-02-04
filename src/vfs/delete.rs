@@ -37,6 +37,15 @@ pub(super) fn delete<S: crate::store::Store>(
         return Err(Error::SecretPathDenied(path));
     }
 
+    if let Some(expected_version) = request.expected_version
+        && expected_version > i64::MAX as u64
+    {
+        return Err(Error::InvalidPath(format!(
+            "expected_version is too large (max {})",
+            i64::MAX
+        )));
+    }
+
     let outcome = vfs
         .store
         .delete_file(&request.workspace_id, &path, request.expected_version)?;
