@@ -28,6 +28,18 @@ pub fn validate_root_relative_glob_pattern(pattern: &str) -> std::result::Result
     Ok(())
 }
 
+/// Expand a `dir/*`-style glob into a second pattern that matches descendants (`dir/**`).
+///
+/// This is used to preserve historical semantics where deny/skip globs ending with `/*` also apply
+/// to nested paths under that directory.
+pub(crate) fn expand_dir_star_to_descendants(normalized: &str) -> Option<String> {
+    if !normalized.ends_with("/*") {
+        return None;
+    }
+    let prefix = normalized.strip_suffix('*')?;
+    Some(format!("{prefix}**"))
+}
+
 /// Build a `globset` glob for matching against `db-vfs` root-relative paths.
 pub fn build_glob_from_normalized(
     pattern: &str,

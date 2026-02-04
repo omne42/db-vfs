@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: clarify that deny/skip globs like `dir/*` also apply to descendants under `dir/**`.
+- Docs: document validation hard caps for scan limits (`max_results`, `max_walk_*`, `max_line_bytes`).
 - Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
 - Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
 - Docs: clarify that GitHub Pages deploy requires enabling Pages (workflow skips deploy otherwise).

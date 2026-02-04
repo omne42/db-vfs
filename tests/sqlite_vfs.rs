@@ -281,7 +281,7 @@ fn grep_requires_explicit_path_prefix() {
 }
 
 #[test]
-fn deny_globs_hide_descendants_via_probe() {
+fn deny_globs_hide_descendants_under_dir_star() {
     let mut store = SqliteStore::open_in_memory().unwrap();
     store
         .insert_file_new("ws", "dir/a/b.txt", "secret", now_ms())

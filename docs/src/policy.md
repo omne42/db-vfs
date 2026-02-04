@@ -41,6 +41,14 @@ Budgets to control CPU/memory/DB load, including:
 - service: `max_io_ms`, `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Notes:
+  - Size limits (`max_read_bytes`, `max_write_bytes`, `max_patch_bytes`) are structurally capped at 256MB.
+  - Scan-related limits are validated with hard caps to avoid pathological policies:
+    - `max_results`: `1..=100000`
+    - `max_walk_files`: `1..=500000`
+    - `max_walk_entries`: `1..=1000000`
+    - `max_line_bytes`: `1..=65536`
+
 Note: `db-vfs-service --trust-mode untrusted` requires `max_walk_ms` and per-IP rate limiting (`max_requests_per_ip_per_sec > 0`).
 
 ### `[secrets]`

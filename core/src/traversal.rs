@@ -1,8 +1,8 @@
 use globset::{GlobSet, GlobSetBuilder};
 
 use crate::glob_utils::{
-    build_glob_from_normalized, normalize_glob_pattern_for_matching,
-    validate_root_relative_glob_pattern,
+    build_glob_from_normalized, expand_dir_star_to_descendants,
+    normalize_glob_pattern_for_matching, validate_root_relative_glob_pattern,
 };
 use crate::policy::TraversalRules;
 use crate::{Error, Result};
@@ -47,13 +47,7 @@ impl TraversalSkipper {
             })?;
             builder.add(glob);
 
-            if normalized.ends_with("/*") {
-                let expanded = format!(
-                    "{}**",
-                    normalized
-                        .strip_suffix('*')
-                        .expect("ends_with(\"/*\") implies a trailing '*'")
-                );
+            if let Some(expanded) = expand_dir_star_to_descendants(&normalized) {
                 let glob = build_glob_from_normalized(&expanded).map_err(|err| {
                     Error::InvalidPolicy(format!(
                         "invalid traversal.skip_globs glob {:?}: {err}",
