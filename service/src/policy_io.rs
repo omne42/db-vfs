@@ -56,6 +56,13 @@ pub fn load_policy(
 }
 
 fn interpolate_env(raw: &str) -> anyhow::Result<String> {
+    interpolate_env_with(raw, |name| std::env::var(name))
+}
+
+fn interpolate_env_with(
+    raw: &str,
+    mut lookup: impl FnMut(&str) -> Result<String, std::env::VarError>,
+) -> anyhow::Result<String> {
     let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
 
@@ -84,7 +91,7 @@ fn interpolate_env(raw: &str) -> anyhow::Result<String> {
             if !is_valid_env_var_name(name) {
                 anyhow::bail!("policy env interpolation: invalid env var name {name:?}");
             }
-            let value = std::env::var(name).map_err(|_| {
+            let value = lookup(name).map_err(|_| {
                 anyhow::anyhow!("policy env interpolation: env var {name:?} is not set")
             })?;
             out.push_str(&value);
@@ -174,25 +181,20 @@ fn validate_trust_mode(
 mod tests {
     use super::*;
 
-    use std::sync::{Mutex, OnceLock};
-
     use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     #[test]
     fn interpolate_env_replaces_vars() {
-        let _guard = env_lock();
         let key = format!("DB_VFS_TEST_ENV_{}", std::process::id());
-        unsafe { std::env::set_var(&key, "world") };
         let raw = format!("hello ${{{key}}}!");
-        let out = interpolate_env(&raw).unwrap();
+        let out = interpolate_env_with(&raw, |name| {
+            if name == key.as_str() {
+                return Ok("world".to_string());
+            }
+            Err(std::env::VarError::NotPresent)
+        })
+        .unwrap();
         assert_eq!(out, "hello world!");
-        unsafe { std::env::remove_var(&key) };
     }
 
     #[test]

@@ -356,6 +356,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: add GitHub Actions workflows for gates/tests and docs deploy (mdBook → GitHub Pages).
 - Dev: add `./scripts/setup-githooks.sh` helper to enable repo git hooks.
 - `db-vfs-service`: optional Postgres backend via `--postgres` (build with `--features postgres`).
+- `db-vfs-core`: `ValidatedVfsPolicy` newtype for policies that passed `VfsPolicy::validate()`.
+- `db-vfs-core`: `ValidatedVfsPolicy::clear_auth_tokens` helper for dropping auth tokens after auth initialization.
 - Policy: `auth` section with bearer tokens + per-token workspace allowlist.
 - Policy: `auth.tokens[].token_env_var` to load a plaintext token from an environment variable at runtime.
 - Policy: `auth.tokens[].token = "sha256:<64 hex>"` for storing hashed tokens.
@@ -387,6 +389,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: include `llms.txt` in the built mdBook output (`docs/book/llms.txt`) for easy download when hosted.
 - `db-vfs-service`: build with bundled SQLite (`rusqlite` feature `bundled`) for portability.
 - `db-vfs-service`: run SQLite migrations with `busy_timeout` aligned to `limits.max_io_ms` (capped).
+- `db-vfs-service`: avoid per-request `VfsPolicy::validate()` overhead by using `ValidatedVfsPolicy` internally (and avoid redundant validation during server startup).
 - Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
 - Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
 - Docs: clarify that deny/skip globs like `dir/*` also apply to descendants under `dir/**`.
@@ -420,6 +423,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: avoid blocking the async runtime when attempting SQLite timeout interrupts.
 - `db-vfs-service`: include semaphore queueing time in request timeouts (avoid unbounded waits under load).
 - `db-vfs-service`: ensure SQLite interrupts are still requested even if timeout races cancel-handle installation.
+- Store: reject CAS updates when the version would overflow the DB's 64-bit signed integer storage.
 - Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
 - `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
 - `db-vfs-service`: request body size limit and non-leaky 5xx error messages.

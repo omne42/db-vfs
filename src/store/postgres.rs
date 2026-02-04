@@ -144,7 +144,7 @@ where
         now_ms: u64,
     ) -> Result<FileRecord> {
         let size_bytes = content.len() as u64;
-        let new_version = expected_version.saturating_add(1);
+        let new_version = super::next_version(expected_version)?;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
         let new_version_i64 = u64_to_i64(new_version, "new_version")?;
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;

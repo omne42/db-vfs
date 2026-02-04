@@ -111,7 +111,7 @@ where
             if let Some(cancel_handle) = cancel_handle {
                 cancel_for_worker.set_handle(cancel_handle);
             }
-            let mut vfs = DbVfs::new_with_matchers(store, policy, redactor, traversal)?;
+            let mut vfs = DbVfs::new_with_matchers_validated(store, policy, redactor, traversal);
             op(&mut vfs)
         },
     )

@@ -78,7 +78,30 @@ fn make_prefix_bounds(prefix: &str) -> (String, String) {
     (lower, upper)
 }
 
+fn next_version(expected_version: u64) -> Result<u64> {
+    if expected_version >= i64::MAX as u64 {
+        return Err(Error::Conflict("version overflow".to_string()));
+    }
+    Ok(expected_version + 1)
+}
+
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_version_increments() {
+        assert_eq!(next_version(1).unwrap(), 2);
+    }
+
+    #[test]
+    fn next_version_rejects_overflow() {
+        let err = next_version(i64::MAX as u64).expect_err("should overflow");
+        assert_eq!(err.code(), "conflict");
+    }
+}

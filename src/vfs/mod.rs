@@ -6,6 +6,7 @@ mod read;
 mod util;
 mod write;
 
+use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
@@ -23,7 +24,7 @@ pub use write::{WriteRequest, WriteResponse};
 
 #[derive(Debug)]
 pub struct DbVfs<S> {
-    policy: VfsPolicy,
+    policy: ValidatedVfsPolicy,
     redactor: SecretRedactor,
     traversal: TraversalSkipper,
     store: S,
@@ -31,7 +32,18 @@ pub struct DbVfs<S> {
 
 impl<S: Store> DbVfs<S> {
     pub fn new(store: S, policy: VfsPolicy) -> Result<Self> {
-        policy.validate()?;
+        let policy = ValidatedVfsPolicy::new(policy)?;
+        let redactor = SecretRedactor::from_rules(&policy.secrets)?;
+        let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
+        Ok(Self {
+            policy,
+            redactor,
+            traversal,
+            store,
+        })
+    }
+
+    pub fn new_validated(store: S, policy: ValidatedVfsPolicy) -> Result<Self> {
         let redactor = SecretRedactor::from_rules(&policy.secrets)?;
         let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
@@ -47,7 +59,7 @@ impl<S: Store> DbVfs<S> {
         policy: VfsPolicy,
         redactor: SecretRedactor,
     ) -> Result<Self> {
-        policy.validate()?;
+        let policy = ValidatedVfsPolicy::new(policy)?;
         let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
             policy,
@@ -63,13 +75,27 @@ impl<S: Store> DbVfs<S> {
         redactor: SecretRedactor,
         traversal: TraversalSkipper,
     ) -> Result<Self> {
-        policy.validate()?;
+        let policy = ValidatedVfsPolicy::new(policy)?;
         Ok(Self {
             policy,
             redactor,
             traversal,
             store,
         })
+    }
+
+    pub fn new_with_matchers_validated(
+        store: S,
+        policy: ValidatedVfsPolicy,
+        redactor: SecretRedactor,
+        traversal: TraversalSkipper,
+    ) -> Self {
+        Self {
+            policy,
+            redactor,
+            traversal,
+            store,
+        }
     }
 
     pub fn policy(&self) -> &VfsPolicy {

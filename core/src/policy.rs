@@ -276,6 +276,45 @@ pub struct VfsPolicy {
     pub auth: AuthPolicy,
 }
 
+/// A [`VfsPolicy`] that has passed [`VfsPolicy::validate`].
+///
+/// This guarantees only the structural validation enforced by `VfsPolicy::validate()` (limits,
+/// basic sizes, and auth token shapes). It does **not** guarantee that secret/traversal glob
+/// patterns or redaction regexes compile — those are validated when building matchers (e.g.
+/// [`crate::redaction::SecretRedactor::from_rules`] and
+/// [`crate::traversal::TraversalSkipper::from_rules`]).
+#[derive(Debug, Clone)]
+pub struct ValidatedVfsPolicy(VfsPolicy);
+
+impl ValidatedVfsPolicy {
+    pub fn new(policy: VfsPolicy) -> Result<Self> {
+        policy.validate()?;
+        Ok(Self(policy))
+    }
+
+    pub fn into_inner(self) -> VfsPolicy {
+        self.0
+    }
+
+    pub fn clear_auth_tokens(&mut self) {
+        self.0.auth.tokens.clear();
+    }
+}
+
+impl std::ops::Deref for ValidatedVfsPolicy {
+    type Target = VfsPolicy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<VfsPolicy> for ValidatedVfsPolicy {
+    fn as_ref(&self) -> &VfsPolicy {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditPolicy {

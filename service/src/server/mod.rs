@@ -19,6 +19,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
+use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
@@ -30,7 +31,7 @@ struct AppState {
 
 struct AppInner {
     backend: backend::Backend,
-    policy: VfsPolicy,
+    policy: ValidatedVfsPolicy,
     redactor: SecretRedactor,
     traversal: TraversalSkipper,
     audit: Option<audit::AuditLogger>,
@@ -110,7 +111,7 @@ fn max_body_bytes(policy: &VfsPolicy) -> usize {
 
 fn build_state(
     backend: backend::Backend,
-    mut policy: VfsPolicy,
+    mut policy: ValidatedVfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<(AppState, usize)> {
     let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
@@ -160,7 +161,7 @@ fn build_state(
         "auth configuration loaded"
     );
 
-    policy.auth.tokens.clear();
+    policy.clear_auth_tokens();
 
     let state = AppState {
         inner: Arc::new(AppInner {
@@ -185,7 +186,7 @@ pub fn build_app_sqlite(
     policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    policy.validate().map_err(anyhow::Error::msg)?;
+    let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
 
     const SQLITE_BUSY_TIMEOUT_CAP_MS: u64 = 5_000;
     let busy_timeout =
@@ -236,7 +237,7 @@ pub fn build_app_postgres(
     policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    policy.validate().map_err(anyhow::Error::msg)?;
+    let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
 
     let statement_timeout_ms = policy.limits.max_io_ms;
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
