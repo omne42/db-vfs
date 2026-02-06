@@ -1,37 +1,49 @@
-# Getting started
+# Getting Started
 
 ## Prerequisites
 
-- Rust toolchain (see `rust-toolchain.toml`)
+Run from repository root (`db-vfs/`).
 
-## Run the service (SQLite)
+```bash
+rustc --version
+cargo --version
+```
 
-Create a policy file (start from `policy.example.toml`) and set a bearer token at runtime:
+Expected: Rust/Cargo are installed and versions are available.
+
+## 5-minute local run (SQLite)
+
+1. Copy a local policy file (do not edit the example in place):
+
+```bash
+cp policy.example.toml policy.local.toml
+```
+
+2. Set a development token:
 
 ```bash
 export DB_VFS_TOKEN='dev-token-change-me'
 ```
 
-For local development, enable writes in your policy:
+3. Enable local writes in `policy.local.toml`:
 
 ```toml
-# In your policy's `[permissions]` section (e.g. `policy.example.toml`)
 [permissions]
 write = true
 ```
 
-Run:
+4. Start service:
 
 ```bash
 cargo run -p db-vfs-service -- \
   --sqlite ./db-vfs.sqlite \
-  --policy ./policy.example.toml \
+  --policy ./policy.local.toml \
   --listen 127.0.0.1:8080
 ```
 
 ## Smoke test
 
-Write a file:
+Write:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/write \
@@ -40,7 +52,13 @@ curl -sS http://127.0.0.1:8080/v1/write \
   -d '{"workspace_id":"w1","path":"docs/a.txt","content":"hello","expected_version":null}'
 ```
 
-Read it back:
+Expected response fragment:
+
+```json
+{"path":"docs/a.txt","created":true,"version":1}
+```
+
+Read:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/read \
@@ -48,3 +66,15 @@ curl -sS http://127.0.0.1:8080/v1/read \
   -H "authorization: Bearer ${DB_VFS_TOKEN}" \
   -d '{"workspace_id":"w1","path":"docs/a.txt","start_line":null,"end_line":null}'
 ```
+
+Expected response fragment:
+
+```json
+{"path":"docs/a.txt","content":"hello","version":1}
+```
+
+## Common startup mistakes
+
+- `401 unauthorized`: token missing/wrong; check `Authorization` and `DB_VFS_TOKEN`.
+- `403 not_permitted`: `permissions.write = false`; enable write in policy.
+- `415 unsupported_media_type`: missing `content-type: application/json`.

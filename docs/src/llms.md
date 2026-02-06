@@ -1,37 +1,47 @@
-# `llms.txt`
+# LLM Context (`llms.txt`)
 
-Inspired by the AI SDK docs’ `llms.txt`, this repo includes a single-file documentation bundle for
-LLM/RAG ingestion:
+This repository maintains two synchronized bundle files:
 
-- `llms.txt` (repo root)
-- `docs/llms.txt` (same content, colocated with docs)
+- `llms.txt` (root, canonical generated output)
+- `docs/llms.txt` (copy for docs distribution)
 
-Both are Markdown stored in a `.txt` file (with YAML front matter) so they can be copied/pasted into
-LLM tools easily.
+## Maintenance rules
 
-## Download
-
-If you build the docs with `./scripts/docs.sh`, the rendered book output includes:
-
-- [`llms.txt`](llms.txt)
+- Source of truth for content is normal docs/README/SECURITY files.
+- `llms.txt` and `docs/llms.txt` are generated artifacts.
+- Do not hand-edit generated bundle files.
 
 ## Regenerate
-
-After documentation changes:
 
 ```bash
 ./scripts/llms.sh
 ```
 
-Verify it is up to date:
+Expected result:
+
+- root and docs copies are rewritten with identical content
+- metadata header includes generation timestamp and source commit
+
+Verify in CI/local:
 
 ```bash
 ./scripts/llms.sh --check
 ```
 
-## Suggested prompt
+If check fails, regenerate then commit updated bundles.
 
-Paste `llms.txt` into your LLM tool as context, then ask questions like:
+## Front matter template
 
-> Use the provided `llms.txt` documentation to answer my questions about `db-vfs`.
-> If the answer is not in the docs, say so explicitly.
+```yaml
+---
+title: db-vfs docs bundle
+generated_at_utc: 2026-02-06T00:00:00Z
+source_commit: <git-sha>
+generator_version: scripts/llms.sh@v2
+---
+```
+
+## Safe usage note
+
+Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
+internal-only secrets, private URLs).

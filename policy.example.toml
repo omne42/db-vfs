@@ -7,60 +7,43 @@ patch = false
 delete = false
 allow_full_scan = false
 
-# Service auth (recommended).
-#
-# Requests must include:
-#   Authorization: Bearer <token>
-#
-# Each token can be restricted to a workspace allowlist:
-# - exact: "ws1"
-# - prefix: "team1-*"
-# - all: "*"
-#
-# Token values can be provided as plaintext (via env var) or stored as a SHA-256 hash:
-# - Prefer storing only a SHA-256 hash in committed policies:
-#     token = "sha256:<64 hex chars>"
-# - Or load a plaintext token from an environment variable at runtime:
-#     token_env_var = "DB_VFS_TOKEN"
-#
-# NOTE: don't commit real tokens.
 [auth]
 [[auth.tokens]]
 token_env_var = "DB_VFS_TOKEN"
-allowed_workspaces = ["*"]
+allowed_workspaces = ["team-a-*"]
 
-# All limits have defaults; override as needed.
-#
 [limits]
-# Recommended for production-ish deployments:
 max_walk_ms = 2000
+max_requests_per_ip_per_sec = 30
+max_requests_burst_per_ip = 60
+max_rate_limit_ips = 8192
 
-# Per-IP token-bucket rate limiting (set 0/0 to disable).
-max_requests_per_ip_per_sec = 100
-max_requests_burst_per_ip = 200
-# Cap the number of distinct IPs tracked by the limiter.
-max_rate_limit_ips = 65536
+[secrets]
+deny_globs = [
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  ".git/**",
+  "**/.git/**",
+  ".ssh/**",
+  "**/.ssh/**",
+]
+redact_regexes = [
+  "(?i)api[_-]?key\\s*[:=]\\s*[A-Za-z0-9._-]{16,}",
+]
+replacement = "***REDACTED***"
 
-# Secrets are enabled by default in code, but can be customized here:
-# Note: deny globs like "dir/*" also deny descendants under "dir/**".
-#
-# [secrets]
-# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".ssh/**", "**/.ssh/**", ".aws/**", "**/.aws/**", ".kube/**", "**/.kube/**", ".npmrc", "**/.npmrc", ".netrc", "**/.netrc", ".pypirc", "**/.pypirc", ".cargo/credentials", "**/.cargo/credentials", ".docker/config.json", "**/.docker/config.json", ".omne_agent_data/**", "**/.omne_agent_data/**"]
-# redact_regexes = []
-# replacement = "***REDACTED***"
+[traversal]
+skip_globs = [
+  "target/**",
+  "**/target/**",
+  "node_modules/**",
+  "**/node_modules/**",
+]
 
-# Scan traversal skip globs (performance only; does not deny direct access).
-# Note: skip globs like "dir/*" also skip descendants under "dir/**".
-#
-# [traversal]
-# skip_globs = ["target/**", "**/target/**", "node_modules/**", "**/node_modules/**"]
-
-# Optional JSONL audit log (service-only).
-#
-# When set, `db-vfs-service` appends one JSON object per request.
-#
-# [audit]
-# jsonl_path = "./db-vfs-audit.jsonl"
-# required = true # fail startup if audit log can't be opened (default: true)
-# flush_every_events = 32 # flush after this many events (default: 32, 1..=65536; requires jsonl_path)
-# flush_max_interval_ms = 250 # flush at least every N milliseconds (default: 250, 1..=60000; requires jsonl_path)
+[audit]
+jsonl_path = "./db-vfs-audit.jsonl"
+required = true
+flush_every_events = 32
+flush_max_interval_ms = 250

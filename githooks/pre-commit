@@ -3,21 +3,32 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-staged_files="$(git diff --cached --name-only --diff-filter=ACMRD || true)"
+staged_status="$(git diff --cached --name-status --diff-filter=ACMRD || true)"
+staged_files="$(printf '%s\n' "$staged_status" | awk '{print $2}')"
 if [[ -z "${staged_files//[[:space:]]/}" ]]; then
   exit 0
 fi
 
 has_changelog=0
+changelog_deleted=0
 other_count=0
-while IFS= read -r path; do
+while IFS=$'\t' read -r status path _rest; do
   [[ -z "$path" ]] && continue
   if [[ "$path" == "CHANGELOG.md" ]]; then
-    has_changelog=1
+    if [[ "$status" == "D" ]]; then
+      changelog_deleted=1
+    else
+      has_changelog=1
+    fi
   else
     other_count=$((other_count + 1))
   fi
-done <<<"$staged_files"
+done <<<"$staged_status"
+
+if [[ "$changelog_deleted" -eq 1 ]]; then
+  echo "pre-commit: deleting CHANGELOG.md is not allowed." >&2
+  exit 1
+fi
 
 if [[ "$has_changelog" -ne 1 ]]; then
   cat >&2 <<'EOF'
@@ -57,15 +68,20 @@ EOF
 fi
 
 max_rs_lines="${DB_VFS_MAX_RS_LINES:-1000}"
+if ! [[ "$max_rs_lines" =~ ^[1-9][0-9]*$ ]]; then
+  echo "pre-commit: DB_VFS_MAX_RS_LINES must be a positive integer (got: $max_rs_lines)" >&2
+  exit 1
+fi
+
 offenders=()
-tracked_rs_files="$(git ls-files '*.rs' || true)"
+staged_rs_files="$(git diff --cached --name-only --diff-filter=AM -- '*.rs' || true)"
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
   lines="$(git show ":$path" 2>/dev/null | awk 'END{print NR}')"
   if [[ "${lines:-0}" -gt "$max_rs_lines" ]]; then
     offenders+=("$path ($lines)")
   fi
-done <<<"$tracked_rs_files"
+done <<<"$staged_rs_files"
 
 if [[ "${#offenders[@]}" -gt 0 ]]; then
   cat >&2 <<EOF

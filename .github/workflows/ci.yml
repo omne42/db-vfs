@@ -12,6 +12,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -19,22 +20,31 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # stable
         with:
           toolchain: 1.91.1
           components: rustfmt,clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Gates (linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: ./scripts/gate.sh
 
-      - name: Tests (macOS / Windows)
+      - name: Gates (macOS / Windows)
         if: matrix.os != 'ubuntu-latest'
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          cargo check --workspace --all-targets --locked
+          cargo check --workspace --all-targets --no-default-features --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --locked
+          cargo test --workspace --no-default-features --locked
+          cargo test --workspace --all-features --locked
+          cargo tree -d --workspace --locked

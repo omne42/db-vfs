@@ -1,48 +1,81 @@
 # HTTP API
 
-The service exposes JSON POST endpoints:
+All endpoints are `POST` JSON.
 
-- `/v1/read`
-- `/v1/write`
-- `/v1/patch`
-- `/v1/delete`
-- `/v1/glob`
-- `/v1/grep`
+## Request prerequisites
 
-All requests require:
+- Header `content-type: application/json`
+- Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
 
-- `content-type: application/json`
-- `authorization: Bearer <token>` (unless started with `--unsafe-no-auth`)
+## Endpoint contracts
 
-Notes on success responses:
+### `/v1/read`
 
-- `read`/`write`/`patch`/`delete` include `requested_path` (normalized input) and `path` (normalized stored path).
-- `glob`/`grep` include scan counters and `skipped_*` diagnostics to make partial results explainable.
+Request fields:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `workspace_id` | string | yes | namespace |
+| `path` | string | yes | root-relative path |
+| `start_line` | u64|null | no | must pair with `end_line` |
+| `end_line` | u64|null | no | must pair with `start_line` |
+
+Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
+
+### `/v1/write`
+
+Request fields: `workspace_id`, `path`, `content`, `expected_version` (`u64|null`).
+
+Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`.
+
+### `/v1/patch`
+
+Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+Response fields: `requested_path`, `path`, `bytes_written`, `version`.
+
+### `/v1/delete`
+
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+
+Response fields: `requested_path`, `path`, `deleted`.
+
+### `/v1/glob`
+
+Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
+
+Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`, `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and skip counters.
+
+### `/v1/grep`
+
+Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
+
+Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same shape as `glob`).
+
+## Path normalization rules
+
+- must be root-relative;
+- no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
+- normalized path is echoed in response fields.
 
 ## Errors
 
-Errors are returned as JSON with an HTTP status code:
+Error body:
 
 ```json
-{ "code": "invalid_path", "message": "..." }
+{ "code": "<stable_code>", "message": "<human readable>" }
 ```
 
-5xx errors use a non-leaky `"internal error"` message.
+Common codes:
 
-### Status codes
+- `invalid_json_syntax`, `invalid_json_schema`, `invalid_json`, `unsupported_media_type`, `payload_too_large`
+- `unauthorized`, `not_permitted`, `secret_path_denied`
+- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`
 
-- `400`: `invalid_path`, `invalid_regex`, `invalid_json`, `patch`
-- `401`: `unauthorized` (missing/invalid `Authorization`)
-- `403`: `forbidden`, `not_permitted`, `secret_path_denied`
-- `404`: `not_found`
-- `408`: `timeout`
-- `409`: `conflict`
-- `413`: `payload_too_large`, `input_too_large`, `file_too_large`, `quota_exceeded`
-- `415`: `unsupported_media_type` (missing/invalid `content-type`)
-- `429`: `rate_limited`
-- `503`: `busy`
+`patch` means “unified diff apply/parse failure” (not the endpoint name).
 
-## Tracing
+## Retry guidance
 
-- The service accepts and returns `x-request-id`.
-- If missing, it generates one and includes it on the response.
+- `408 timeout`, `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `409 conflict`: fetch latest version and retry with fresh `expected_version`.
+- `400/401/403/415`: fix request/policy first; do not blind-retry.

@@ -2,164 +2,73 @@
 title: db-vfs docs bundle
 description: DB-backed virtual filesystem with explicit Policy + Secrets + Limits, plus an HTTP service.
 tags: [rust, sqlite, postgres, vfs, security, policy, http]
+generated_at_utc: stable
+source_commit: workspace
+generator_version: scripts/llms.sh@v3
+bundle_type: stable-with-recent-history
 ---
 
 # db-vfs — LLM documentation bundle
 
-This file is generated from the repo sources to make RAG/LLM ingestion easier.
-It follows `docs/src/SUMMARY.md` for the docs ordering.
+This bundle is generated from repository docs for RAG/LLM ingestion.
 
-Update it by running:
+Normative priority for behavior conflicts:
+
+1. Policy
+2. HTTP API
+3. Concepts
+4. Security
+5. Other guides
+6. Changelog (history reference only)
+
+Unreleased changelog items do not necessarily represent current released behavior.
+
+Update with:
 
   ./scripts/llms.sh
 
 ---
 file: README.md
+title: "Project README"
+section_id: "readme-md"
 ---
 
 # db-vfs
 
-DB-backed “virtual filesystem” (DB-VFS) intended for server / high-concurrency workloads.
+DB-backed virtual filesystem (DB-VFS) for service workloads.
 
-Goals:
+## What it provides
 
-- Preserve the explicit safety model shape: **Policy + Secrets + Limits**.
-- Provide tool-like operations: `read`, `glob`, `grep`, `write`, `patch`, `delete`.
-- Support SQLite (dev/test) and Postgres (production).
+- Safety-first policy model: **Permissions + Limits + Secrets + Traversal + Auth**.
+- Tool-like operations: `read`, `write`, `patch`, `delete`, `glob`, `grep`.
+- Backends: SQLite (default/dev) and Postgres (`--features postgres`).
 
-This is intentionally *not* part of `safe-fs-tools` to keep that crate focused on local OS
-filesystem semantics and a small dependency graph.
+## Quickstart (5 min)
 
-## Documentation
-
-- Human docs (mdBook sources): `docs/` (build with `./scripts/docs.sh`)
-- LLM/RAG bundle: `llms.txt` and `docs/llms.txt` (regenerate with `./scripts/llms.sh`)
-
-## Semantics
-
-- `workspace_id` is the namespace boundary (like a “workspace root”).
-- All `path`/`path_prefix` values are **root-relative**:
-  - Must not start with `/`
-  - Must not contain `..`
-  - Must not have leading/trailing whitespace
-  - Must not contain control characters
-  - `path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
-    `policy.permissions.allow_full_scan = true`
-- Scope control (`path_prefix`):
-  - `grep` requires an explicit `path_prefix` unless a safe literal prefix can be derived from
-    `glob` (e.g. `"docs/**/*.md"` → `"docs/"`).
-  - `glob` similarly requires `path_prefix` for broad patterns without a safe literal prefix (e.g.
-    `"**/*.md"`).
-- `grep.query` must be non-empty (empty query is rejected).
-- Concurrency control (`expected_version` / CAS):
-  - `read` returns a `version`.
-  - `patch` requires `expected_version`.
-  - `write(expected_version = None)` is **create-only**; updates require `expected_version`.
-  - `delete(expected_version = Some(v))` enforces CAS; `delete(expected_version = None)` is
-    unconditional.
-- Redaction and limits:
-  - `read.bytes_read` is the size of returned `content` (after redaction).
-  - `read` fails if redaction would expand output beyond `limits.max_read_bytes`.
-  - `grep` truncates matched-line output to `limits.max_line_bytes` after redaction (`line_truncated=true`).
-- Response path echo:
-  - `read`/`write`/`patch`/`delete` responses include `requested_path` (normalized input) and `path` (normalized stored path).
-- Scan diagnostics:
-  - `glob`/`grep` responses include skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
-
-## HTTP service
-
-By default the service requires an auth token configured in the policy file (`[auth]`), and each
-token can be restricted to a workspace allowlist. For local development only, you can run with
-`--unsafe-no-auth`.
-
-Notes:
-
-- Auth tokens:
-  - Prefer storing only a hash in the policy: `sha256:<64 hex chars>`.
-  - Or load a plaintext token from an environment variable: `auth.tokens[].token_env_var = "DB_VFS_TOKEN"`.
-  - `--unsafe-no-auth` is restricted to loopback binds by default; use `--unsafe-no-auth-allow-non-loopback` only if you fully understand the risk.
-- Policy loading:
-  - `--trust-mode trusted|untrusted` controls whether risky policy features are allowed (default: `trusted`).
-  - In `trusted` mode, the service interpolates `${VAR}` in policy files from the process environment.
-  - In `untrusted` mode, the service refuses env interpolation, env-backed tokens, writes, full scans, audit paths, and `--unsafe-no-auth`.
-- Request tracing uses `x-request-id`:
-  - If the client sets it, the service echoes it back.
-  - Otherwise the service generates one and returns it in the response headers.
-- Optional JSONL audit log (policy `[audit]`):
-  - If `audit.jsonl_path` is set, the service appends one JSON object per request (does not include file content or grep query text).
-  - `audit.required` (default: `true`) controls whether audit initialization failures should fail service startup; set it to `false` to continue with audit disabled.
-- Concurrency and pooling are controlled by policy `limits`:
-  - `max_concurrency_io` (read/write/patch/delete)
-  - `max_concurrency_scan` (glob/grep)
-  - `max_db_connections` (SQLite/Postgres pool size)
-  - `max_io_ms` (service timeout for read/write/patch/delete; also used for Postgres `statement_timeout`)
-- Rate limiting is controlled by policy `limits`:
-  - `max_requests_per_ip_per_sec`
-  - `max_requests_burst_per_ip`
-  - Note: the limiter uses the TCP peer address (it does not parse `x-forwarded-for`), so configure it appropriately when running behind a reverse proxy.
-- Scan traversal skipping is controlled by policy `traversal`:
-  - `traversal.skip_globs` (performance only; does not deny direct access)
-- Timeout semantics:
-  - Timeouts are best-effort wall-clock budgets at the service layer.
-  - Timeouts include time spent waiting for the service concurrency semaphores; under sustained load a request may fail with `503 busy` rather than wait indefinitely.
-  - For SQLite, the service attempts to interrupt in-flight queries on timeout; for Postgres, `statement_timeout` is configured.
-  - A timed-out request returns early and releases its service concurrency slot; some DB work may still continue briefly in the background while cancellation/cleanup happens.
-- Secrets are denied by default (e.g. `.env`, `.git/**`, `.ssh/**`, `.aws/**`, `.kube/**`, `.omne_agent_data/**`); adjust `policy.secrets` if needed. Note: deny globs like `dir/*` also deny descendants under `dir/**` (to avoid leaking nested paths when a directory is denied).
-
-### SQLite
-
-Run:
+1. Create a local policy and token:
 
 ```bash
-cd db-vfs
+cp policy.example.toml policy.local.toml
+export DB_VFS_TOKEN='dev-token-change-me'
+```
+
+2. Enable local writes in `policy.local.toml`:
+
+```toml
+[permissions]
+write = true
+```
+
+3. Start SQLite service:
+
+```bash
 cargo run -p db-vfs-service -- \
   --sqlite ./db-vfs.sqlite \
-  --policy ./policy.example.toml \
+  --policy ./policy.local.toml \
   --listen 127.0.0.1:8080
 ```
 
-Note: `policy.example.toml` disables `write`/`patch`/`delete` by default. For the smoke test below,
-set `permissions.write = true` in your policy (or create a dev policy).
-
-Security note (SQLite): file permissions depend on the process `umask`. For multi-user systems, set a restrictive `umask` (e.g. `077`) in your service manager / startup script.
-
-### Postgres
-
-Run (requires building with `postgres` enabled):
-
-```bash
-cd db-vfs
-cargo run -p db-vfs-service --features postgres -- \
-  --postgres "postgres://user:pass@localhost:5432/db_vfs" \
-  --policy ./policy.example.toml \
-  --listen 127.0.0.1:8080
-```
-
-Endpoints (JSON POST):
-
-- `/v1/read`
-- `/v1/write`
-- `/v1/patch`
-- `/v1/delete`
-- `/v1/glob`
-- `/v1/grep`
-
-Error responses (JSON):
-
-```json
-{"code":"<stable_code>","message":"<human message>"}
-```
-
-Common `code` values:
-
-- `unauthorized` (401): missing/invalid auth header or invalid token
-- `forbidden` (403): workspace not allowed for token; or policy denied (`not_permitted`, `secret_path_denied`)
-- `invalid_json` (400) / `unsupported_media_type` (415) / `payload_too_large` (413): request parsing/body limits
-- `not_found` (404) / `conflict` (409)
-- `timeout` (408) / `busy` (503) / `rate_limited` (429)
-- `invalid_path` / `invalid_regex` / `patch` / `input_too_large` / `file_too_large` / `quota_exceeded` (mostly 400/413)
-
-Minimal example:
+4. Verify write/read:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/write \
@@ -167,32 +76,78 @@ curl -sS http://127.0.0.1:8080/v1/write \
   -H "authorization: Bearer ${DB_VFS_TOKEN}" \
   -d '{"workspace_id":"w1","path":"docs/a.txt","content":"hello","expected_version":null}'
 
-curl -sS http://127.0.0.1:8080/v1/grep \
+curl -sS http://127.0.0.1:8080/v1/read \
   -H 'content-type: application/json' \
   -H "authorization: Bearer ${DB_VFS_TOKEN}" \
-  -d '{"workspace_id":"w1","query":"hello","regex":false,"glob":"docs/**/*.txt","path_prefix":null}'
+  -d '{"workspace_id":"w1","path":"docs/a.txt","start_line":null,"end_line":null}'
 ```
 
-## Development
+## API field reference (minimal)
 
-Run gates (fmt/check/clippy/test):
+All endpoints are JSON `POST` and require:
 
-```bash
-./scripts/gate.sh
+- `content-type: application/json`
+- `authorization: Bearer <token>` (unless `--unsafe-no-auth`)
+
+| Endpoint | Request fields | Key response fields | Typical errors |
+| --- | --- | --- | --- |
+| `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
+| `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
+| `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
+| `/v1/delete` | `workspace_id`, `path`, `expected_version?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
+| `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, scan counters | `not_permitted`, `timeout` |
+| `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, scan counters | `invalid_regex`, `not_permitted`, `timeout` |
+
+Error body:
+
+```json
+{"code":"<stable_code>","message":"<human message>"}
 ```
 
-Enable git hooks:
+## Security Baseline
 
-```bash
-./scripts/setup-githooks.sh
-```
+- Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
+- Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
+- Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
+- Use TLS/HTTPS end-to-end for bearer token transport.
+- Enable audit log with `audit.required = true`.
 
-The hooks enforce Conventional Commits and require `CHANGELOG.md` updates. The Rust file size guard
-can be overridden via `DB_VFS_MAX_RS_LINES=<N>`.
+## Performance Limits
+
+Tune policy `limits` for your workload:
+
+- request bytes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`
+- scan bounds: `max_results`, `max_walk_files`, `max_walk_entries`, `max_walk_ms`, `max_line_bytes`
+- concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
+- timeout/rate: `max_io_ms`, `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`
+
+## Observability / Audit
+
+- `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
+- Optional JSONL audit via `audit.jsonl_path`.
+- Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
+- Service logs use `tracing`; configure via `RUST_LOG`.
+
+## Troubleshooting matrix
+
+| HTTP | Common causes | First checks |
+| --- | --- | --- |
+| `401` | missing/invalid token | `Authorization`, token hash/env var |
+| `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
+| `409` | stale CAS version | re-read latest version before retry |
+| `408` | timeout budget exceeded | `limits.max_io_ms`, DB latency, queueing |
+| `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
+
+## More docs
+
+- Human docs (`mdBook`): `docs/` (`./scripts/docs.sh`)
+- LLM bundle: `llms.txt` and `docs/llms.txt` (`./scripts/llms.sh`)
 
 
 ---
 file: policy.example.toml
+title: "Policy Example"
+section_id: "policy-example-toml"
 ---
 
 [permissions]
@@ -204,143 +159,111 @@ patch = false
 delete = false
 allow_full_scan = false
 
-# Service auth (recommended).
-#
-# Requests must include:
-#   Authorization: Bearer <token>
-#
-# Each token can be restricted to a workspace allowlist:
-# - exact: "ws1"
-# - prefix: "team1-*"
-# - all: "*"
-#
-# Token values can be provided as plaintext (via env var) or stored as a SHA-256 hash:
-# - Prefer storing only a SHA-256 hash in committed policies:
-#     token = "sha256:<64 hex chars>"
-# - Or load a plaintext token from an environment variable at runtime:
-#     token_env_var = "DB_VFS_TOKEN"
-#
-# NOTE: don't commit real tokens.
 [auth]
 [[auth.tokens]]
 token_env_var = "DB_VFS_TOKEN"
-allowed_workspaces = ["*"]
+allowed_workspaces = ["team-a-*"]
 
-# All limits have defaults; override as needed.
-#
 [limits]
-# Recommended for production-ish deployments:
 max_walk_ms = 2000
+max_requests_per_ip_per_sec = 30
+max_requests_burst_per_ip = 60
+max_rate_limit_ips = 8192
 
-# Per-IP token-bucket rate limiting (set 0/0 to disable).
-max_requests_per_ip_per_sec = 100
-max_requests_burst_per_ip = 200
-# Cap the number of distinct IPs tracked by the limiter.
-max_rate_limit_ips = 65536
+[secrets]
+deny_globs = [
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  ".git/**",
+  "**/.git/**",
+  ".ssh/**",
+  "**/.ssh/**",
+]
+redact_regexes = [
+  "(?i)api[_-]?key\\s*[:=]\\s*[A-Za-z0-9._-]{16,}",
+]
+replacement = "***REDACTED***"
 
-# Secrets are enabled by default in code, but can be customized here:
-# Note: deny globs like "dir/*" also deny descendants under "dir/**".
-#
-# [secrets]
-# deny_globs = [".git/**", "**/.git/**", ".env", ".env.*", "**/.env", "**/.env.*", ".ssh/**", "**/.ssh/**", ".aws/**", "**/.aws/**", ".kube/**", "**/.kube/**", ".npmrc", "**/.npmrc", ".netrc", "**/.netrc", ".pypirc", "**/.pypirc", ".cargo/credentials", "**/.cargo/credentials", ".docker/config.json", "**/.docker/config.json", ".omne_agent_data/**", "**/.omne_agent_data/**"]
-# redact_regexes = []
-# replacement = "***REDACTED***"
+[traversal]
+skip_globs = [
+  "target/**",
+  "**/target/**",
+  "node_modules/**",
+  "**/node_modules/**",
+]
 
-# Scan traversal skip globs (performance only; does not deny direct access).
-# Note: skip globs like "dir/*" also skip descendants under "dir/**".
-#
-# [traversal]
-# skip_globs = ["target/**", "**/target/**", "node_modules/**", "**/node_modules/**"]
-
-# Optional JSONL audit log (service-only).
-#
-# When set, `db-vfs-service` appends one JSON object per request.
-#
-# [audit]
-# jsonl_path = "./db-vfs-audit.jsonl"
-# required = true # fail startup if audit log can't be opened (default: true)
-# flush_every_events = 32 # flush after this many events (default: 32, 1..=65536; requires jsonl_path)
-# flush_max_interval_ms = 250 # flush at least every N milliseconds (default: 250, 1..=60000; requires jsonl_path)
+[audit]
+jsonl_path = "./db-vfs-audit.jsonl"
+required = true
+flush_every_events = 32
+flush_max_interval_ms = 250
 
 
 ---
 file: SECURITY.md
+title: "Security Policy"
+section_id: "security-md"
 ---
 
-# Security
+# Security Policy
 
-## Threat model
+## Private vulnerability reporting
 
-`db-vfs` is a library + HTTP service for performing virtual filesystem operations against a
-database-backed store with an explicit, caller-provided policy (`VfsPolicy`).
+Do **not** disclose unpatched vulnerabilities in public issues.
 
-It enforces policy checks in-process. It is designed for *trusted* deployments (e.g. internal
-services) where you still want strong, explicit guardrails.
+Preferred channel:
 
-## Not an OS sandbox
+- GitHub Private Vulnerability Reporting / Security Advisory (if enabled for this repository).
 
-This project does **not** provide OS-level isolation. If you need strong isolation, run the service
-inside an OS sandbox / container / VM and apply network controls.
+If private advisory is unavailable, contact maintainers privately first and avoid posting exploit
+details publicly.
 
-## Auth & secrets
+## Response process (target SLA)
 
-- The service requires `Authorization: Bearer <token>` by default.
-- Prefer storing only `sha256:<64 hex>` token hashes in committed policy files.
-- For plaintext tokens, use `auth.tokens[].token_env_var` so secrets live in the process environment.
-- `--unsafe-no-auth` is restricted to loopback binds by default; using it on a public interface is
-  dangerous.
-- For production deployments, enforce “no-unsafe-flags” in your service manager / startup scripts
-  (e.g. refuse `--unsafe-no-auth-allow-non-loopback`).
+- Acknowledge report: within **72 hours**.
+- Initial triage + severity assignment: within **7 days**.
+- Fix + coordinated disclosure target:
+  - critical/high: as soon as possible (typically <= 30 days)
+  - medium/low: next scheduled patch cycle.
 
-Secrets are mitigated via:
+Actual timelines depend on exploitability and patch validation.
 
-- Path deny rules (`policy.secrets.deny_globs`) to block direct access.
-  - Note: deny globs like `dir/*` also deny descendants under `dir/**` (directory-probe semantics).
-- Regex redaction (`policy.secrets.redact_regexes`) applied to `read`/`grep` output.
+## Supported versions
 
-## Resource limits & DoS
+| Version line | Status | Security fixes |
+| --- | --- | --- |
+| `Unreleased` / `main` | active | yes |
+| latest stable (`0.1.x`) | active | yes |
+| older than latest stable | EOL | no guarantee |
 
-Policy limits bound work and memory:
+## Security baseline requirements
 
-- Request sizes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`.
-- Scan bounds: `max_walk_entries`, `max_walk_files`, `max_walk_ms`, `max_results`.
-- Service concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`.
-- Service timeouts: `max_io_ms` (plus Postgres `statement_timeout` when enabled).
-- Per-IP rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`,
-  `max_rate_limit_ips`.
+- Use HTTPS/TLS for all bearer-token transport.
+- Keep auth enabled in production; avoid `--unsafe-no-auth`.
+- Use high-entropy tokens (random, >= 32 bytes recommended) and rotate regularly.
+- Scope tokens by `allowed_workspaces` (avoid global wildcard in production).
+- Enable per-IP rate limiting and audit logging.
 
-These are best-effort safeguards, not a replacement for OS-level limits and network-level
-mitigations (load balancers, WAF, reverse proxy rate limits, etc.).
+## Threat model notes
 
-SQLite note: database file permissions depend on the process `umask`; set a restrictive `umask`
-in your service manager / startup script on multi-user systems.
+`db-vfs` is an application-layer guardrail system, not an OS sandbox.
 
-## Timeout semantics
+- It validates paths/policies and enforces operation budgets.
+- It mitigates secrets exposure via deny-globs and redaction.
+- It does **not** replace container sandboxing, host hardening, or network controls.
 
-Service-layer timeouts return early to the client, but the underlying blocking DB operation may
-continue briefly in the background. For SQLite, the service attempts to interrupt in-flight queries
-on timeout; for Postgres, `statement_timeout` is configured. Treat timeouts as a *budgeting* and
-*backpressure* mechanism, not a hard cancel.
-
-## Path probing side-channels
-
-If untrusted callers can control `path` inputs and observe detailed errors/timing, they may be able
-to infer information about stored paths (existence, deny rules, etc.).
-
-If this matters, reduce observable error detail, enforce rate limits, and run behind an API gateway.
-
-## Reporting
-
-If you discover a security issue, please open an issue with:
-
-- Minimal reproduction
-- Expected vs actual behavior
-- Environment details (OS, Rust toolchain, DB backend)
+For stronger isolation, deploy inside hardened containers/VMs and enforce edge gateway controls.
 
 
 ---
 file: CHANGELOG.md
+title: "Changelog (recent summary)"
+section_id: "changelog-md-summary"
 ---
+
+> Note: this is a recent summary only; full history remains in `CHANGELOG.md`.
 
 # Changelog
 
@@ -351,123 +274,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Security
 
-- CI: add GitHub Actions workflows for gates/tests and docs deploy (mdBook → GitHub Pages).
-- Dev: add `./scripts/setup-githooks.sh` helper to enable repo git hooks.
-- `db-vfs-service`: optional Postgres backend via `--postgres` (build with `--features postgres`).
-- `db-vfs-core`: `ValidatedVfsPolicy` newtype for policies that passed `VfsPolicy::validate()`.
-- `db-vfs-core`: `ValidatedVfsPolicy::clear_auth_tokens` helper for dropping auth tokens after auth initialization.
-- Policy: `auth` section with bearer tokens + per-token workspace allowlist.
-- Policy: `auth.tokens[].token_env_var` to load a plaintext token from an environment variable at runtime.
-- Policy: `auth.tokens[].token = "sha256:<64 hex>"` for storing hashed tokens.
-- Policy: `permissions.allow_full_scan` to gate `path_prefix = ""` scans for `glob`/`grep`.
-- `db-vfs-service`: `--unsafe-no-auth` for local development.
-- Policy: `limits.max_concurrency_io`, `limits.max_concurrency_scan`, and `limits.max_db_connections`.
-- Policy: `limits.max_io_ms` for service IO timeouts.
-- Policy: `limits.max_requests_per_ip_per_sec` and `limits.max_requests_burst_per_ip` for per-IP rate limiting.
-- Policy: `limits.max_rate_limit_ips` to cap tracked IPs for rate limiting.
-- Policy: `traversal.skip_globs` to skip paths during scan traversal (performance only).
-- `db-vfs-service`: `x-request-id` header (propagated or generated) for request tracing.
-- Policy: `audit.jsonl_path` for an optional JSONL audit log (service-only).
-- Policy: `audit.required` to control whether audit init failures should fail service startup (default: fail).
-- Policy: `audit.flush_every_events` and `audit.flush_max_interval_ms` to tune JSONL audit flush batching (default: 32 events or 250ms).
-- `db-vfs-service`: `--trust-mode trusted|untrusted` to restrict policy loading in untrusted environments.
-- `db-vfs-service`: optional JSONL audit log when `audit.jsonl_path` is set.
-- `db-vfs-service`: `${VAR}` env interpolation in policy files (trusted mode only).
-- `db-vfs-core`: `glob_utils` helpers for glob normalization/validation.
-- Docs: add `SECURITY.md` threat model and guidance.
-- Dev: add `rust-toolchain.toml`, `rustfmt.toml`, `scripts/gate.sh`, and `githooks/` (Conventional Commits + changelog gate).
-- Dev: pre-commit guard to block oversized Rust files (`DB_VFS_MAX_RS_LINES`).
-- Docs: add mdBook docs under `docs/` and an LLM-friendly bundle (`llms.txt`, `docs/llms.txt`).
-- Tests: add VFS regression coverage for grep/read redaction + limit semantics.
-- Tests: add auth parsing/allowlist unit tests in `db-vfs-service`.
-- Tests: add optional Postgres store integration test (requires `DB_VFS_TEST_POSTGRES_URL`).
+- service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
+- service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
+- service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
+- core/path-policy: tighten workspace/path validation (control chars, wildcard constraints, oversized inputs).
+- migrations: add DB-level integrity checks for version/timestamp/path/content-size consistency.
 
 ### Changed
 
-- Docs: include `llms.txt` in the built mdBook output (`docs/book/llms.txt`) for easy download when hosted.
-- `db-vfs-service`: build with bundled SQLite (`rusqlite` feature `bundled`) for portability.
-- `db-vfs-service`: run SQLite migrations with `busy_timeout` aligned to `limits.max_io_ms` (capped).
-- `db-vfs-service`: avoid per-request `VfsPolicy::validate()` overhead by using `ValidatedVfsPolicy` internally (and avoid redundant validation during server startup).
-- Docs: recommend `./scripts/setup-githooks.sh` in development docs/README.
-- Docs: clarify `path_prefix` scoping and `expected_version` CAS semantics.
-- Docs: clarify that deny/skip globs like `dir/*` also apply to descendants under `dir/**`.
-- Docs: document validation hard caps for scan limits (`max_results`, `max_walk_*`, `max_line_bytes`).
-- Docs: generate `llms.txt` bundles from `docs/src/SUMMARY.md` (stable ordering).
-- Docs: `llms.txt` now includes `CHANGELOG.md` and starts with YAML front matter metadata.
-- Docs: clarify that GitHub Pages deploy requires enabling Pages (workflow skips deploy otherwise).
-- Dev: `./scripts/gate.sh` checks that `llms.txt` outputs are up to date.
-- `db-vfs-service`: require `Authorization: Bearer <token>` by default (configured via policy).
-- `db-vfs-service`: remove global VFS mutex; use per-request store with concurrency limiting.
-- `db-vfs-service`: validate bearer token before parsing JSON request bodies.
-- `db-vfs-service`: use r2d2 connection pooling for SQLite/Postgres stores.
-- `db-vfs-service`: apply request timeouts for IO endpoints and set Postgres `statement_timeout`.
-- `db-vfs-service`: apply a small service timeout headroom over `limits.max_io_ms` (to allow DB timeouts to fire first).
-- `db-vfs-service`: add per-IP token-bucket rate limiting middleware.
-- `db-vfs-service`: restrict `--unsafe-no-auth` to loopback binds by default.
-- `db-vfs-service`: refactor server module into submodules to keep Rust files small.
-- Policy: `auth.tokens[].token` now requires `sha256:<64 hex chars>` (use `token_env_var` for plaintext tokens).
-- `db-vfs-core`: expand default `secrets.deny_globs` (e.g. `.omne_agent_data/**`, `.ssh/**`, `.aws/**`, `.kube/**`).
-- `db-vfs-service`: bound the in-memory rate limiter map to avoid unbounded growth.
-- Policy parsing: deny unknown fields (`serde(deny_unknown_fields)`).
-- `policy.example.toml`: safer defaults (no write/patch/delete; auth enabled; full scan disabled).
-- Store API: split file reads into `get_meta` + `get_content`.
-- `db-vfs-core`: `path`/`path_prefix` now reject leading/trailing whitespace (no implicit trimming).
-- `db-vfs-service`: log an auth configuration summary (counts) at startup without retaining tokens.
+- service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
+- service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
+- vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
+- docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
+- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration.
 
 ### Fixed
 
-- Dev: align Cargo `rust-version` with the pinned toolchain/CI (Rust 1.91).
-- Policy: cap scan-related limits (`max_results`, `max_walk_files`, `max_walk_entries`, `max_line_bytes`) to avoid pathological policies.
-- Dev: remove unused variable warning when `db-vfs-service` is built without `postgres`.
-- `db-vfs-service`: avoid panic on invalid/missing DB backend args.
-- `db-vfs-service`: attempt to interrupt in-flight SQLite queries on timeout to reduce lingering background work.
-- `db-vfs-service`: avoid blocking the async runtime when attempting SQLite timeout interrupts.
-- `db-vfs-service`: include semaphore queueing time in request timeouts (avoid unbounded waits under load).
-- `db-vfs-service`: ensure SQLite interrupts are still requested even if timeout races cancel-handle installation.
-- Store: reject CAS updates when the version would overflow the DB's 64-bit signed integer storage.
-- `write`/`delete`: reject `expected_version` values that exceed the DB's 64-bit signed integer storage.
-- Enforce size limits before fetching DB content to avoid memory DoS from oversized stored files.
-- `glob`/`grep`: report `scan_limit_reason=Entries/Files` when truncated by DB prefix list limit.
-- `db-vfs-service`: request body size limit and non-leaky 5xx error messages.
-- `db-vfs-service`: hash bearer tokens once and compare in constant time; avoid retaining plaintext tokens.
-- `db-vfs-core`: cap `path`/`path_prefix`, glob patterns, and grep queries to avoid oversized input allocations.
-- Policy: validate `limits.max_io_ms` and cap request size limits to 256MB.
-- `db-vfs-service`: map `input_too_large`, `file_too_large`, `secret_path_denied`, and `patch` errors to 4xx status codes.
-- `db-vfs`: validate `workspace_id` and ensure `read` respects `limits.max_read_bytes` for line ranges.
-- `db-vfs`: cap `read` retries when content cannot be loaded to avoid infinite loops.
-- `db-vfs-core`: pre-expand deny/skip globs ending with `/*` to also match descendants (`/**`) without per-path probe allocations.
-- `glob`: report `scanned_files` separately from `scanned_entries` and respect `traversal.skip_globs`.
-- `patch`: fetch existing content using `limits.max_read_bytes` (consistent with read limits).
-- Lint: fix `clippy::large_enum_variant`.
-- Docs: fix `Getting started` instructions to enable `permissions.write` when using `policy.example.toml`.
-- `db-vfs-core`: validate `secrets.deny_globs`, `traversal.skip_globs`, and `secrets.replacement` sizes to avoid pathological policies.
-- `db-vfs-service`: align SQLite `busy_timeout` with `limits.max_io_ms` (capped).
-- Docs: document HTTP status codes and `429 rate_limited`.
-- `db-vfs-service`: return JSON error bodies for invalid JSON / missing `content-type` (new codes: `invalid_json`, `unsupported_media_type`, `payload_too_large`).
-- `glob`/`grep`: derive a safer `path_prefix` from glob patterns that end with `/` (avoid overscanning sibling prefixes).
-- Docs: fix mdBook build (mdbook v0.5 config + SUMMARY nesting) and make `policy.example.toml` link work when building via `./scripts/docs.sh`.
-- `db-vfs-service`: ensure request timeouts release the concurrency semaphore permit (avoid stuck permits under lingering blocking work).
-- `db-vfs-service`: reduce per-request handler boilerplate (shared validation/permit/audit path).
-- `db-vfs-service`: batch JSONL audit log flushes to reduce per-request IO overhead.
-- `db-vfs-service`: audit log now includes early rejections (unauthorized, invalid JSON, rate limited) with `workspace_id="<unknown>"`.
-- `db-vfs-service`: redact scan audit fields (`path_prefix`, `glob_pattern`) when they match secret deny rules.
-- `db-vfs-service`: warn once if the audit log worker thread stops (audit events will be dropped).
-- Policy: reject `audit.flush_*` when `audit.jsonl_path` is not set (service-only; avoids ignored settings).
-- `grep`: reject empty queries and enforce `max_line_bytes` after redaction.
-- `read`: enforce `max_read_bytes` after redaction and count `bytes_read` on returned content.
-- `read`: return `conflict` (not `db`) when a file changes during retry-based content loading.
-- `db-vfs`: `read`/`write`/`patch`/`delete` responses now include `requested_path` (normalized input).
-- `glob`/`grep`: report additional skip counters (e.g. secret denies, traversal skips) to make partial results explainable.
-- `db-vfs-service`: policy loader rejects non-regular files and avoids unbounded policy reads.
-- `db-vfs-service`: `secret_path_denied` HTTP errors no longer include the denied path in the message.
-- `db-vfs-service`: derive a lock path from `audit.jsonl_path` for cross-process audit locking (avoid `.lock.lock` naming edge cases).
-- Policy: reject `audit.jsonl_path` values with leading/trailing whitespace or control characters.
-- `db-vfs-service`: reject oversized bearer tokens in the `Authorization` header.
-- CI: docs workflow no longer fails when GitHub Pages is not enabled (skips deploy).
-- SQLite store: treat only UNIQUE/PRIMARYKEY constraint violations as `conflict` on create.
-- `db-vfs-core`: `path`/`path_prefix` now reject control characters.
+- store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
+- read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
+- audit: improve lock-path derivation, batch flush behavior, and failure handling for early rejection paths.
+- service/middleware: avoid creating rate-limit buckets for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
+
+### Internal
+
+- ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
+- tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
+- tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 
 ## [0.1.0] - 2026-01-31
 
@@ -484,101 +318,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 file: docs/src/SUMMARY.md
+title: "Docs Summary"
+section_id: "docs-src-summary-md"
 ---
 
 # Summary
 
 * [Introduction](index.md)
-* [Getting started](getting-started.md)
+* [Getting Started](getting-started.md)
 * [Concepts](concepts.md)
 * [Guides](guides.md)
   * [Policy](policy.md)
   * [HTTP API](http-api.md)
-  * [Storage backends](storage.md)
+  * [Storage Backends](storage.md)
   * [Security](security.md)
   * [Observability](observability.md)
   * [Troubleshooting](troubleshooting.md)
   * [Development](development.md)
-  * [`llms.txt`](llms.md)
+  * [LLM Context (llms.txt)](llms.md)
 
 
 ---
 file: docs/src/index.md
-title: Introduction
+title: "Introduction"
+section_id: "docs-src-index-md"
 ---
 
 # db-vfs
 
-`db-vfs` is a DB-backed “virtual filesystem” (VFS) intended for server / high-concurrency workloads.
+`db-vfs` is a DB-backed virtual filesystem for service workloads.
 
-It provides tool-like operations with explicit safety policy enforcement:
+It provides six operations:
 
-- `read` (optional line ranges)
-- `glob`
-- `grep`
-- `write`
-- `patch` (unified diff)
-- `delete`
+- `read`: read a file (optionally by line range).
+- `write`: create or CAS-update a file.
+- `patch`: CAS-apply unified diff to a file.
+- `delete`: delete with optional CAS version.
+- `glob`: list paths by glob pattern.
+- `grep`: search text under scoped traversal.
 
-This repo contains:
+## Safety model
 
-- `db-vfs` (crate): core VFS operations backed by a `Store` trait.
-- `db-vfs-service` (crate): an HTTP JSON service (Axum) with auth, request limits, and concurrency control.
+`db-vfs` enforces a policy-first model:
 
-Non-goals:
+- **Permissions** decide which operations are allowed.
+- **Limits** bound CPU/memory/DB work.
+- **Secrets** deny sensitive paths and redact output.
+- **Traversal** skips noisy paths for scan performance.
+- **Auth** binds tokens to workspace allowlists.
 
-- Full git-repo tooling (checkout/build, etc).
-- Large binary file storage.
-- Unbounded traversal/search (scans are scoped and budgeted).
+Scan operations are **scoped and budgeted**: callers must provide `path_prefix` (or a safe literal
+prefix must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
 
-## Where to start
+## High-concurrency expectations
 
-- New users: [`Getting started`](getting-started.md)
-- Understanding semantics: [`Concepts`](concepts.md)
-- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](policy.example.toml)
-- Integrating over HTTP: [`HTTP API`](http-api.md)
-- LLM/RAG ingestion: [`llms.txt`](llms.md)
+High concurrency assumes all of the following are configured correctly:
+
+- `limits.max_concurrency_io`, `limits.max_concurrency_scan`
+- `limits.max_db_connections`, `limits.max_io_ms`
+- per-IP rate limiting (`limits.max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`)
+
+## Start here
+
+- First deployment: read [`Policy`](policy.md) → [`Security`](security.md) → [`Storage Backends`](storage.md)
+- API integration: read [`Concepts`](concepts.md) → [`HTTP API`](http-api.md)
+- Production operations: read [`Observability`](observability.md) → [`Troubleshooting`](troubleshooting.md)
 
 
 ---
 file: docs/src/getting-started.md
-title: Getting started
+title: "Getting Started"
+section_id: "docs-src-getting-started-md"
 ---
 
-# Getting started
+# Getting Started
 
 ## Prerequisites
 
-- Rust toolchain (see `rust-toolchain.toml`)
+Run from repository root (`db-vfs/`).
 
-## Run the service (SQLite)
+```bash
+rustc --version
+cargo --version
+```
 
-Create a policy file (start from `policy.example.toml`) and set a bearer token at runtime:
+Expected: Rust/Cargo are installed and versions are available.
+
+## 5-minute local run (SQLite)
+
+1. Copy a local policy file (do not edit the example in place):
+
+```bash
+cp policy.example.toml policy.local.toml
+```
+
+2. Set a development token:
 
 ```bash
 export DB_VFS_TOKEN='dev-token-change-me'
 ```
 
-For local development, enable writes in your policy:
+3. Enable local writes in `policy.local.toml`:
 
 ```toml
-# In your policy's `[permissions]` section (e.g. `policy.example.toml`)
 [permissions]
 write = true
 ```
 
-Run:
+4. Start service:
 
 ```bash
 cargo run -p db-vfs-service -- \
   --sqlite ./db-vfs.sqlite \
-  --policy ./policy.example.toml \
+  --policy ./policy.local.toml \
   --listen 127.0.0.1:8080
 ```
 
 ## Smoke test
 
-Write a file:
+Write:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/write \
@@ -587,7 +445,13 @@ curl -sS http://127.0.0.1:8080/v1/write \
   -d '{"workspace_id":"w1","path":"docs/a.txt","content":"hello","expected_version":null}'
 ```
 
-Read it back:
+Expected response fragment:
+
+```json
+{"path":"docs/a.txt","created":true,"version":1}
+```
+
+Read:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/read \
@@ -596,363 +460,549 @@ curl -sS http://127.0.0.1:8080/v1/read \
   -d '{"workspace_id":"w1","path":"docs/a.txt","start_line":null,"end_line":null}'
 ```
 
+Expected response fragment:
+
+```json
+{"path":"docs/a.txt","content":"hello","version":1}
+```
+
+## Common startup mistakes
+
+- `401 unauthorized`: token missing/wrong; check `Authorization` and `DB_VFS_TOKEN`.
+- `403 not_permitted`: `permissions.write = false`; enable write in policy.
+- `415 unsupported_media_type`: missing `content-type: application/json`.
+
 
 ---
 file: docs/src/concepts.md
-title: Concepts
+title: "Concepts"
+section_id: "docs-src-concepts-md"
 ---
 
 # Concepts
 
-## Namespace: `workspace_id`
+## Core rules
 
-`workspace_id` is the namespace boundary. All operations are scoped to:
+- `workspace_id` **MUST** be valid and non-empty.
+- `path` and `path_prefix` **MUST** be root-relative (no leading `/`, no `..`, no control chars).
+- `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
+- `read/write/patch/delete` **MUST** pass secret deny checks for target path.
+- `glob/grep` **MUST** be scoped by `path_prefix` unless a safe literal prefix is derivable.
 
-- `workspace_id`
-- a root-relative `path` or `path_prefix`
+## Safe literal prefix
 
-## Root-relative paths
+A safe literal prefix is a non-wildcard, root-relative directory prefix extracted from `glob`.
 
-All `path` / `path_prefix` values are root-relative:
+Examples:
 
-- Must not start with `/`
-- Must not contain `..`
-- Must not have leading/trailing whitespace
-- Must not contain control characters
+- `docs/**/*.md` -> safe prefix `docs/`.
+- `docs/*` -> safe prefix `docs/`.
+- `**/*.md` -> no safe prefix (caller must provide `path_prefix`).
+- `*/foo/*.md` -> no safe prefix.
 
-`path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
-`policy.permissions.allow_full_scan = true`.
+## Operation semantics matrix
 
-## Safety policy
+| Operation | Target exists | expected_version | Result |
+| --- | --- | --- | --- |
+| `write` | no | `null` | create (version=1) |
+| `write` | yes | `null` | `conflict` |
+| `write` | yes | `v` matches | update (version+1) |
+| `write` | yes | `v` mismatches | `conflict` |
+| `patch` | yes | `v` matches | patched (version+1) |
+| `patch` | yes/no | `v` mismatches or missing | `conflict` / `not_found` |
+| `delete` | yes | `null` | deleted |
+| `delete` | yes | `v` matches | deleted |
+| `delete` | yes | `v` mismatches | `conflict` |
+| `delete` | no | any | `not_found` |
 
-The policy is validated on load and governs:
+## Path normalization
 
-- Which operations are permitted (`permissions`)
-- How much work each request can do (`limits`)
-- Which paths are denied or redacted (`secrets`)
-- Which paths are skipped during scans only (`traversal`)
-- Service auth tokens and workspace allowlists (`auth`)
+Canonicalization is deterministic:
 
-## Concurrency and CAS
+1. validate root-relative constraints;
+2. normalize separators;
+3. reject invalid forms (`..`, control chars, invalid workspace id);
+4. return canonical `requested_path` and normalized stored `path`.
 
-Writes are guarded by optimistic concurrency using a monotonically increasing `version`:
+## Error contract
 
-- `read` returns the current `version`
-- `write(expected_version = null)` is **create-only**
-- `write(expected_version = v)` updates iff the current version is `v`
-- `patch` requires `expected_version`
-- `delete(expected_version = v)` enforces CAS; `delete(expected_version = null)` is unconditional
-
-## Scan scoping
-
-To avoid unbounded traversal, scan operations are scoped:
-
-- `grep` requires an explicit `path_prefix` unless a safe literal prefix can be derived from `glob`
-- `glob` similarly requires `path_prefix` for broad patterns without a safe literal prefix
-
-## Error codes
-
-Library errors carry stable `code`s (e.g. `invalid_path`, `not_permitted`, `conflict`, `timeout`).
-The HTTP service maps these to HTTP status codes and returns a JSON error body.
+| `code` | Typical HTTP | Retry? | Client action |
+| --- | --- | --- | --- |
+| `unauthorized` | 401 | no | fix token/header |
+| `not_permitted` / `secret_path_denied` | 403 | no | fix policy/path |
+| `conflict` | 409 | conditional | re-read latest version and retry |
+| `timeout` | 408 | yes | backoff + retry |
+| `busy` / `rate_limited` | 503 / 429 | yes | backoff + retry with limits |
+| `invalid_*` / `patch` | 400 | no | fix request payload |
 
 
 ---
 file: docs/src/guides.md
-title: Guides
+title: "Guides"
+section_id: "docs-src-guides-md"
 ---
 
 # Guides
 
-This section collects operational docs for running `db-vfs` safely:
+Audience and first path:
 
-- Policy configuration: [`Policy`](policy.md)
-- HTTP endpoints and error mapping: [`HTTP API`](http-api.md)
-- Storage backends and migrations: [`Storage backends`](storage.md)
-- Threat model and hardening notes: [`Security`](security.md)
-- Logging and request IDs: [`Observability`](observability.md)
-- Common errors: [`Troubleshooting`](troubleshooting.md)
-- Contributing and local dev workflows: [`Development`](development.md)
-- LLM bundle generation: [`llms.txt`](llms.md)
+- Operators: start with Policy -> Security -> Storage Backends.
+- Integrators: start with Concepts -> HTTP API.
+- Maintainers: start with Development -> Observability.
 
+## Before launch
+
+- [`Policy`](policy.md): configuration defaults, limits, auth patterns.
+- [`Security`](security.md): hardening checklist and trust boundaries.
+- [`Storage Backends`](storage.md): backend behavior, timeouts, migrations.
+
+## Runtime operations
+
+- [`HTTP API`](http-api.md): request/response contracts and retry guidance.
+- [`Observability`](observability.md): request IDs, logging, audit schema.
+
+## Incident handling
+
+- [`Troubleshooting`](troubleshooting.md): error matrix and remediation steps.
+- [`Development`](development.md): validation scripts and CI parity.
+- [`LLM Context (llms.txt)`](llms.md): generated context bundle and regeneration flow.
+
+Last updated: 2026-02-06
+Owner: db-vfs maintainers
 
 
 ---
 file: docs/src/policy.md
-title: Policy
+title: "Policy"
+section_id: "docs-src-policy-md"
 ---
 
 # Policy
 
-The service loads a policy file (`.toml` or `.json`) into `db_vfs_core::policy::VfsPolicy`.
+Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`).
 
-Start from `policy.example.toml` (also linked as [`policy.example.toml`](policy.example.toml) in the built docs).
+Start from [`policy.example.toml`](policy.example.toml).
 
-## Sections
+## Default highlights
 
-### `[permissions]`
+| Section | Key | Default |
+| --- | --- | --- |
+| `permissions` | `read/glob/grep` | `true` |
+| `permissions` | `write/patch/delete` | `false` |
+| `permissions` | `allow_full_scan` | `false` |
+| `audit` | `required` | `true` |
+| `limits` | `max_walk_ms` | `Some(2000)` |
 
-Toggles operations on/off:
+## `allowed_workspaces` matching
 
-- `read`, `glob`, `grep`, `write`, `patch`, `delete`
-- `allow_full_scan`: allow `path_prefix=""` for `glob`/`grep`
+Supported patterns:
 
-### `[auth]` / `[[auth.tokens]]`
+- `*`: allow all workspaces.
+- exact match, e.g. `ws-prod`.
+- trailing wildcard prefix, e.g. `team-a-*`.
 
-The HTTP service requires:
+Not supported:
 
+- multiple `*` (`foo*bar*`)
+- middle wildcard (`a*b`)
+- malformed patterns rejected by policy validation.
+
+## Token hash generation
+
+Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
+
+```bash
+printf '%s' 'dev-token-change-me' | sha256sum
+# then use: token = "sha256:<hex>"
 ```
-Authorization: Bearer <token>
-```
 
-Each token is restricted to a workspace allowlist (`allowed_workspaces`):
+## Limits reference
 
-- exact: `"ws1"`
-- prefix: `"team1-*"`
-- all: `"*"`
+Critical bounded fields include:
 
-Tokens can be provided as:
+- request bytes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`
+- scan bounds: `max_results`, `max_walk_files`, `max_walk_entries`, `max_walk_ms`, `max_line_bytes`
+- service runtime: `max_io_ms`, concurrency and DB pool limits
+- rate limit: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
-- `token = "sha256:<64 hex chars>"` (recommended for committed policies)
-- `token_env_var = "DB_VFS_TOKEN"` (load plaintext token at runtime)
+## Audit behavior matrix
 
-### `[limits]`
+| `audit.jsonl_path` | `audit.required` | Startup behavior |
+| --- | --- | --- |
+| unset | `true/false` | audit disabled |
+| set + writable | `true/false` | audit enabled |
+| set + open fails | `true` | startup fails |
+| set + open fails | `false` | startup continues, audit disabled |
 
-Budgets to control CPU/memory/DB load, including:
-
-- request sizes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`
-- scan budgets: `max_walk_entries`, `max_walk_files`, `max_walk_ms`, `max_results`
-- service: `max_io_ms`, `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
-- rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
-
-Notes:
-  - Size limits (`max_read_bytes`, `max_write_bytes`, `max_patch_bytes`) are structurally capped at 256MB.
-  - Scan-related limits are validated with hard caps to avoid pathological policies:
-    - `max_results`: `1..=100000`
-    - `max_walk_files`: `1..=500000`
-    - `max_walk_entries`: `1..=1000000`
-    - `max_line_bytes`: `1..=65536`
-
-Note: `db-vfs-service --trust-mode untrusted` requires `max_walk_ms` and per-IP rate limiting (`max_requests_per_ip_per_sec > 0`).
-
-### `[secrets]`
-
-Controls deny rules and text redaction:
-
-- `deny_globs`: deny direct access to matching paths (note: `dir/*` also denies descendants under `dir/**`)
-- `redact_regexes`: applied to returned text
-- `replacement`: string used to replace redacted matches
-
-### `[traversal]`
-
-Scan-only skipping rules:
-
-- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads). Note: `dir/*` also skips descendants under `dir/**`.
-
-### `[audit]`
-
-Service-only observability:
-
-- `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
-- `required`: whether audit initialization failures should fail service startup (default: `true`).
-- `flush_every_events`: flush audit output after this many events (default: `32`, range: `1..=65536`).
-- `flush_max_interval_ms`: flush audit output at least every N milliseconds (default: `250`, range: `1..=60000`).
-
-Note: `flush_*` requires `jsonl_path` to be set. Flushing is `BufWriter::flush` (not `fsync`), and values are capped to keep audit output timely.
-For requests rejected before the body is parsed (e.g. unauthorized, invalid JSON, rate limited), the audit log uses `workspace_id="<unknown>"` and omits request-specific path fields.
+`flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
 
 
 ---
 file: docs/src/http-api.md
-title: HTTP API
+title: "HTTP API"
+section_id: "docs-src-http-api-md"
 ---
 
 # HTTP API
 
-The service exposes JSON POST endpoints:
+All endpoints are `POST` JSON.
 
-- `/v1/read`
-- `/v1/write`
-- `/v1/patch`
-- `/v1/delete`
-- `/v1/glob`
-- `/v1/grep`
+## Request prerequisites
 
-All requests require:
+- Header `content-type: application/json`
+- Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
 
-- `content-type: application/json`
-- `authorization: Bearer <token>` (unless started with `--unsafe-no-auth`)
+## Endpoint contracts
 
-Notes on success responses:
+### `/v1/read`
 
-- `read`/`write`/`patch`/`delete` include `requested_path` (normalized input) and `path` (normalized stored path).
-- `glob`/`grep` include scan counters and `skipped_*` diagnostics to make partial results explainable.
+Request fields:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `workspace_id` | string | yes | namespace |
+| `path` | string | yes | root-relative path |
+| `start_line` | u64|null | no | must pair with `end_line` |
+| `end_line` | u64|null | no | must pair with `start_line` |
+
+Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
+
+### `/v1/write`
+
+Request fields: `workspace_id`, `path`, `content`, `expected_version` (`u64|null`).
+
+Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`.
+
+### `/v1/patch`
+
+Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+Response fields: `requested_path`, `path`, `bytes_written`, `version`.
+
+### `/v1/delete`
+
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+
+Response fields: `requested_path`, `path`, `deleted`.
+
+### `/v1/glob`
+
+Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
+
+Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`, `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and skip counters.
+
+### `/v1/grep`
+
+Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
+
+Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same shape as `glob`).
+
+## Path normalization rules
+
+- must be root-relative;
+- no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
+- normalized path is echoed in response fields.
 
 ## Errors
 
-Errors are returned as JSON with an HTTP status code:
+Error body:
 
 ```json
-{ "code": "invalid_path", "message": "..." }
+{ "code": "<stable_code>", "message": "<human readable>" }
 ```
 
-5xx errors use a non-leaky `"internal error"` message.
+Common codes:
 
-### Status codes
+- `invalid_json_syntax`, `invalid_json_schema`, `invalid_json`, `unsupported_media_type`, `payload_too_large`
+- `unauthorized`, `not_permitted`, `secret_path_denied`
+- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`
 
-- `400`: `invalid_path`, `invalid_regex`, `invalid_json`, `patch`
-- `401`: `unauthorized` (missing/invalid `Authorization`)
-- `403`: `forbidden`, `not_permitted`, `secret_path_denied`
-- `404`: `not_found`
-- `408`: `timeout`
-- `409`: `conflict`
-- `413`: `payload_too_large`, `input_too_large`, `file_too_large`, `quota_exceeded`
-- `415`: `unsupported_media_type` (missing/invalid `content-type`)
-- `429`: `rate_limited`
-- `503`: `busy`
+`patch` means “unified diff apply/parse failure” (not the endpoint name).
 
-## Tracing
+## Retry guidance
 
-- The service accepts and returns `x-request-id`.
-- If missing, it generates one and includes it on the response.
+- `408 timeout`, `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `409 conflict`: fetch latest version and retry with fresh `expected_version`.
+- `400/401/403/415`: fix request/policy first; do not blind-retry.
 
 
 ---
 file: docs/src/storage.md
-title: Storage backends
+title: "Storage Backends"
+section_id: "docs-src-storage-md"
 ---
 
-# Storage backends
+# Storage Backends
 
-## SQLite
+## Backend configuration matrix
 
-- Intended for dev/test and single-node deployments.
-- Uses `r2d2_sqlite` for connection pooling.
-- The service attempts to interrupt in-flight SQLite queries on timeout (best-effort).
+| Backend | Key config | Default / behavior |
+| --- | --- | --- |
+| SQLite | `limits.max_io_ms` | used for busy timeout (capped) |
+| SQLite | `limits.max_db_connections` | r2d2 pool size |
+| Postgres | `limits.max_io_ms` | sets statement timeout |
+| Postgres | `limits.max_db_connections` | r2d2 pool size |
 
-## Postgres
+## Timeout behavior
 
-- Intended for production deployments (build with `--features postgres`).
-- Uses `r2d2_postgres` for connection pooling.
-- The service configures Postgres `statement_timeout` based on policy `limits.max_io_ms`.
+| Backend | Timeout mechanism | On timeout |
+| --- | --- | --- |
+| SQLite | service wall-clock + interrupt handle | best-effort interrupt, may finish shortly in background |
+| Postgres | service wall-clock + statement timeout | query canceled by DB timeout rules |
 
-## Migrations
+Retry decision still depends on operation semantics (`conflict`, idempotency, etc).
 
-Migrations live under `migrations/` and are applied on startup:
+## Migration contract
 
-- `migrations/sqlite/`
-- `migrations/postgres/`
+- migrations run at service startup;
+- migration failure aborts startup;
+- migrations are expected to be idempotent for existing environments;
+- startup order: open connection -> run migrations -> serve traffic.
+
+## Quick verification
+
+SQLite:
+
+```bash
+cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.local.toml
+```
+
+Postgres:
+
+```bash
+cargo run -p db-vfs-service --features postgres -- \
+  --postgres 'postgres://user:pass@localhost:5432/db_vfs' \
+  --policy ./policy.local.toml
+```
+
+After startup, run one `write` and one `read` request and verify 2xx responses.
 
 
 ---
 file: docs/src/security.md
-title: Security
+title: "Security"
+section_id: "docs-src-security-md"
 ---
 
 # Security
 
-See `SECURITY.md` for the threat model and guidance.
+## Minimum security baseline
 
-Key points:
+Use this checklist for production:
 
-- Root-relative path normalization rejects `/`-absolute paths and `..` segments.
-- Secret deny rules apply to direct access; redaction applies to returned text.
-  - Note: deny/skip globs like `dir/*` also apply to descendants under `dir/**` (directory-probe semantics).
-- `glob`/`grep` require scoping (`path_prefix`) unless explicitly allowed.
-- Auth is required by default; `--unsafe-no-auth` is intended for local development only.
-- If the policy/config is not fully trusted, run the service with `--trust-mode untrusted`:
-  - forbids risky features (env interpolation, env-backed tokens, writes, full scans, `audit.jsonl_path`, and `--unsafe-no-auth`)
-  - requires `limits.max_walk_ms` and per-IP rate limiting (`limits.max_requests_per_ip_per_sec > 0`)
-- The rate limiter uses the TCP peer IP and does not parse `x-forwarded-for`.
+- [ ] run behind HTTPS/TLS end-to-end;
+- [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
+- [ ] scope tokens with `allowed_workspaces` (avoid `*`);
+- [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
+- [ ] enable audit log with `audit.jsonl_path` and keep `audit.required = true`;
+- [ ] run with restrictive file permissions/umask for SQLite.
+
+## Terms
+
+- **Direct access deny**: `secrets.deny_globs` blocks path operations.
+- **Redaction**: `secrets.redact_regexes` rewrites output text.
+- **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
+
+## Untrusted mode checklist
+
+When policy source is not trusted, run with `--trust-mode untrusted`:
+
+- [ ] no env interpolation in policy;
+- [ ] no env-backed auth tokens;
+- [ ] no writes/patch/delete;
+- [ ] no full scan;
+- [ ] no audit path configuration;
+- [ ] no `--unsafe-no-auth`.
+
+## Reverse proxy note
+
+Rate limiting uses TCP peer IP (not `x-forwarded-for`).
+
+Recommended deployment pattern:
+
+- enforce edge/gateway rate limits first;
+- keep service rate limit as a second guardrail;
+- avoid trusting spoofable forwarded headers unless handled by a trusted edge.
 
 
 ---
 file: docs/src/observability.md
-title: Observability
+title: "Observability"
+section_id: "docs-src-observability-md"
 ---
 
 # Observability
 
-## `x-request-id`
+## Request ID contract
 
-The service:
+`x-request-id` behavior:
 
-- Echoes `x-request-id` if provided by the client.
-- Otherwise generates one and adds it to the response headers.
+- client-provided value is accepted if it matches `[A-Za-z0-9_-]{1,128}`;
+- invalid/missing value is replaced by service-generated ID;
+- response always returns `x-request-id`.
 
-## Logging
+## Audit JSONL schema
 
-The service uses `tracing`; configure via `RUST_LOG`, for example:
+Sample line:
 
-```bash
-RUST_LOG=db_vfs_service=info cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.example.toml
+```json
+{"ts_ms":1738828800000,"request_id":"...","op":"write","status":200,"workspace_id":"w1","peer_ip":"127.0.0.1"}
 ```
 
-## JSONL audit log (optional)
+Core fields:
 
-If `policy.audit.jsonl_path` is set, the service appends one JSON object per request (JSONL / ndjson).
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `ts_ms` | u64 | yes | event timestamp |
+| `request_id` | string | yes | request correlation ID |
+| `op` | string | yes | `read/write/patch/delete/glob/grep` |
+| `status` | u16 | yes | HTTP status |
+| `workspace_id` | string | yes | `<unknown>` for early rejects |
+| `peer_ip` | string|null | no | TCP peer IP when available |
+| `error_code` | string|null | no | stable error code |
 
-Notes:
+## `peer_ip` handling
 
-- Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
-- Records do not include file content or grep query text (grep logs only query length + regex flag).
-- Requests rejected before the body is parsed (unauthorized, invalid JSON, rate limited) use `workspace_id="<unknown>"` and omit request-specific path fields.
-- Paths denied by secret rules are logged as `<secret>` in audit fields.
-- `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).
+- source: TCP peer address (`ConnectInfo<SocketAddr>`);
+- no forwarded-header parsing;
+- apply local retention policy according to compliance requirements.
+
+## Logging levels
+
+Recommended `RUST_LOG`:
+
+- dev: `RUST_LOG=db_vfs_service=debug`
+- test/staging: `RUST_LOG=db_vfs_service=info`
+- prod: `RUST_LOG=db_vfs_service=warn`
+
+## Audit operations
+
+- keep audit file permissions restrictive (`600` or equivalent owner-only access);
+- configure external log rotation;
+- monitor disk usage;
+- understand startup behavior difference between `audit.required=true/false`.
 
 
 ---
 file: docs/src/troubleshooting.md
-title: Troubleshooting
+title: "Troubleshooting"
+section_id: "docs-src-troubleshooting-md"
 ---
 
 # Troubleshooting
 
+Use this template for each failure:
+
+`Symptom -> Likely cause -> Immediate checks -> Fix -> Retry? -> Success criteria`
+
 ## `401 unauthorized`
 
-- Missing or invalid `Authorization` header.
-- Token does not match any configured auth rule.
+- Symptom: response `401` + `code=unauthorized`.
+- Likely cause: missing/invalid bearer token.
+- Immediate checks: `Authorization: Bearer <token>`, token hash in policy.
+- Fix: align runtime token and policy token hash/env var.
+- Retry: yes, after fixing auth.
+- Success criteria: request returns expected 2xx/4xx business result.
 
 ## `403 forbidden`
 
-- Workspace is not allowed for the current token.
-- Operation is disabled by policy.
+- Symptom: `403` with `not_permitted` / `secret_path_denied`.
+- Likely cause: policy blocks operation or workspace/path.
+- Immediate checks: `permissions.*`, `allowed_workspaces`, `secrets.deny_globs`.
+- Fix: adjust policy for intended scope.
+- Retry: only after policy fix.
+- Success criteria: operation succeeds on allowed workspace/path.
+
+## `409 conflict`
+
+- Symptom: CAS mismatch.
+- Likely cause: stale `expected_version`.
+- Immediate checks: read latest file/version first.
+- Fix: retry with latest version and idempotent write/patch logic.
+- Retry: yes.
+- Success criteria: update/delete accepted with current version.
 
 ## `408 timeout`
 
-- Request exceeded the configured wall-clock timeout budget.
-- For SQLite, the service attempts to interrupt in-flight queries (best-effort).
+- Symptom: `timeout` under load or large requests.
+- Likely cause: `limits.max_io_ms` too low or backend contention.
+- Immediate checks: server logs with `request_id`, DB health, pool saturation.
+- Fix: tune limits and query scope; reduce request payload/scan scope.
+- Retry: yes, exponential backoff (3-5 attempts max).
+- Success criteria: sustained requests complete within budget.
 
-## `413 payload too large`
+## `429 rate_limited`
 
-- Request exceeded `limits.max_read_bytes` / `max_write_bytes` / `max_patch_bytes`.
-
-## `415 unsupported media type`
-
-- Missing or invalid `content-type`; the API expects `application/json`.
-
-## `429 too many requests`
-
-- Per-IP rate limit exceeded (`limits.max_requests_per_ip_per_sec` / `max_requests_burst_per_ip`).
+- Symptom: `rate_limited`.
+- Likely cause: per-IP burst exhausted.
+- Immediate checks: caller request rate, gateway throttling.
+- Fix: throttle caller and tune rate-limit policy.
+- Retry: yes, with backoff and jitter.
+- Success criteria: no repeated immediate 429 for steady traffic.
 
 ## `503 busy`
 
-- The service is at its configured concurrency limit.
+- Symptom: `busy` at peak concurrency.
+- Likely cause: semaphore/pool saturation.
+- Immediate checks: `limits.max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`.
+- Fix: tune concurrency, reduce expensive operations.
+- Retry: yes, with bounded retries.
+- Success criteria: queue drains and requests recover to normal latencies.
+
+## `415 unsupported_media_type`
+
+- Symptom: `code=unsupported_media_type`.
+- Likely cause: missing/invalid JSON content type.
+- Immediate checks: `content-type: application/json`.
+- Fix: send proper JSON headers/body.
+- Retry: yes after fixing request format.
+- Success criteria: parser reaches business handler.
 
 
 ---
 file: docs/src/development.md
-title: Development
+title: "Development"
+section_id: "docs-src-development-md"
 ---
 
 # Development
 
-## Gates
+## Prerequisites
 
-Run format/check/clippy/test:
+Run all commands from repository root.
 
-```bash
-./scripts/gate.sh
-```
+Required tools:
+
+- Rust toolchain (`rustc`, `cargo`)
+- `mdbook` (for docs build)
+
+## Validation gates
+
+### `./scripts/gate.sh`
+
+Purpose: format/check/clippy/tests/docs/LLMS checks.
+
+Pass criteria:
+
+- exit code `0`
+- no `error:` lines in output
+
+Common failures:
+
+- stale lockfile/features -> run targeted `cargo check` locally first
+- stale llms bundle -> run `./scripts/llms.sh`
+
+### `./scripts/docs.sh`
+
+Purpose: build mdBook docs.
+
+Pass criteria: exit code `0` and generated `docs/book/` output.
+
+### `./scripts/llms.sh --check`
+
+Purpose: ensure `llms.txt` and `docs/llms.txt` are up to date.
+
+Pass criteria: reports `llms: up to date`.
 
 ## Git hooks
 
@@ -962,77 +1012,73 @@ Enable local hooks:
 ./scripts/setup-githooks.sh
 ```
 
-The hooks enforce:
+Hooks are local fast-fail checks; CI remains the merge authority.
 
-- Conventional Commits messages
-- `CHANGELOG.md` updates in every commit
-- a max Rust file size guard (`DB_VFS_MAX_RS_LINES`, default 1000)
+Policy for `CHANGELOG.md` updates:
 
-## Docs
+- user-visible/security behavior changes: required
+- internal-only refactors/chore: may be grouped into one entry
 
-Build the mdBook (requires `mdbook`):
+## Docs and Pages troubleshooting
 
-```bash
-./scripts/docs.sh
-```
+If docs deploy does not happen, check:
 
-GitHub Actions also builds docs on pushes; deploying to GitHub Pages requires enabling Pages for the repo
-(Settings → Pages → Source: GitHub Actions). If Pages is not enabled, the workflow still builds but
-skips deploy.
-
-Regenerate `llms.txt`:
-
-```bash
-./scripts/llms.sh
-```
-
-Verify `llms.txt` is up to date:
-
-```bash
-./scripts/llms.sh --check
-```
+1. workflow trigger branch/path filters;
+2. GitHub Pages settings (GitHub Actions source);
+3. workflow permissions for pages/id-token.
 
 
 ---
 file: docs/src/llms.md
-title: `llms.txt`
+title: "LLM Context (llms.txt)"
+section_id: "docs-src-llms-md"
 ---
 
-# `llms.txt`
+# LLM Context (`llms.txt`)
 
-Inspired by the AI SDK docs’ `llms.txt`, this repo includes a single-file documentation bundle for
-LLM/RAG ingestion:
+This repository maintains two synchronized bundle files:
 
-- `llms.txt` (repo root)
-- `docs/llms.txt` (same content, colocated with docs)
+- `llms.txt` (root, canonical generated output)
+- `docs/llms.txt` (copy for docs distribution)
 
-Both are Markdown stored in a `.txt` file (with YAML front matter) so they can be copied/pasted into
-LLM tools easily.
+## Maintenance rules
 
-## Download
-
-If you build the docs with `./scripts/docs.sh`, the rendered book output includes:
-
-- [`llms.txt`](llms.txt)
+- Source of truth for content is normal docs/README/SECURITY files.
+- `llms.txt` and `docs/llms.txt` are generated artifacts.
+- Do not hand-edit generated bundle files.
 
 ## Regenerate
-
-After documentation changes:
 
 ```bash
 ./scripts/llms.sh
 ```
 
-Verify it is up to date:
+Expected result:
+
+- root and docs copies are rewritten with identical content
+- metadata header includes generation timestamp and source commit
+
+Verify in CI/local:
 
 ```bash
 ./scripts/llms.sh --check
 ```
 
-## Suggested prompt
+If check fails, regenerate then commit updated bundles.
 
-Paste `llms.txt` into your LLM tool as context, then ask questions like:
+## Front matter template
 
-> Use the provided `llms.txt` documentation to answer my questions about `db-vfs`.
-> If the answer is not in the docs, say so explicitly.
+```yaml
+---
+title: db-vfs docs bundle
+generated_at_utc: 2026-02-06T00:00:00Z
+source_commit: <git-sha>
+generator_version: scripts/llms.sh@v2
+---
+```
+
+## Safe usage note
+
+Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
+internal-only secrets, private URLs).
 

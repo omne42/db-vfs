@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
 - vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
 - docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
+- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration.
 
 ### Fixed
 
@@ -32,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
+- tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 
 ## [0.1.0] - 2026-01-31

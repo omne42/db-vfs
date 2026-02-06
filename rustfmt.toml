@@ -1,1 +1,4 @@
+# Keep formatting behavior stable across environments.
+# Recommended toolchain: Rust 1.91.x (edition 2024).
 edition = "2024"
+# Project convention: default rustfmt style + fixed edition.

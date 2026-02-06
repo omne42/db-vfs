@@ -1,12 +1,41 @@
 # Development
 
-## Gates
+## Prerequisites
 
-Run format/check/clippy/test:
+Run all commands from repository root.
 
-```bash
-./scripts/gate.sh
-```
+Required tools:
+
+- Rust toolchain (`rustc`, `cargo`)
+- `mdbook` (for docs build)
+
+## Validation gates
+
+### `./scripts/gate.sh`
+
+Purpose: format/check/clippy/tests/docs/LLMS checks.
+
+Pass criteria:
+
+- exit code `0`
+- no `error:` lines in output
+
+Common failures:
+
+- stale lockfile/features -> run targeted `cargo check` locally first
+- stale llms bundle -> run `./scripts/llms.sh`
+
+### `./scripts/docs.sh`
+
+Purpose: build mdBook docs.
+
+Pass criteria: exit code `0` and generated `docs/book/` output.
+
+### `./scripts/llms.sh --check`
+
+Purpose: ensure `llms.txt` and `docs/llms.txt` are up to date.
+
+Pass criteria: reports `llms: up to date`.
 
 ## Git hooks
 
@@ -16,32 +45,17 @@ Enable local hooks:
 ./scripts/setup-githooks.sh
 ```
 
-The hooks enforce:
+Hooks are local fast-fail checks; CI remains the merge authority.
 
-- Conventional Commits messages
-- `CHANGELOG.md` updates in every commit
-- a max Rust file size guard (`DB_VFS_MAX_RS_LINES`, default 1000)
+Policy for `CHANGELOG.md` updates:
 
-## Docs
+- user-visible/security behavior changes: required
+- internal-only refactors/chore: may be grouped into one entry
 
-Build the mdBook (requires `mdbook`):
+## Docs and Pages troubleshooting
 
-```bash
-./scripts/docs.sh
-```
+If docs deploy does not happen, check:
 
-GitHub Actions also builds docs on pushes; deploying to GitHub Pages requires enabling Pages for the repo
-(Settings → Pages → Source: GitHub Actions). If Pages is not enabled, the workflow still builds but
-skips deploy.
-
-Regenerate `llms.txt`:
-
-```bash
-./scripts/llms.sh
-```
-
-Verify `llms.txt` is up to date:
-
-```bash
-./scripts/llms.sh --check
-```
+1. workflow trigger branch/path filters;
+2. GitHub Pages settings (GitHub Actions source);
+3. workflow permissions for pages/id-token.

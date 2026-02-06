@@ -1,52 +1,55 @@
 # Concepts
 
-## Namespace: `workspace_id`
+## Core rules
 
-`workspace_id` is the namespace boundary. All operations are scoped to:
+- `workspace_id` **MUST** be valid and non-empty.
+- `path` and `path_prefix` **MUST** be root-relative (no leading `/`, no `..`, no control chars).
+- `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
+- `read/write/patch/delete` **MUST** pass secret deny checks for target path.
+- `glob/grep` **MUST** be scoped by `path_prefix` unless a safe literal prefix is derivable.
 
-- `workspace_id`
-- a root-relative `path` or `path_prefix`
+## Safe literal prefix
 
-## Root-relative paths
+A safe literal prefix is a non-wildcard, root-relative directory prefix extracted from `glob`.
 
-All `path` / `path_prefix` values are root-relative:
+Examples:
 
-- Must not start with `/`
-- Must not contain `..`
-- Must not have leading/trailing whitespace
-- Must not contain control characters
+- `docs/**/*.md` -> safe prefix `docs/`.
+- `docs/*` -> safe prefix `docs/`.
+- `**/*.md` -> no safe prefix (caller must provide `path_prefix`).
+- `*/foo/*.md` -> no safe prefix.
 
-`path_prefix` may be empty (`""`) to mean “the whole workspace” **only if**
-`policy.permissions.allow_full_scan = true`.
+## Operation semantics matrix
 
-## Safety policy
+| Operation | Target exists | expected_version | Result |
+| --- | --- | --- | --- |
+| `write` | no | `null` | create (version=1) |
+| `write` | yes | `null` | `conflict` |
+| `write` | yes | `v` matches | update (version+1) |
+| `write` | yes | `v` mismatches | `conflict` |
+| `patch` | yes | `v` matches | patched (version+1) |
+| `patch` | yes/no | `v` mismatches or missing | `conflict` / `not_found` |
+| `delete` | yes | `null` | deleted |
+| `delete` | yes | `v` matches | deleted |
+| `delete` | yes | `v` mismatches | `conflict` |
+| `delete` | no | any | `not_found` |
 
-The policy is validated on load and governs:
+## Path normalization
 
-- Which operations are permitted (`permissions`)
-- How much work each request can do (`limits`)
-- Which paths are denied or redacted (`secrets`)
-- Which paths are skipped during scans only (`traversal`)
-- Service auth tokens and workspace allowlists (`auth`)
+Canonicalization is deterministic:
 
-## Concurrency and CAS
+1. validate root-relative constraints;
+2. normalize separators;
+3. reject invalid forms (`..`, control chars, invalid workspace id);
+4. return canonical `requested_path` and normalized stored `path`.
 
-Writes are guarded by optimistic concurrency using a monotonically increasing `version`:
+## Error contract
 
-- `read` returns the current `version`
-- `write(expected_version = null)` is **create-only**
-- `write(expected_version = v)` updates iff the current version is `v`
-- `patch` requires `expected_version`
-- `delete(expected_version = v)` enforces CAS; `delete(expected_version = null)` is unconditional
-
-## Scan scoping
-
-To avoid unbounded traversal, scan operations are scoped:
-
-- `grep` requires an explicit `path_prefix` unless a safe literal prefix can be derived from `glob`
-- `glob` similarly requires `path_prefix` for broad patterns without a safe literal prefix
-
-## Error codes
-
-Library errors carry stable `code`s (e.g. `invalid_path`, `not_permitted`, `conflict`, `timeout`).
-The HTTP service maps these to HTTP status codes and returns a JSON error body.
+| `code` | Typical HTTP | Retry? | Client action |
+| --- | --- | --- | --- |
+| `unauthorized` | 401 | no | fix token/header |
+| `not_permitted` / `secret_path_denied` | 403 | no | fix policy/path |
+| `conflict` | 409 | conditional | re-read latest version and retry |
+| `timeout` | 408 | yes | backoff + retry |
+| `busy` / `rate_limited` | 503 / 429 | yes | backoff + retry with limits |
+| `invalid_*` / `patch` | 400 | no | fix request payload |

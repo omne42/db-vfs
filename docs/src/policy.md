@@ -1,78 +1,58 @@
 # Policy
 
-The service loads a policy file (`.toml` or `.json`) into `db_vfs_core::policy::VfsPolicy`.
+Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`).
 
-Start from `policy.example.toml` (also linked as [`policy.example.toml`](policy.example.toml) in the built docs).
+Start from [`policy.example.toml`](policy.example.toml).
 
-## Sections
+## Default highlights
 
-### `[permissions]`
+| Section | Key | Default |
+| --- | --- | --- |
+| `permissions` | `read/glob/grep` | `true` |
+| `permissions` | `write/patch/delete` | `false` |
+| `permissions` | `allow_full_scan` | `false` |
+| `audit` | `required` | `true` |
+| `limits` | `max_walk_ms` | `Some(2000)` |
 
-Toggles operations on/off:
+## `allowed_workspaces` matching
 
-- `read`, `glob`, `grep`, `write`, `patch`, `delete`
-- `allow_full_scan`: allow `path_prefix=""` for `glob`/`grep`
+Supported patterns:
 
-### `[auth]` / `[[auth.tokens]]`
+- `*`: allow all workspaces.
+- exact match, e.g. `ws-prod`.
+- trailing wildcard prefix, e.g. `team-a-*`.
 
-The HTTP service requires:
+Not supported:
 
+- multiple `*` (`foo*bar*`)
+- middle wildcard (`a*b`)
+- malformed patterns rejected by policy validation.
+
+## Token hash generation
+
+Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
+
+```bash
+printf '%s' 'dev-token-change-me' | sha256sum
+# then use: token = "sha256:<hex>"
 ```
-Authorization: Bearer <token>
-```
 
-Each token is restricted to a workspace allowlist (`allowed_workspaces`):
+## Limits reference
 
-- exact: `"ws1"`
-- prefix: `"team1-*"`
-- all: `"*"`
+Critical bounded fields include:
 
-Tokens can be provided as:
+- request bytes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`
+- scan bounds: `max_results`, `max_walk_files`, `max_walk_entries`, `max_walk_ms`, `max_line_bytes`
+- service runtime: `max_io_ms`, concurrency and DB pool limits
+- rate limit: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
-- `token = "sha256:<64 hex chars>"` (recommended for committed policies)
-- `token_env_var = "DB_VFS_TOKEN"` (load plaintext token at runtime)
+## Audit behavior matrix
 
-### `[limits]`
+| `audit.jsonl_path` | `audit.required` | Startup behavior |
+| --- | --- | --- |
+| unset | `true/false` | audit disabled |
+| set + writable | `true/false` | audit enabled |
+| set + open fails | `true` | startup fails |
+| set + open fails | `false` | startup continues, audit disabled |
 
-Budgets to control CPU/memory/DB load, including:
-
-- request sizes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`
-- scan budgets: `max_walk_entries`, `max_walk_files`, `max_walk_ms`, `max_results`
-- service: `max_io_ms`, `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
-- rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
-
-Notes:
-  - Size limits (`max_read_bytes`, `max_write_bytes`, `max_patch_bytes`) are structurally capped at 256MB.
-  - Scan-related limits are validated with hard caps to avoid pathological policies:
-    - `max_results`: `1..=100000`
-    - `max_walk_files`: `1..=500000`
-    - `max_walk_entries`: `1..=1000000`
-    - `max_line_bytes`: `1..=65536`
-
-Note: `db-vfs-service --trust-mode untrusted` requires `max_walk_ms` and per-IP rate limiting (`max_requests_per_ip_per_sec > 0`).
-
-### `[secrets]`
-
-Controls deny rules and text redaction:
-
-- `deny_globs`: deny direct access to matching paths (note: `dir/*` also denies descendants under `dir/**`)
-- `redact_regexes`: applied to returned text
-- `replacement`: string used to replace redacted matches
-
-### `[traversal]`
-
-Scan-only skipping rules:
-
-- `skip_globs`: skipped during `glob`/`grep` traversal (performance only; does not deny direct reads). Note: `dir/*` also skips descendants under `dir/**`.
-
-### `[audit]`
-
-Service-only observability:
-
-- `jsonl_path`: optional JSONL log path; when set, `db-vfs-service` appends one JSON object per request.
-- `required`: whether audit initialization failures should fail service startup (default: `true`).
-- `flush_every_events`: flush audit output after this many events (default: `32`, range: `1..=65536`).
-- `flush_max_interval_ms`: flush audit output at least every N milliseconds (default: `250`, range: `1..=60000`).
-
-Note: `flush_*` requires `jsonl_path` to be set. Flushing is `BufWriter::flush` (not `fsync`), and values are capped to keep audit output timely.
-For requests rejected before the body is parsed (e.g. unauthorized, invalid JSON, rate limited), the audit log uses `workspace_id="<unknown>"` and omits request-specific path fields.
+`flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.

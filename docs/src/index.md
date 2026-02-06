@@ -1,31 +1,39 @@
 # db-vfs
 
-`db-vfs` is a DB-backed “virtual filesystem” (VFS) intended for server / high-concurrency workloads.
+`db-vfs` is a DB-backed virtual filesystem for service workloads.
 
-It provides tool-like operations with explicit safety policy enforcement:
+It provides six operations:
 
-- `read` (optional line ranges)
-- `glob`
-- `grep`
-- `write`
-- `patch` (unified diff)
-- `delete`
+- `read`: read a file (optionally by line range).
+- `write`: create or CAS-update a file.
+- `patch`: CAS-apply unified diff to a file.
+- `delete`: delete with optional CAS version.
+- `glob`: list paths by glob pattern.
+- `grep`: search text under scoped traversal.
 
-This repo contains:
+## Safety model
 
-- `db-vfs` (crate): core VFS operations backed by a `Store` trait.
-- `db-vfs-service` (crate): an HTTP JSON service (Axum) with auth, request limits, and concurrency control.
+`db-vfs` enforces a policy-first model:
 
-Non-goals:
+- **Permissions** decide which operations are allowed.
+- **Limits** bound CPU/memory/DB work.
+- **Secrets** deny sensitive paths and redact output.
+- **Traversal** skips noisy paths for scan performance.
+- **Auth** binds tokens to workspace allowlists.
 
-- Full git-repo tooling (checkout/build, etc).
-- Large binary file storage.
-- Unbounded traversal/search (scans are scoped and budgeted).
+Scan operations are **scoped and budgeted**: callers must provide `path_prefix` (or a safe literal
+prefix must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
 
-## Where to start
+## High-concurrency expectations
 
-- New users: [`Getting started`](getting-started.md)
-- Understanding semantics: [`Concepts`](concepts.md)
-- Configuration: [`Policy`](policy.md) and [`policy.example.toml`](policy.example.toml)
-- Integrating over HTTP: [`HTTP API`](http-api.md)
-- LLM/RAG ingestion: [`llms.txt`](llms.md)
+High concurrency assumes all of the following are configured correctly:
+
+- `limits.max_concurrency_io`, `limits.max_concurrency_scan`
+- `limits.max_db_connections`, `limits.max_io_ms`
+- per-IP rate limiting (`limits.max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`)
+
+## Start here
+
+- First deployment: read [`Policy`](policy.md) → [`Security`](security.md) → [`Storage Backends`](storage.md)
+- API integration: read [`Concepts`](concepts.md) → [`HTTP API`](http-api.md)
+- Production operations: read [`Observability`](observability.md) → [`Troubleshooting`](troubleshooting.md)

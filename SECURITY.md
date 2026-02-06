@@ -1,69 +1,48 @@
-# Security
+# Security Policy
 
-## Threat model
+## Private vulnerability reporting
 
-`db-vfs` is a library + HTTP service for performing virtual filesystem operations against a
-database-backed store with an explicit, caller-provided policy (`VfsPolicy`).
+Do **not** disclose unpatched vulnerabilities in public issues.
 
-It enforces policy checks in-process. It is designed for *trusted* deployments (e.g. internal
-services) where you still want strong, explicit guardrails.
+Preferred channel:
 
-## Not an OS sandbox
+- GitHub Private Vulnerability Reporting / Security Advisory (if enabled for this repository).
 
-This project does **not** provide OS-level isolation. If you need strong isolation, run the service
-inside an OS sandbox / container / VM and apply network controls.
+If private advisory is unavailable, contact maintainers privately first and avoid posting exploit
+details publicly.
 
-## Auth & secrets
+## Response process (target SLA)
 
-- The service requires `Authorization: Bearer <token>` by default.
-- Prefer storing only `sha256:<64 hex>` token hashes in committed policy files.
-- For plaintext tokens, use `auth.tokens[].token_env_var` so secrets live in the process environment.
-- `--unsafe-no-auth` is restricted to loopback binds by default; using it on a public interface is
-  dangerous.
-- For production deployments, enforce “no-unsafe-flags” in your service manager / startup scripts
-  (e.g. refuse `--unsafe-no-auth-allow-non-loopback`).
+- Acknowledge report: within **72 hours**.
+- Initial triage + severity assignment: within **7 days**.
+- Fix + coordinated disclosure target:
+  - critical/high: as soon as possible (typically <= 30 days)
+  - medium/low: next scheduled patch cycle.
 
-Secrets are mitigated via:
+Actual timelines depend on exploitability and patch validation.
 
-- Path deny rules (`policy.secrets.deny_globs`) to block direct access.
-  - Note: deny globs like `dir/*` also deny descendants under `dir/**` (directory-probe semantics).
-- Regex redaction (`policy.secrets.redact_regexes`) applied to `read`/`grep` output.
+## Supported versions
 
-## Resource limits & DoS
+| Version line | Status | Security fixes |
+| --- | --- | --- |
+| `Unreleased` / `main` | active | yes |
+| latest stable (`0.1.x`) | active | yes |
+| older than latest stable | EOL | no guarantee |
 
-Policy limits bound work and memory:
+## Security baseline requirements
 
-- Request sizes: `max_read_bytes`, `max_write_bytes`, `max_patch_bytes`.
-- Scan bounds: `max_walk_entries`, `max_walk_files`, `max_walk_ms`, `max_results`.
-- Service concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`.
-- Service timeouts: `max_io_ms` (plus Postgres `statement_timeout` when enabled).
-- Per-IP rate limiting: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`,
-  `max_rate_limit_ips`.
+- Use HTTPS/TLS for all bearer-token transport.
+- Keep auth enabled in production; avoid `--unsafe-no-auth`.
+- Use high-entropy tokens (random, >= 32 bytes recommended) and rotate regularly.
+- Scope tokens by `allowed_workspaces` (avoid global wildcard in production).
+- Enable per-IP rate limiting and audit logging.
 
-These are best-effort safeguards, not a replacement for OS-level limits and network-level
-mitigations (load balancers, WAF, reverse proxy rate limits, etc.).
+## Threat model notes
 
-SQLite note: database file permissions depend on the process `umask`; set a restrictive `umask`
-in your service manager / startup script on multi-user systems.
+`db-vfs` is an application-layer guardrail system, not an OS sandbox.
 
-## Timeout semantics
+- It validates paths/policies and enforces operation budgets.
+- It mitigates secrets exposure via deny-globs and redaction.
+- It does **not** replace container sandboxing, host hardening, or network controls.
 
-Service-layer timeouts return early to the client, but the underlying blocking DB operation may
-continue briefly in the background. For SQLite, the service attempts to interrupt in-flight queries
-on timeout; for Postgres, `statement_timeout` is configured. Treat timeouts as a *budgeting* and
-*backpressure* mechanism, not a hard cancel.
-
-## Path probing side-channels
-
-If untrusted callers can control `path` inputs and observe detailed errors/timing, they may be able
-to infer information about stored paths (existence, deny rules, etc.).
-
-If this matters, reduce observable error detail, enforce rate limits, and run behind an API gateway.
-
-## Reporting
-
-If you discover a security issue, please open an issue with:
-
-- Minimal reproduction
-- Expected vs actual behavior
-- Environment details (OS, Rust toolchain, DB backend)
+For stronger isolation, deploy inside hardened containers/VMs and enforce edge gateway controls.

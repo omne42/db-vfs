@@ -1,13 +1,27 @@
 # Guides
 
-This section collects operational docs for running `db-vfs` safely:
+Audience and first path:
 
-- Policy configuration: [`Policy`](policy.md)
-- HTTP endpoints and error mapping: [`HTTP API`](http-api.md)
-- Storage backends and migrations: [`Storage backends`](storage.md)
-- Threat model and hardening notes: [`Security`](security.md)
-- Logging and request IDs: [`Observability`](observability.md)
-- Common errors: [`Troubleshooting`](troubleshooting.md)
-- Contributing and local dev workflows: [`Development`](development.md)
-- LLM bundle generation: [`llms.txt`](llms.md)
+- Operators: start with Policy -> Security -> Storage Backends.
+- Integrators: start with Concepts -> HTTP API.
+- Maintainers: start with Development -> Observability.
 
+## Before launch
+
+- [`Policy`](policy.md): configuration defaults, limits, auth patterns.
+- [`Security`](security.md): hardening checklist and trust boundaries.
+- [`Storage Backends`](storage.md): backend behavior, timeouts, migrations.
+
+## Runtime operations
+
+- [`HTTP API`](http-api.md): request/response contracts and retry guidance.
+- [`Observability`](observability.md): request IDs, logging, audit schema.
+
+## Incident handling
+
+- [`Troubleshooting`](troubleshooting.md): error matrix and remediation steps.
+- [`Development`](development.md): validation scripts and CI parity.
+- [`LLM Context (llms.txt)`](llms.md): generated context bundle and regeneration flow.
+
+Last updated: 2026-02-06
+Owner: db-vfs maintainers

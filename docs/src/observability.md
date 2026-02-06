@@ -1,28 +1,50 @@
 # Observability
 
-## `x-request-id`
+## Request ID contract
 
-The service:
+`x-request-id` behavior:
 
-- Echoes `x-request-id` if provided by the client.
-- Otherwise generates one and adds it to the response headers.
+- client-provided value is accepted if it matches `[A-Za-z0-9_-]{1,128}`;
+- invalid/missing value is replaced by service-generated ID;
+- response always returns `x-request-id`.
 
-## Logging
+## Audit JSONL schema
 
-The service uses `tracing`; configure via `RUST_LOG`, for example:
+Sample line:
 
-```bash
-RUST_LOG=db_vfs_service=info cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.example.toml
+```json
+{"ts_ms":1738828800000,"request_id":"...","op":"write","status":200,"workspace_id":"w1","peer_ip":"127.0.0.1"}
 ```
 
-## JSONL audit log (optional)
+Core fields:
 
-If `policy.audit.jsonl_path` is set, the service appends one JSON object per request (JSONL / ndjson).
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `ts_ms` | u64 | yes | event timestamp |
+| `request_id` | string | yes | request correlation ID |
+| `op` | string | yes | `read/write/patch/delete/glob/grep` |
+| `status` | u16 | yes | HTTP status |
+| `workspace_id` | string | yes | `<unknown>` for early rejects |
+| `peer_ip` | string|null | no | TCP peer IP when available |
+| `error_code` | string|null | no | stable error code |
 
-Notes:
+## `peer_ip` handling
 
-- Records include `request_id`, `peer_ip`, `op`, `workspace_id`, `status`, and scan diagnostics.
-- Records do not include file content or grep query text (grep logs only query length + regex flag).
-- Requests rejected before the body is parsed (unauthorized, invalid JSON, rate limited) use `workspace_id="<unknown>"` and omit request-specific path fields.
-- Paths denied by secret rules are logged as `<secret>` in audit fields.
-- `policy.audit.required` controls startup behavior if the audit log cannot be initialized (default: fail startup).
+- source: TCP peer address (`ConnectInfo<SocketAddr>`);
+- no forwarded-header parsing;
+- apply local retention policy according to compliance requirements.
+
+## Logging levels
+
+Recommended `RUST_LOG`:
+
+- dev: `RUST_LOG=db_vfs_service=debug`
+- test/staging: `RUST_LOG=db_vfs_service=info`
+- prod: `RUST_LOG=db_vfs_service=warn`
+
+## Audit operations
+
+- keep audit file permissions restrictive (`600` or equivalent owner-only access);
+- configure external log rotation;
+- monitor disk usage;
+- understand startup behavior difference between `audit.required=true/false`.
