@@ -81,20 +81,37 @@ fn audit_event_base(
 }
 
 fn map_json_rejection(err: JsonRejection) -> (StatusCode, Json<super::ErrorBody>) {
-    if matches!(err, JsonRejection::MissingJsonContentType(_)) {
-        return super::err(
+    match err {
+        JsonRejection::MissingJsonContentType(_) => super::err(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
             "missing or invalid content-type; expected application/json",
-        );
+        ),
+        JsonRejection::JsonSyntaxError(_) => super::err(
+            StatusCode::BAD_REQUEST,
+            "invalid_json_syntax",
+            "invalid JSON syntax",
+        ),
+        JsonRejection::JsonDataError(_) => super::err(
+            StatusCode::BAD_REQUEST,
+            "invalid_json_schema",
+            "JSON payload does not match request schema",
+        ),
+        other => {
+            let status = other.status();
+            if status == StatusCode::PAYLOAD_TOO_LARGE {
+                return super::err(status, "payload_too_large", "request body is too large");
+            }
+            if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                return super::err(
+                    status,
+                    "unsupported_media_type",
+                    "missing or invalid content-type; expected application/json",
+                );
+            }
+            super::err(status, "invalid_json", "invalid JSON body")
+        }
     }
-
-    let status = err.status();
-    if status == StatusCode::PAYLOAD_TOO_LARGE {
-        return super::err(status, "payload_too_large", "request body is too large");
-    }
-
-    super::err(StatusCode::BAD_REQUEST, "invalid_json", "invalid JSON body")
 }
 
 async fn acquire_permit_with_budget(
@@ -114,14 +131,6 @@ async fn acquire_permit_with_budget(
                     super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
                 })?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                drop(permit);
-                return Err(super::err(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "busy",
-                    "server is busy",
-                ));
-            }
             Ok((permit, Some(remaining)))
         }
         None => {
@@ -209,11 +218,28 @@ impl AuditRequest {
     }
 }
 
+fn build_path_audit_req(workspace_id: &str, path: &str) -> AuditRequest {
+    AuditRequest {
+        workspace_id: audit_preview(workspace_id, 256),
+        requested_path: Some(audit_preview(path, 4096)),
+        path_prefix: None,
+        glob_pattern: None,
+        grep_regex: None,
+        grep_query_len: None,
+    }
+}
+
 fn audit_err_hide_secret_path(
-    _state: &super::AppState,
+    state: &super::AppState,
     event: &mut AuditEvent,
     body: &super::ErrorBody,
 ) {
+    if let Some(path) = event.requested_path.clone() {
+        event.requested_path = Some(redact_path(&state.inner.redactor, &path));
+    }
+    if let Some(path) = event.path.clone() {
+        event.path = Some(redact_path(&state.inner.redactor, &path));
+    }
     if body.code == "secret_path_denied" {
         event.requested_path = Some("<secret>".to_string());
         event.path = Some("<secret>".to_string());
@@ -469,14 +495,7 @@ pub(super) async fn read(
         ctx,
         payload,
         limits,
-        |req| AuditRequest {
-            workspace_id: audit_preview(req.workspace_id(), 256),
-            requested_path: Some(audit_preview(&req.path, 4096)),
-            path_prefix: None,
-            glob_pattern: None,
-            grep_regex: None,
-            grep_query_len: None,
-        },
+        |req| build_path_audit_req(req.workspace_id(), &req.path),
         |vfs, req| vfs.read(req),
         AuditHooks {
             ok: audit_ok_read,
@@ -499,14 +518,7 @@ pub(super) async fn write(
         ctx,
         payload,
         limits,
-        |req| AuditRequest {
-            workspace_id: audit_preview(req.workspace_id(), 256),
-            requested_path: Some(audit_preview(&req.path, 4096)),
-            path_prefix: None,
-            glob_pattern: None,
-            grep_regex: None,
-            grep_query_len: None,
-        },
+        |req| build_path_audit_req(req.workspace_id(), &req.path),
         |vfs, req| vfs.write(req),
         AuditHooks {
             ok: audit_ok_write,
@@ -529,14 +541,7 @@ pub(super) async fn patch(
         ctx,
         payload,
         limits,
-        |req| AuditRequest {
-            workspace_id: audit_preview(req.workspace_id(), 256),
-            requested_path: Some(audit_preview(&req.path, 4096)),
-            path_prefix: None,
-            glob_pattern: None,
-            grep_regex: None,
-            grep_query_len: None,
-        },
+        |req| build_path_audit_req(req.workspace_id(), &req.path),
         |vfs, req| vfs.apply_unified_patch(req),
         AuditHooks {
             ok: audit_ok_patch,
@@ -559,14 +564,7 @@ pub(super) async fn delete(
         ctx,
         payload,
         limits,
-        |req| AuditRequest {
-            workspace_id: audit_preview(req.workspace_id(), 256),
-            requested_path: Some(audit_preview(&req.path, 4096)),
-            path_prefix: None,
-            glob_pattern: None,
-            grep_regex: None,
-            grep_query_len: None,
-        },
+        |req| build_path_audit_req(req.workspace_id(), &req.path),
         |vfs, req| vfs.delete(req),
         AuditHooks {
             ok: audit_ok_delete,

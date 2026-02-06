@@ -27,57 +27,68 @@ pub(super) enum Backend {
 }
 
 pub(super) enum BackendStore {
-    Sqlite(Box<SqliteStore<SqliteConn>>),
+    Sqlite(SqliteStore<SqliteConn>),
     #[cfg(feature = "postgres")]
-    Postgres(Box<PostgresStore<PostgresConn>>),
+    Postgres(PostgresStore<PostgresConn>),
 }
 
 pub(super) enum CancelHandle {
     Sqlite(rusqlite::InterruptHandle),
+    #[cfg(feature = "postgres")]
+    Unsupported,
 }
 
 impl CancelHandle {
     pub(super) fn cancel(&self) {
         match self {
             CancelHandle::Sqlite(handle) => handle.interrupt(),
+            #[cfg(feature = "postgres")]
+            CancelHandle::Unsupported => {}
         }
     }
 }
 
+fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_vfs::Error {
+    db_vfs::Error::Db(format!("backend={backend} stage=pool_get error={err}"))
+}
+
 impl BackendStore {
-    pub(super) fn open(backend: Backend) -> db_vfs::Result<(Self, Option<CancelHandle>)> {
+    pub(super) fn open(backend: Backend) -> db_vfs::Result<(Self, CancelHandle)> {
         match backend {
             Backend::Sqlite { pool } => {
                 let conn = pool
                     .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
-                let cancel = Some(CancelHandle::Sqlite(conn.get_interrupt_handle()));
-                Ok((
-                    Self::Sqlite(Box::new(SqliteStore::from_connection(conn))),
-                    cancel,
-                ))
+                    .map_err(|err| map_pool_get_error("sqlite", err))?;
+                let cancel = CancelHandle::Sqlite(conn.get_interrupt_handle());
+                Ok((Self::Sqlite(SqliteStore::from_connection(conn)), cancel))
             }
             #[cfg(feature = "postgres")]
             Backend::Postgres { pool } => {
                 let client = pool
                     .get()
-                    .map_err(|err| db_vfs::Error::Db(err.to_string()))?;
+                    .map_err(|err| map_pool_get_error("postgres", err))?;
                 Ok((
-                    Self::Postgres(Box::new(PostgresStore::from_client(client))),
-                    None,
+                    Self::Postgres(PostgresStore::from_client(client)),
+                    CancelHandle::Unsupported,
                 ))
             }
         }
     }
 }
 
+macro_rules! dispatch_store {
+    ($this:expr, $method:ident($($arg:expr),* $(,)?)) => {
+        match $this {
+            BackendStore::Sqlite(store) => store.$method($($arg),*),
+            #[cfg(feature = "postgres")]
+            BackendStore::Postgres(store) => store.$method($($arg),*),
+        }
+    };
+}
+
 impl Store for BackendStore {
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> db_vfs::Result<Option<FileMeta>> {
-        match self {
-            BackendStore::Sqlite(store) => store.get_meta(workspace_id, path),
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => store.get_meta(workspace_id, path),
-        }
+        dispatch_store!(self, get_meta(workspace_id, path))
     }
 
     fn get_content(
@@ -86,11 +97,7 @@ impl Store for BackendStore {
         path: &str,
         version: u64,
     ) -> db_vfs::Result<Option<String>> {
-        match self {
-            BackendStore::Sqlite(store) => store.get_content(workspace_id, path, version),
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => store.get_content(workspace_id, path, version),
-        }
+        dispatch_store!(self, get_content(workspace_id, path, version))
     }
 
     fn insert_file_new(
@@ -100,15 +107,7 @@ impl Store for BackendStore {
         content: &str,
         now_ms: u64,
     ) -> db_vfs::Result<FileRecord> {
-        match self {
-            BackendStore::Sqlite(store) => {
-                store.insert_file_new(workspace_id, path, content, now_ms)
-            }
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => {
-                store.insert_file_new(workspace_id, path, content, now_ms)
-            }
-        }
+        dispatch_store!(self, insert_file_new(workspace_id, path, content, now_ms))
     }
 
     fn update_file_cas(
@@ -119,15 +118,10 @@ impl Store for BackendStore {
         expected_version: u64,
         now_ms: u64,
     ) -> db_vfs::Result<FileRecord> {
-        match self {
-            BackendStore::Sqlite(store) => {
-                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
-            }
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => {
-                store.update_file_cas(workspace_id, path, content, expected_version, now_ms)
-            }
-        }
+        dispatch_store!(
+            self,
+            update_file_cas(workspace_id, path, content, expected_version, now_ms)
+        )
     }
 
     fn delete_file(
@@ -136,13 +130,7 @@ impl Store for BackendStore {
         path: &str,
         expected_version: Option<u64>,
     ) -> db_vfs::Result<DeleteOutcome> {
-        match self {
-            BackendStore::Sqlite(store) => store.delete_file(workspace_id, path, expected_version),
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => {
-                store.delete_file(workspace_id, path, expected_version)
-            }
-        }
+        dispatch_store!(self, delete_file(workspace_id, path, expected_version))
     }
 
     fn list_metas_by_prefix(
@@ -151,12 +139,30 @@ impl Store for BackendStore {
         prefix: &str,
         limit: usize,
     ) -> db_vfs::Result<Vec<FileMeta>> {
-        match self {
-            BackendStore::Sqlite(store) => store.list_metas_by_prefix(workspace_id, prefix, limit),
-            #[cfg(feature = "postgres")]
-            BackendStore::Postgres(store) => {
-                store.list_metas_by_prefix(workspace_id, prefix, limit)
-            }
-        }
+        dispatch_store!(self, list_metas_by_prefix(workspace_id, prefix, limit))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_backend_open_returns_sqlite_cancel_handle() {
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let (store, cancel) = BackendStore::open(Backend::Sqlite { pool }).expect("open backend");
+
+        assert!(matches!(store, BackendStore::Sqlite(_)));
+        assert!(matches!(cancel, CancelHandle::Sqlite(_)));
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn cancel_unsupported_is_noop() {
+        CancelHandle::Unsupported.cancel();
     }
 }

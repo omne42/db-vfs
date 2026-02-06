@@ -24,7 +24,7 @@ struct Args {
     sqlite: Option<std::path::PathBuf>,
 
     /// Postgres connection string, e.g. postgres://user:pass@localhost:5432/db
-    #[cfg_attr(not(feature = "postgres"), arg(hide = true))]
+    #[cfg_attr(not(feature = "postgres"), arg(hide = false))]
     #[arg(long)]
     postgres: Option<String>,
 
@@ -67,11 +67,20 @@ async fn main() -> anyhow::Result<()> {
             args.listen
         );
     }
-    if args.unsafe_no_auth && args.unsafe_no_auth_allow_non_loopback {
+    if args.unsafe_no_auth
+        && args.unsafe_no_auth_allow_non_loopback
+        && !args.listen.ip().is_loopback()
+    {
         tracing::warn!(listen = %args.listen, "starting without auth on a non-loopback address (unsafe)");
     }
     let policy =
         db_vfs_service::policy_io::load_policy(&args.policy, args.trust_mode, args.unsafe_no_auth)?;
+
+    let backend_kind = if args.postgres.is_some() {
+        "postgres"
+    } else {
+        "sqlite"
+    };
 
     let app = if let Some(url) = args.postgres {
         #[cfg(feature = "postgres")]
@@ -91,6 +100,13 @@ async fn main() -> anyhow::Result<()> {
         };
         db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
+    tracing::info!(
+        listen = %args.listen,
+        trust_mode = ?args.trust_mode,
+        unsafe_no_auth = args.unsafe_no_auth,
+        backend = backend_kind,
+        "starting db-vfs-service"
+    );
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     axum::serve(
         listener,

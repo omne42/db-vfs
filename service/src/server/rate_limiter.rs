@@ -28,7 +28,9 @@ struct RateLimitBucket {
 
 impl RateLimiter {
     pub(super) fn new(policy: &VfsPolicy) -> Self {
-        let enabled = policy.limits.max_requests_per_ip_per_sec > 0;
+        let enabled = policy.limits.max_requests_per_ip_per_sec > 0
+            && policy.limits.max_requests_burst_per_ip > 0
+            && policy.limits.max_rate_limit_ips > 0;
         let cfg = RateLimitConfig {
             enabled,
             refill_per_sec: policy.limits.max_requests_per_ip_per_sec as f64,
@@ -52,23 +54,19 @@ impl RateLimiter {
         const MAX_BUCKETS_BEFORE_PRUNE: usize = 4096;
         const BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
 
-        let now = Instant::now();
         let mut buckets = self.buckets.lock().await;
+        let now = Instant::now();
 
         if buckets.len() > MAX_BUCKETS_BEFORE_PRUNE {
-            buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= BUCKET_TTL);
+            buckets
+                .retain(|_, bucket| now.saturating_duration_since(bucket.last_seen) <= BUCKET_TTL);
         }
 
         if self.cfg.max_ips > 0 && buckets.len() >= self.cfg.max_ips && !buckets.contains_key(&ip) {
-            buckets.retain(|_, bucket| now.duration_since(bucket.last_seen) <= BUCKET_TTL);
+            buckets
+                .retain(|_, bucket| now.saturating_duration_since(bucket.last_seen) <= BUCKET_TTL);
             if buckets.len() >= self.cfg.max_ips {
-                if let Some((&victim, _)) =
-                    buckets.iter().min_by_key(|(_, bucket)| bucket.last_seen)
-                {
-                    buckets.remove(&victim);
-                } else {
-                    return false;
-                }
+                return false;
             }
         }
 
@@ -79,7 +77,7 @@ impl RateLimiter {
         });
         bucket.last_seen = now;
 
-        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.cfg.refill_per_sec).min(self.cfg.capacity);
         bucket.last = now;
 
@@ -110,13 +108,36 @@ mod tests {
         };
         let limiter = RateLimiter::new(&policy);
 
-        for idx in 1u8..=5 {
+        for idx in 1u8..=4 {
             let ip = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, idx));
             assert!(limiter.allow(Some(ip)).await);
         }
 
+        let denied_ip = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 5));
+        assert!(!limiter.allow(Some(denied_ip)).await);
+
         let buckets = limiter.buckets.lock().await;
         assert!(buckets.len() <= 4);
-        assert!(buckets.contains_key(&IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 5))));
+        assert!(!buckets.contains_key(&denied_ip));
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_allows_requests_without_ip_and_keeps_buckets_empty() {
+        let policy = VfsPolicy {
+            limits: db_vfs_core::policy::Limits {
+                max_requests_per_ip_per_sec: 5,
+                max_requests_burst_per_ip: 5,
+                max_rate_limit_ips: 16,
+                ..db_vfs_core::policy::Limits::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let limiter = RateLimiter::new(&policy);
+
+        assert!(limiter.allow(None).await);
+        assert!(limiter.allow(None).await);
+
+        let buckets = limiter.buckets.lock().await;
+        assert!(buckets.is_empty());
     }
 }

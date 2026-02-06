@@ -98,15 +98,28 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
     Some(token)
 }
 
+fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
+    if !workspace_id.starts_with(prefix) {
+        return false;
+    }
+    if prefix.ends_with('-') {
+        return true;
+    }
+    workspace_id
+        .as_bytes()
+        .get(prefix.len())
+        .is_some_and(|next| *next == b'-')
+}
+
 pub(super) fn workspace_allowed(patterns: &[String], workspace_id: &str) -> bool {
     patterns.iter().any(|pattern| {
         if pattern == "*" {
             return true;
         }
-        let Some(prefix) = pattern.strip_suffix('*') else {
-            return pattern == workspace_id;
-        };
-        workspace_id.starts_with(prefix)
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return prefix_pattern_matches(prefix, workspace_id);
+        }
+        pattern == workspace_id
     })
 }
 
@@ -137,9 +150,31 @@ fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
     let actual = hash_token_sha256(token);
-    rules
-        .iter()
-        .find(|rule| constant_time_eq_32(&rule.token_sha256, &actual))
+    let mut matched: Option<&AuthRule> = None;
+    for rule in rules {
+        if constant_time_eq_32(&rule.token_sha256, &actual) {
+            matched = Some(rule);
+        }
+    }
+    matched
+}
+
+fn log_unauthorized(state: &super::AppState, req: &Request, peer_ip: Option<std::net::IpAddr>) {
+    if let Some(audit) = state.inner.audit.as_ref()
+        && let Some(op) = super::audit::op_from_path(req.uri().path())
+        && let Some(request_id) = req
+            .extensions()
+            .get::<super::layers::RequestId>()
+            .map(|v| v.0.clone())
+    {
+        audit.log(super::audit::minimal_event(
+            request_id,
+            peer_ip,
+            op,
+            StatusCode::UNAUTHORIZED.as_u16(),
+            Some("unauthorized"),
+        ));
+    }
 }
 
 pub(super) async fn auth_middleware(
@@ -158,21 +193,7 @@ pub(super) async fn auth_middleware(
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
-                if let Some(audit) = state.inner.audit.as_ref()
-                    && let Some(op) = super::audit::op_from_path(req.uri().path())
-                    && let Some(request_id) = req
-                        .extensions()
-                        .get::<super::layers::RequestId>()
-                        .map(|v| v.0.clone())
-                {
-                    audit.log(super::audit::minimal_event(
-                        request_id,
-                        peer_ip,
-                        op,
-                        StatusCode::UNAUTHORIZED.as_u16(),
-                        Some("unauthorized"),
-                    ));
-                }
+                log_unauthorized(&state, &req, peer_ip);
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -181,21 +202,7 @@ pub(super) async fn auth_middleware(
             };
 
             let Some(rule) = match_token(rules, token) else {
-                if let Some(audit) = state.inner.audit.as_ref()
-                    && let Some(op) = super::audit::op_from_path(req.uri().path())
-                    && let Some(request_id) = req
-                        .extensions()
-                        .get::<super::layers::RequestId>()
-                        .map(|v| v.0.clone())
-                {
-                    audit.log(super::audit::minimal_event(
-                        request_id,
-                        peer_ip,
-                        op,
-                        StatusCode::UNAUTHORIZED.as_u16(),
-                        Some("unauthorized"),
-                    ));
-                }
+                log_unauthorized(&state, &req, peer_ip);
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -260,6 +267,8 @@ mod tests {
         assert!(workspace_allowed(&[String::from("ws")], "ws"));
         assert!(!workspace_allowed(&[String::from("ws")], "ws2"));
         assert!(workspace_allowed(&[String::from("team-*")], "team-123"));
+        assert!(workspace_allowed(&[String::from("team*")], "team-123"));
+        assert!(!workspace_allowed(&[String::from("team*")], "teammate"));
         assert!(!workspace_allowed(&[String::from("team-*")], "other"));
     }
 

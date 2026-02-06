@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
 - audit: improve lock-path derivation, batch flush behavior, and failure handling for early rejection paths.
+- service/middleware: avoid creating rate-limit buckets for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
 
 ### Internal
 

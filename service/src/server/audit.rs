@@ -2,6 +2,7 @@ use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,11 +16,11 @@ pub(super) const DEFAULT_AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_mil
 pub(super) const UNKNOWN_WORKSPACE_ID: &str = "<unknown>";
 
 static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
-static DISCONNECTED_AUDIT_LOGGER: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 pub(super) struct AuditLogger {
     sender: mpsc::SyncSender<AuditEvent>,
+    disconnected_warned: Arc<AtomicBool>,
 }
 
 pub(super) fn op_from_path(path: &str) -> Option<&'static str> {
@@ -164,7 +165,10 @@ impl AuditLogger {
             })
             .map_err(anyhow::Error::msg)?;
 
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            disconnected_warned: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub(super) fn log(&self, event: AuditEvent) {
@@ -177,7 +181,7 @@ impl AuditLogger {
                 }
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                if !DISCONNECTED_AUDIT_LOGGER.swap(true, Ordering::Relaxed) {
+                if !self.disconnected_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         "audit log worker thread has stopped; audit events will be dropped"
                     );
@@ -254,27 +258,31 @@ fn audit_worker(
             Ok(mut event) => {
                 event.ts_ms = event.ts_ms.max(now_ms());
 
-                if let Err(err) = serde_json::to_writer(&mut out, &event) {
-                    write_failures = write_failures.saturating_add(1);
-                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                        tracing::warn!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "failed to serialize audit event"
-                        );
+                let mut line = match serde_json::to_vec(&event) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        write_failures = write_failures.saturating_add(1);
+                        if write_failures == 1 || write_failures.is_multiple_of(1000) {
+                            tracing::warn!(
+                                err = %err,
+                                audit_path = ?path,
+                                write_failures,
+                                "failed to serialize audit event"
+                            );
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                };
+                line.push(b'\n');
 
-                if let Err(err) = out.write_all(b"\n") {
+                if let Err(err) = out.write_all(&line) {
                     write_failures = write_failures.saturating_add(1);
                     if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
                             err = %err,
                             audit_path = ?path,
                             write_failures,
-                            "failed to write audit event newline"
+                            "failed to write audit event"
                         );
                     }
                     continue;
@@ -301,6 +309,7 @@ fn audit_worker(
                         "failed to flush audit log"
                     );
                 }
+                continue;
             }
             pending = 0;
             last_flush = Instant::now();

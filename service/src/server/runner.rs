@@ -38,6 +38,8 @@ impl CancelState {
             && let Some(handle) = guard.as_ref()
         {
             handle.cancel();
+        } else {
+            tracing::error!("cancel state lock poisoned while requesting cancellation");
         }
     }
 
@@ -49,6 +51,8 @@ impl CancelState {
             {
                 handle.cancel();
             }
+        } else {
+            tracing::error!("cancel state lock poisoned while installing cancel handle");
         }
     }
 }
@@ -108,9 +112,7 @@ where
         Some(cancel_for_timeout),
         move || -> db_vfs::Result<T> {
             let (store, cancel_handle) = super::backend::BackendStore::open(backend)?;
-            if let Some(cancel_handle) = cancel_handle {
-                cancel_for_worker.set_handle(cancel_handle);
-            }
+            cancel_for_worker.set_handle(cancel_handle);
             let mut vfs = DbVfs::new_with_matchers_validated(store, policy, redactor, traversal);
             op(&mut vfs)
         },

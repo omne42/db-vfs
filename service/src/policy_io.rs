@@ -13,7 +13,12 @@ pub fn load_policy(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<VfsPolicy> {
     let path = path.as_ref();
-    let meta = std::fs::metadata(path)?;
+
+    let file = std::fs::File::open(path)
+        .map_err(|err| anyhow::anyhow!("failed to open policy file {}: {err}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
     if !meta.is_file() {
         anyhow::bail!("policy path is not a regular file: {}", path.display());
     }
@@ -22,9 +27,9 @@ pub fn load_policy(
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     let mut bytes = Vec::<u8>::new();
-    std::fs::File::open(path)?
-        .take(limit)
-        .read_to_end(&mut bytes)?;
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|err| anyhow::anyhow!("failed to read policy file {}: {err}", path.display()))?;
     if bytes.len() > MAX_POLICY_BYTES {
         anyhow::bail!(
             "policy file is too large ({} bytes; max {} bytes)",
@@ -32,7 +37,9 @@ pub fn load_policy(
             MAX_POLICY_BYTES
         );
     }
-    let raw = String::from_utf8(bytes)?;
+    let raw = String::from_utf8(bytes).map_err(|err| {
+        anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
+    })?;
     let raw = match trust_mode {
         TrustMode::Trusted => interpolate_env(&raw)?,
         TrustMode::Untrusted => {
@@ -45,9 +52,17 @@ pub fn load_policy(
         }
     };
     let ext = path.extension().and_then(|s| s.to_str());
+    let ext = ext.map(str::to_ascii_lowercase);
     let policy: VfsPolicy = match ext {
-        Some("json") => serde_json::from_str(&raw)?,
-        Some("toml") | None => toml::from_str(&raw)?,
+        Some(ext) if ext == "json" => serde_json::from_str(&raw).map_err(|err| {
+            anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display())
+        })?,
+        Some(ext) if ext == "toml" => toml::from_str(&raw).map_err(|err| {
+            anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
+        })?,
+        None => toml::from_str(&raw).map_err(|err| {
+            anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
+        })?,
         Some(other) => anyhow::bail!("unsupported policy extension: {other}"),
     };
     policy.validate().map_err(anyhow::Error::msg)?;
@@ -94,6 +109,17 @@ fn interpolate_env_with(
             let value = lookup(name).map_err(|_| {
                 anyhow::anyhow!("policy env interpolation: env var {name:?} is not set")
             })?;
+
+            if out
+                .len()
+                .checked_add(value.len())
+                .is_none_or(|next| next > MAX_POLICY_BYTES)
+            {
+                anyhow::bail!(
+                    "policy after env interpolation is too large (max {} bytes)",
+                    MAX_POLICY_BYTES
+                );
+            }
             out.push_str(&value);
             if out.len() > MAX_POLICY_BYTES {
                 anyhow::bail!(

@@ -13,14 +13,14 @@ postgres = ["db-vfs/postgres", "dep:r2d2_postgres"]
 anyhow = "1"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
-db-vfs = { path = "..", features = ["sqlite"] }
+db-vfs = { path = "..", default-features = false, features = ["sqlite-bundled"] }
 db-vfs-core = { path = "../core" }
 fs2 = "0.4"
 hex = "0.4"
 r2d2 = "0.8"
 r2d2_postgres = { version = "0.18", optional = true }
 r2d2_sqlite = "0.25"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
