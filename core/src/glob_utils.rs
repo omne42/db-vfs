@@ -1,29 +1,52 @@
 use globset::GlobBuilder;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobPatternValidationError {
+    Empty,
+    Absolute,
+    ParentTraversal,
+}
+
+impl GlobPatternValidationError {
+    pub fn as_message(self) -> &'static str {
+        match self {
+            GlobPatternValidationError::Empty => "glob patterns must be non-empty",
+            GlobPatternValidationError::Absolute => {
+                "glob patterns must be root-relative (must not start with '/')"
+            }
+            GlobPatternValidationError::ParentTraversal => {
+                "glob patterns must not contain '..' segments"
+            }
+        }
+    }
+}
+
 /// Normalize a glob pattern for matching against `db-vfs` root-relative paths.
 ///
 /// - Trims surrounding whitespace.
 /// - Converts `\` to `/` so patterns work consistently across platforms.
 /// - Strips leading `./` segments.
-/// - Converts an empty pattern to `"."` (so `globset` can compile it).
 pub fn normalize_glob_pattern_for_matching(pattern: &str) -> String {
     let mut normalized = pattern.trim().replace('\\', "/");
     while normalized.starts_with("./") {
         normalized.drain(..2);
     }
-    if normalized.is_empty() {
-        normalized.push('.');
-    }
     normalized
 }
 
 /// Validate that a glob pattern is root-relative for `db-vfs`.
-pub fn validate_root_relative_glob_pattern(pattern: &str) -> std::result::Result<(), &'static str> {
-    if pattern.starts_with('/') {
-        return Err("glob patterns must be root-relative (must not start with '/')");
+pub fn validate_root_relative_glob_pattern(
+    pattern: &str,
+) -> std::result::Result<(), GlobPatternValidationError> {
+    let normalized = normalize_glob_pattern_for_matching(pattern);
+    if normalized.is_empty() {
+        return Err(GlobPatternValidationError::Empty);
     }
-    if pattern.split('/').any(|segment| segment == "..") {
-        return Err("glob patterns must not contain '..' segments");
+    if normalized.starts_with('/') {
+        return Err(GlobPatternValidationError::Absolute);
+    }
+    if normalized.split('/').any(|segment| segment == "..") {
+        return Err(GlobPatternValidationError::ParentTraversal);
     }
     Ok(())
 }

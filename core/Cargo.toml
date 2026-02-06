@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Core policy/path/redaction/error types for db-vfs."
+license = "MIT"
+repository = "https://github.com/omne42/db-vfs"
+publish = false
 
 [dependencies]
 globset = "0.4"
-regex = "1"
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"

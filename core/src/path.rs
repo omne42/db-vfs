@@ -3,28 +3,43 @@ use crate::{Error, Result};
 pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
     const MAX_BYTES: usize = 256;
     if workspace_id.is_empty() {
-        return Err(Error::InvalidPath("workspace_id is empty".to_string()));
+        return Err(Error::InvalidPath("workspace_id: is empty".to_string()));
     }
     if workspace_id.len() > MAX_BYTES {
         return Err(Error::InvalidPath(format!(
-            "workspace_id is too large ({} bytes; max {} bytes)",
+            "workspace_id: is too large ({} bytes; max {} bytes)",
             workspace_id.len(),
             MAX_BYTES
         )));
     }
     if workspace_id.contains('\0') {
         return Err(Error::InvalidPath(
-            "workspace_id must not contain NUL bytes".to_string(),
+            "workspace_id: must not contain NUL bytes".to_string(),
         ));
     }
     if workspace_id.chars().any(|ch| ch.is_whitespace()) {
         return Err(Error::InvalidPath(
-            "workspace_id must not contain whitespace".to_string(),
+            "workspace_id: must not contain whitespace".to_string(),
         ));
     }
     if workspace_id.chars().any(|ch| ch.is_control()) {
         return Err(Error::InvalidPath(
-            "workspace_id must not contain control characters".to_string(),
+            "workspace_id: must not contain control characters".to_string(),
+        ));
+    }
+    if workspace_id.contains('/') || workspace_id.contains('\\') {
+        return Err(Error::InvalidPath(
+            "workspace_id: must not contain path separators".to_string(),
+        ));
+    }
+    if workspace_id.contains(':') {
+        return Err(Error::InvalidPath(
+            "workspace_id: must not contain ':'".to_string(),
+        ));
+    }
+    if workspace_id.contains("..") {
+        return Err(Error::InvalidPath(
+            "workspace_id: must not contain '..'".to_string(),
         ));
     }
     Ok(())
@@ -68,13 +83,22 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
     while s.starts_with("./") {
         s.drain(..2);
     }
+    if s.as_bytes().get(1) == Some(&b':')
+        && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+    {
+        return Err(Error::InvalidPath(format!(
+            "{label}: absolute paths are not supported"
+        )));
+    }
     if s.starts_with('/') {
-        return Err(Error::InvalidPath(
-            "absolute paths are not supported".to_string(),
-        ));
+        return Err(Error::InvalidPath(format!(
+            "{label}: absolute paths are not supported"
+        )));
     }
     if s.contains('\0') {
-        return Err(Error::InvalidPath("NUL bytes are not allowed".to_string()));
+        return Err(Error::InvalidPath(format!(
+            "{label}: NUL bytes are not allowed"
+        )));
     }
     if s.chars().any(|ch| ch.is_control()) {
         return Err(Error::InvalidPath(format!(
@@ -89,9 +113,9 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
             continue;
         }
         if seg == ".." {
-            return Err(Error::InvalidPath(
-                ".. segments are not allowed".to_string(),
-            ));
+            return Err(Error::InvalidPath(format!(
+                "{label}: '..' segments are not allowed"
+            )));
         }
         out.push(seg);
     }
@@ -99,9 +123,9 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
     match kind {
         PathKind::File => {
             if ends_with_slash {
-                return Err(Error::InvalidPath(
-                    "file path must not end with '/'".to_string(),
-                ));
+                return Err(Error::InvalidPath(format!(
+                    "{label}: file path must not end with '/'"
+                )));
             }
         }
         PathKind::Prefix => {}
@@ -114,7 +138,7 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
 
     if normalized.is_empty() {
         return match kind {
-            PathKind::File => Err(Error::InvalidPath("path is empty".to_string())),
+            PathKind::File => Err(Error::InvalidPath("path: is empty".to_string())),
             PathKind::Prefix => Ok(String::new()),
         };
     }
@@ -177,6 +201,22 @@ mod tests {
         assert!(matches!(normalize_path("a\nb"), Err(Error::InvalidPath(_))));
         assert!(matches!(
             normalize_path_prefix("a\tb"),
+            Err(Error::InvalidPath(_))
+        ));
+    }
+
+    #[test]
+    fn validate_workspace_id_rejects_ambiguous_characters() {
+        assert!(validate_workspace_id("a/b").is_err());
+        assert!(validate_workspace_id("a\\b").is_err());
+        assert!(validate_workspace_id("a:b").is_err());
+        assert!(validate_workspace_id("a..b").is_err());
+    }
+
+    #[test]
+    fn normalize_path_rejects_windows_drive_prefix() {
+        assert!(matches!(
+            normalize_path("C:\\tmp\\a.txt"),
             Err(Error::InvalidPath(_))
         ));
     }

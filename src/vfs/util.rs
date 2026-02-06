@@ -11,10 +11,13 @@ use db_vfs_core::{Error, Result};
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
 
 pub(super) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        Err(err) => {
+            eprintln!("db-vfs: system time before UNIX_EPOCH ({err}); using 0 timestamp");
+            0
+        }
+    }
 }
 
 pub(super) fn elapsed_ms(started: &Instant) -> u64 {
@@ -35,8 +38,19 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
         )));
     }
     let normalized = normalize_glob_pattern_for_matching(pattern);
-    validate_root_relative_glob_pattern(&normalized)
-        .map_err(|msg| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {msg}")))?;
+    if normalized.len() > MAX_GLOB_PATTERN_BYTES {
+        return Err(Error::InvalidPath(format!(
+            "normalized glob pattern is too large ({} bytes; max {} bytes)",
+            normalized.len(),
+            MAX_GLOB_PATTERN_BYTES
+        )));
+    }
+    validate_root_relative_glob_pattern(&normalized).map_err(|err| {
+        Error::InvalidPath(format!(
+            "invalid glob pattern {pattern:?}: {}",
+            err.as_message()
+        ))
+    })?;
     let glob = build_glob_from_normalized(&normalized)
         .map_err(|err| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {err}")))?;
     let mut builder = GlobSetBuilder::new();
@@ -47,7 +61,12 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
 }
 
 pub(super) fn glob_is_match(glob: &GlobSet, path: &str) -> bool {
-    glob.is_match(std::path::Path::new(path))
+    let mut normalized = path.trim().replace('\\', "/");
+    while normalized.starts_with("./") {
+        normalized.drain(..2);
+    }
+    normalized = normalized.trim_start_matches('/').to_string();
+    glob.is_match(std::path::Path::new(&normalized))
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {

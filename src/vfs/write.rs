@@ -40,13 +40,16 @@ pub(super) fn write<S: crate::store::Store>(
     if let Some(expected_version) = request.expected_version
         && expected_version > i64::MAX as u64
     {
-        return Err(Error::InvalidPath(format!(
+        return Err(Error::Conflict(format!(
             "expected_version is too large (max {})",
             i64::MAX
         )));
     }
 
-    let bytes_written = request.content.len() as u64;
+    let bytes_written = u64::try_from(request.content.len()).map_err(|_| Error::InputTooLarge {
+        size_bytes: u64::MAX,
+        max_bytes: vfs.policy.limits.max_write_bytes,
+    })?;
     if bytes_written > vfs.policy.limits.max_write_bytes {
         return Err(Error::FileTooLarge {
             path,

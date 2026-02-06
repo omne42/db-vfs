@@ -13,7 +13,11 @@ const MAX_AUDIT_FLUSH_EVERY_EVENTS: usize = 65_536;
 const MAX_LIMIT_MAX_RESULTS: usize = 100_000;
 const MAX_LIMIT_MAX_WALK_FILES: usize = 500_000;
 const MAX_LIMIT_MAX_WALK_ENTRIES: usize = 1_000_000;
+const MAX_LIMIT_MAX_WALK_MS: u64 = 600_000;
 const MAX_LIMIT_MAX_LINE_BYTES: usize = 64 * 1024;
+const MAX_REDACT_REGEXES: usize = 128;
+const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
+const MAX_ALLOWED_WORKSPACE_PATTERN_BYTES: usize = 1024;
 // Cap flush interval so policies can't defer audit flushes for arbitrarily long periods.
 const MAX_AUDIT_FLUSH_MAX_INTERVAL_MS: u64 = 60_000;
 
@@ -445,6 +449,19 @@ impl VfsPolicy {
                 MAX_LIMIT_MAX_LINE_BYTES
             )));
         }
+        if let Some(max_walk_ms) = self.limits.max_walk_ms {
+            if max_walk_ms == 0 {
+                return Err(Error::InvalidPolicy(
+                    "limits.max_walk_ms must be > 0 when set".to_string(),
+                ));
+            }
+            if max_walk_ms > MAX_LIMIT_MAX_WALK_MS {
+                return Err(Error::InvalidPolicy(format!(
+                    "limits.max_walk_ms is too large (max {} ms)",
+                    MAX_LIMIT_MAX_WALK_MS
+                )));
+            }
+        }
         if self.limits.max_io_ms == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_io_ms must be > 0".to_string(),
@@ -560,10 +577,20 @@ impl VfsPolicy {
                         "auth.tokens[{idx}].allowed_workspaces[{j}] must not contain whitespace"
                     )));
                 }
-                if pattern != "*" && pattern.contains('*') && !pattern.ends_with('*') {
+                if pattern.len() > MAX_ALLOWED_WORKSPACE_PATTERN_BYTES {
                     return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
+                        "auth.tokens[{idx}].allowed_workspaces[{j}] is too large ({} bytes; max {})",
+                        pattern.len(),
+                        MAX_ALLOWED_WORKSPACE_PATTERN_BYTES
                     )));
+                }
+                if pattern != "*" {
+                    let star_count = pattern.chars().filter(|ch| *ch == '*').count();
+                    if star_count > 1 || (star_count == 1 && !pattern.ends_with('*')) {
+                        return Err(Error::InvalidPolicy(format!(
+                            "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
+                        )));
+                    }
                 }
             }
         }
@@ -607,6 +634,23 @@ impl VfsPolicy {
                 self.secrets.replacement.len(),
                 MAX_SECRET_REPLACEMENT_BYTES
             )));
+        }
+
+        if self.secrets.redact_regexes.len() > MAX_REDACT_REGEXES {
+            return Err(Error::InvalidPolicy(format!(
+                "secrets.redact_regexes has too many entries ({} > {})",
+                self.secrets.redact_regexes.len(),
+                MAX_REDACT_REGEXES
+            )));
+        }
+        for (idx, pattern) in self.secrets.redact_regexes.iter().enumerate() {
+            if pattern.len() > MAX_REDACT_REGEX_PATTERN_BYTES {
+                return Err(Error::InvalidPolicy(format!(
+                    "secrets.redact_regexes[{idx}] is too large ({} bytes; max {} bytes)",
+                    pattern.len(),
+                    MAX_REDACT_REGEX_PATTERN_BYTES
+                )));
+            }
         }
 
         if self.secrets.deny_globs.len() > MAX_SECRET_DENY_GLOBS {
@@ -758,6 +802,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_max_walk_ms_when_set() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_walk_ms = Some(0);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_large_max_walk_ms() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_walk_ms = Some(MAX_LIMIT_MAX_WALK_MS + 1);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
     fn validate_rejects_large_secrets_replacement() {
         let mut policy = VfsPolicy::default();
         policy.secrets.replacement = "x".repeat(MAX_SECRET_REPLACEMENT_BYTES + 1);
@@ -777,6 +837,46 @@ mod tests {
     fn validate_rejects_too_long_deny_glob_pattern() {
         let mut policy = VfsPolicy::default();
         policy.secrets.deny_globs = vec!["a".repeat(MAX_GLOB_PATTERN_BYTES + 1)];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_many_redact_regexes() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.redact_regexes = vec!["a".to_string(); MAX_REDACT_REGEXES + 1];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_long_redact_regex_pattern() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.redact_regexes = vec!["a".repeat(MAX_REDACT_REGEX_PATTERN_BYTES + 1)];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_allowed_workspace_wildcards() {
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(format!("sha256:{}", "a".repeat(64))),
+            token_env_var: None,
+            allowed_workspaces: vec!["foo*bar*".to_string()],
+        }];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_overly_long_allowed_workspace_pattern() {
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(format!("sha256:{}", "a".repeat(64))),
+            token_env_var: None,
+            allowed_workspaces: vec!["a".repeat(MAX_ALLOWED_WORKSPACE_PATTERN_BYTES + 1)],
+        }];
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }

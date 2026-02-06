@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
@@ -6,6 +7,7 @@ use db_vfs_core::{Error, Result};
 use super::DbVfs;
 
 const MAX_CONTENT_LOAD_ATTEMPTS: usize = 8;
+const CONTENT_RETRY_BACKOFF_MS: u64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
@@ -121,12 +123,20 @@ fn load_content_with_retry<S: crate::store::Store>(
         if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
             let now = vfs.store.get_meta(workspace_id, path)?;
             return Err(match now {
-                None => Error::NotFound("file not found".to_string()),
+                None => {
+                    Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
+                }
                 Some(now) => {
                     if now.version != meta.version {
-                        Error::Conflict("file changed during read; please retry".to_string())
+                        Error::Conflict(format!(
+                            "file changed during read (path={path}, expected_version={}, actual_version={}, attempts={attempts})",
+                            meta.version, now.version
+                        ))
                     } else {
-                        Error::Db("file content could not be loaded".to_string())
+                        Error::Db(format!(
+                            "file content could not be loaded (path={path}, version={}, attempts={attempts})",
+                            meta.version
+                        ))
                     }
                 }
             });
@@ -136,10 +146,10 @@ fn load_content_with_retry<S: crate::store::Store>(
         match vfs.store.get_content(workspace_id, path, meta.version)? {
             Some(content) => return Ok((meta, content)),
             None => {
-                meta = vfs
-                    .store
-                    .get_meta(workspace_id, path)?
-                    .ok_or_else(|| Error::NotFound("file not found".to_string()))?;
+                meta = vfs.store.get_meta(workspace_id, path)?.ok_or_else(|| {
+                    Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
+                })?;
+                std::thread::sleep(Duration::from_millis(CONTENT_RETRY_BACKOFF_MS));
             }
         }
     }
@@ -507,5 +517,19 @@ mod tests {
             .expect("read");
         assert_eq!(resp.content, "x");
         assert_eq!(resp.bytes_read, 1);
+    }
+
+    #[test]
+    fn extract_line_range_handles_no_trailing_newline() {
+        let content = "a\nb";
+        let out = extract_line_range(content, 2, 2, 1024, content.len() as u64, "a.txt")
+            .expect("line range");
+        assert_eq!(out, "b");
+    }
+
+    #[test]
+    fn extract_line_range_rejects_out_of_bounds() {
+        let err = extract_line_range("a\n", 2, 2, 1024, 2, "a.txt").expect_err("out of bounds");
+        assert_eq!(err.code(), "invalid_path");
     }
 }

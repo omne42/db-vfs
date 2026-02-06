@@ -8,6 +8,7 @@ readme = "README.md"
 
 [workspace]
 members = ["core", "service"]
+resolver = "3"
 
 [dependencies]
 db-vfs-core = { path = "core" }
@@ -17,9 +18,10 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 
 postgres = { version = "0.19", optional = true }
-rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+rusqlite = { version = "0.32", optional = true }
 
 [features]
-default = ["sqlite"]
+default = ["sqlite-bundled"]
 sqlite = ["dep:rusqlite"]
+sqlite-bundled = ["sqlite", "rusqlite/bundled"]
 postgres = ["dep:postgres"]

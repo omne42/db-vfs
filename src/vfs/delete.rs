@@ -40,7 +40,7 @@ pub(super) fn delete<S: crate::store::Store>(
     if let Some(expected_version) = request.expected_version
         && expected_version > i64::MAX as u64
     {
-        return Err(Error::InvalidPath(format!(
+        return Err(Error::Conflict(format!(
             "expected_version is too large (max {})",
             i64::MAX
         )));

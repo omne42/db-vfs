@@ -57,12 +57,15 @@ where
             .map_err(db_err)?;
 
         Ok(match row {
-            Some(row) => Some(FileMeta {
-                path: path.to_string(),
-                size_bytes: i64_to_u64(row.get::<_, i64>(0), "size_bytes")?,
-                version: i64_to_u64(row.get::<_, i64>(1), "version")?,
-                updated_at_ms: i64_to_u64(row.get::<_, i64>(2), "updated_at_ms")?,
-            }),
+            Some(row) => Some(
+                FileMeta {
+                    path: path.to_string(),
+                    size_bytes: i64_to_u64(row.get::<_, i64>(0), "size_bytes")?,
+                    version: i64_to_u64(row.get::<_, i64>(1), "version")?,
+                    updated_at_ms: i64_to_u64(row.get::<_, i64>(2), "updated_at_ms")?,
+                }
+                .validated()?,
+            ),
             None => None,
         })
     }
@@ -116,7 +119,7 @@ where
         );
 
         match res {
-            Ok(_) => Ok(FileRecord {
+            Ok(_) => FileRecord {
                 workspace_id: workspace_id.to_string(),
                 path: path.to_string(),
                 content: content.to_string(),
@@ -125,7 +128,8 @@ where
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 metadata_json: None,
-            }),
+            }
+            .validated(),
             Err(err) => {
                 if is_unique_violation(&err) {
                     return Err(Error::Conflict("file exists".to_string()));
@@ -143,6 +147,7 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<FileRecord> {
+        let mut tx = self.client.transaction().map_err(db_err)?;
         let size_bytes = content.len() as u64;
         let new_version = super::next_version(expected_version)?;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
@@ -150,8 +155,7 @@ where
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
         let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
 
-        let updated = self
-            .client
+        let updated = tx
             .execute(
                 "UPDATE files
                  SET content = $1, size_bytes = $2, version = $3, updated_at_ms = $4
@@ -169,8 +173,7 @@ where
             .map_err(db_err)?;
 
         if updated == 1 {
-            let created_at_ms = self
-                .client
+            let created_at_ms = tx
                 .query_opt(
                     "SELECT created_at_ms FROM files WHERE workspace_id = $1 AND path = $2",
                     &[&workspace_id, &path],
@@ -178,9 +181,13 @@ where
                 .map_err(db_err)?
                 .map(|row| i64_to_u64(row.get::<_, i64>(0), "created_at_ms"))
                 .transpose()?
-                .unwrap_or(now_ms);
+                .ok_or_else(|| {
+                    Error::Db("missing created_at_ms after successful CAS update".to_string())
+                })?;
 
-            return Ok(FileRecord {
+            tx.commit().map_err(db_err)?;
+
+            return FileRecord {
                 workspace_id: workspace_id.to_string(),
                 path: path.to_string(),
                 content: content.to_string(),
@@ -189,16 +196,17 @@ where
                 created_at_ms,
                 updated_at_ms: now_ms,
                 metadata_json: None,
-            });
+            }
+            .validated();
         }
 
-        let exists = self
-            .client
+        let exists = tx
             .query_opt(
                 "SELECT version FROM files WHERE workspace_id = $1 AND path = $2",
                 &[&workspace_id, &path],
             )
             .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -230,7 +238,7 @@ where
                 .map_err(db_err)?,
         };
 
-        if deleted == 1 {
+        if deleted > 0 {
             return Ok(DeleteOutcome::Deleted);
         }
 
@@ -273,12 +281,15 @@ where
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            out.push(FileMeta {
-                path: row.get::<_, String>(0),
-                size_bytes: i64_to_u64(row.get::<_, i64>(1), "size_bytes")?,
-                version: i64_to_u64(row.get::<_, i64>(2), "version")?,
-                updated_at_ms: i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
-            });
+            out.push(
+                FileMeta {
+                    path: row.get::<_, String>(0),
+                    size_bytes: i64_to_u64(row.get::<_, i64>(1), "size_bytes")?,
+                    version: i64_to_u64(row.get::<_, i64>(2), "version")?,
+                    updated_at_ms: i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
+                }
+                .validated()?,
+            );
         }
         Ok(out)
     }

@@ -31,10 +31,15 @@ pub struct DbVfs<S> {
 }
 
 impl<S: Store> DbVfs<S> {
-    pub fn new(store: S, policy: VfsPolicy) -> Result<Self> {
-        let policy = ValidatedVfsPolicy::new(policy)?;
+    fn build_matchers(policy: &ValidatedVfsPolicy) -> Result<(SecretRedactor, TraversalSkipper)> {
         let redactor = SecretRedactor::from_rules(&policy.secrets)?;
         let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
+        Ok((redactor, traversal))
+    }
+
+    pub fn new(store: S, policy: VfsPolicy) -> Result<Self> {
+        let policy = ValidatedVfsPolicy::new(policy)?;
+        let (redactor, traversal) = Self::build_matchers(&policy)?;
         Ok(Self {
             policy,
             redactor,
@@ -44,8 +49,7 @@ impl<S: Store> DbVfs<S> {
     }
 
     pub fn new_validated(store: S, policy: ValidatedVfsPolicy) -> Result<Self> {
-        let redactor = SecretRedactor::from_rules(&policy.secrets)?;
-        let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
+        let (redactor, traversal) = Self::build_matchers(&policy)?;
         Ok(Self {
             policy,
             redactor,

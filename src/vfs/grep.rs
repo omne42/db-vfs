@@ -53,9 +53,9 @@ pub struct GrepResponse {
     pub scanned_entries: u64,
 }
 
-const MAX_GREP_REGEX_PATTERN_BYTES: usize = 4096;
 const MAX_GREP_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
+const MAX_GREP_QUERY_BYTES: usize = 4096;
 
 fn summarize_pattern_for_error(pattern: &str) -> String {
     const MAX_BYTES: usize = 200;
@@ -69,18 +69,55 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
     format!("{}…", &pattern[..end])
 }
 
+fn validate_grep_query(query: &str, regex: bool) -> Result<()> {
+    if query.is_empty() {
+        return Err(if regex {
+            Error::InvalidRegex("grep regex must be non-empty".to_string())
+        } else {
+            Error::InvalidPath("grep query must be non-empty".to_string())
+        });
+    }
+
+    if query.len() > MAX_GREP_QUERY_BYTES {
+        return Err(if regex {
+            Error::InvalidRegex(format!(
+                "grep regex is too large ({} bytes; max {} bytes)",
+                query.len(),
+                MAX_GREP_QUERY_BYTES
+            ))
+        } else {
+            Error::InputTooLarge {
+                size_bytes: query.len() as u64,
+                max_bytes: MAX_GREP_QUERY_BYTES as u64,
+            }
+        });
+    }
+
+    Ok(())
+}
+
 pub(super) fn grep<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: GrepRequest,
 ) -> Result<GrepResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.grep, "grep")?;
     validate_workspace_id(&request.workspace_id)?;
+    validate_grep_query(&request.query, request.regex)?;
 
-    if request.query.is_empty() {
-        return Err(if request.regex {
-            Error::InvalidRegex("grep regex must be non-empty".to_string())
-        } else {
-            Error::InvalidPath("grep query must be non-empty".to_string())
+    if vfs.policy.limits.max_results == 0 {
+        return Ok(GrepResponse {
+            matches: Vec::new(),
+            truncated: true,
+            skipped_too_large_files: 0,
+            skipped_traversal_skipped: 0,
+            skipped_secret_denied: 0,
+            skipped_glob_mismatch: 0,
+            skipped_missing_content: 0,
+            scanned_files: 0,
+            scan_limit_reached: true,
+            scan_limit_reason: Some(ScanLimitReason::Results),
+            elapsed_ms: 0,
+            scanned_entries: 0,
         });
     }
 
@@ -109,21 +146,7 @@ pub(super) fn grep<S: crate::store::Store>(
         ));
     }
 
-    if !request.regex && request.query.len() > MAX_GREP_REGEX_PATTERN_BYTES {
-        return Err(Error::InputTooLarge {
-            size_bytes: request.query.len() as u64,
-            max_bytes: MAX_GREP_REGEX_PATTERN_BYTES as u64,
-        });
-    }
-
     let regex = if request.regex {
-        if request.query.len() > MAX_GREP_REGEX_PATTERN_BYTES {
-            return Err(Error::InvalidRegex(format!(
-                "grep regex is too large ({} bytes; max {} bytes)",
-                request.query.len(),
-                MAX_GREP_REGEX_PATTERN_BYTES
-            )));
-        }
         let preview = summarize_pattern_for_error(&request.query);
         Some(
             regex::RegexBuilder::new(&request.query)
@@ -219,6 +242,12 @@ pub(super) fn grep<S: crate::store::Store>(
         };
 
         for (idx, line) in content.lines().enumerate() {
+            if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+                scan_limit_reached = true;
+                scan_limit_reason = Some(ScanLimitReason::Time);
+                break;
+            }
+
             let ok = match &regex {
                 Some(regex) => regex.is_match(line),
                 None => line.contains(&request.query),

@@ -112,6 +112,11 @@ pub(super) fn glob<S: crate::store::Store>(
         }
         scanned_files = scanned_files.saturating_add(1);
         if glob_is_match(&matcher, &meta.path) {
+            if matches.len() >= vfs.policy.limits.max_results {
+                scan_limit_reached = true;
+                scan_limit_reason = Some(ScanLimitReason::Results);
+                break;
+            }
             matches.push(meta.path);
             if matches.len() >= vfs.policy.limits.max_results {
                 scan_limit_reached = true;

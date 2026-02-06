@@ -22,6 +22,8 @@ pub struct PatchResponse {
     pub version: u64,
 }
 
+const MAX_PATCH_HUNKS: usize = 512;
+
 pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: PatchRequest,
@@ -29,8 +31,8 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.patch, "patch")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let requested_path = normalize_path(&request.path)?;
-    let path = requested_path.clone();
+    let requested_path = request.path.clone();
+    let path = normalize_path(&request.path)?;
     if vfs.redactor.is_path_denied(&path) {
         return Err(Error::SecretPathDenied(path));
     }
@@ -40,7 +42,10 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         .limits
         .max_patch_bytes
         .unwrap_or(vfs.policy.limits.max_read_bytes);
-    let patch_bytes = request.patch.len() as u64;
+    let patch_bytes = u64::try_from(request.patch.len()).map_err(|_| Error::InputTooLarge {
+        size_bytes: u64::MAX,
+        max_bytes: max_patch_bytes,
+    })?;
     if patch_bytes > max_patch_bytes {
         return Err(Error::InputTooLarge {
             size_bytes: patch_bytes,
@@ -48,12 +53,27 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         });
     }
 
+    let parsed =
+        diffy::Patch::from_str(&request.patch).map_err(|err| Error::Patch(err.to_string()))?;
+    if parsed.hunks().len() > MAX_PATCH_HUNKS {
+        return Err(Error::InputTooLarge {
+            size_bytes: parsed.hunks().len() as u64,
+            max_bytes: MAX_PATCH_HUNKS as u64,
+        });
+    }
+
     let Some(meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
-        return Err(Error::NotFound("file not found".to_string()));
+        return Err(Error::NotFound(format!(
+            "file not found (workspace_id={}, path={})",
+            request.workspace_id, path
+        )));
     };
 
     if meta.version != request.expected_version {
-        return Err(Error::Conflict("version mismatch".to_string()));
+        return Err(Error::Conflict(format!(
+            "version mismatch (workspace_id={}, path={}, expected_version={}, actual_version={})",
+            request.workspace_id, path, request.expected_version, meta.version
+        )));
     }
 
     let max_fetch_bytes = vfs.policy.limits.max_read_bytes;
@@ -70,16 +90,20 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
             .get_content(&request.workspace_id, &path, request.expected_version)?
     else {
         let Some(now_meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
-            return Err(Error::NotFound("file not found".to_string()));
+            return Err(Error::NotFound(format!(
+                "file not found (workspace_id={}, path={})",
+                request.workspace_id, path
+            )));
         };
         if now_meta.version != request.expected_version {
-            return Err(Error::Conflict("version mismatch".to_string()));
+            return Err(Error::Conflict(format!(
+                "version mismatch (workspace_id={}, path={}, expected_version={}, actual_version={})",
+                request.workspace_id, path, request.expected_version, now_meta.version
+            )));
         }
         return Err(Error::Db("file content could not be loaded".to_string()));
     };
 
-    let parsed =
-        diffy::Patch::from_str(&request.patch).map_err(|err| Error::Patch(err.to_string()))?;
     let updated =
         diffy::apply(&existing_content, &parsed).map_err(|err| Error::Patch(err.to_string()))?;
 

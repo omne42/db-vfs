@@ -16,7 +16,7 @@ pub type SqliteStore<C = Box<rusqlite::Connection>> = SqliteStoreWithConn<C>;
 
 impl SqliteStoreWithConn<Box<rusqlite::Connection>> {
     pub fn new(conn: rusqlite::Connection) -> Result<Self> {
-        let _ = conn.busy_timeout(Duration::from_secs(5));
+        conn.busy_timeout(Duration::from_secs(5)).map_err(db_err)?;
         crate::migrations::migrate_sqlite(&conn).map_err(db_err)?;
         Ok(Self {
             conn: Box::new(conn),
@@ -24,7 +24,7 @@ impl SqliteStoreWithConn<Box<rusqlite::Connection>> {
     }
 
     pub fn new_no_migrate(conn: rusqlite::Connection) -> Result<Self> {
-        let _ = conn.busy_timeout(Duration::from_secs(5));
+        conn.busy_timeout(Duration::from_secs(5)).map_err(db_err)?;
         Ok(Self {
             conn: Box::new(conn),
         })
@@ -66,16 +66,27 @@ where
             )
             .map_err(db_err)?;
 
-        stmt.query_row(rusqlite::params![workspace_id, path], |row| {
-            Ok(FileMeta {
-                path: path.to_string(),
-                size_bytes: i64_to_u64_sql(row.get::<_, i64>(0)?, "size_bytes")?,
-                version: i64_to_u64_sql(row.get::<_, i64>(1)?, "version")?,
-                updated_at_ms: i64_to_u64_sql(row.get::<_, i64>(2)?, "updated_at_ms")?,
+        let row = stmt
+            .query_row(rusqlite::params![workspace_id, path], |row| {
+                Ok((
+                    i64_to_u64_sql(row.get::<_, i64>(0)?, "size_bytes", 0)?,
+                    i64_to_u64_sql(row.get::<_, i64>(1)?, "version", 1)?,
+                    i64_to_u64_sql(row.get::<_, i64>(2)?, "updated_at_ms", 2)?,
+                ))
             })
+            .optional()
+            .map_err(db_err)?;
+
+        row.map(|(size_bytes, version, updated_at_ms)| {
+            FileMeta {
+                path: path.to_string(),
+                size_bytes,
+                version,
+                updated_at_ms,
+            }
+            .validated()
         })
-        .optional()
-        .map_err(db_err)
+        .transpose()
     }
 
     fn get_content(
@@ -130,7 +141,7 @@ where
         );
 
         match res {
-            Ok(_) => Ok(FileRecord {
+            Ok(_) => FileRecord {
                 workspace_id: workspace_id.to_string(),
                 path: path.to_string(),
                 content: content.to_string(),
@@ -139,7 +150,8 @@ where
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 metadata_json: None,
-            }),
+            }
+            .validated(),
             Err(err) => {
                 if is_unique_constraint_violation(&err) {
                     return Err(Error::Conflict("file exists".to_string()));
@@ -157,6 +169,7 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<FileRecord> {
+        let tx = self.conn.unchecked_transaction().map_err(db_err)?;
         let size_bytes = content.len() as u64;
         let new_version = super::next_version(expected_version)?;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
@@ -164,8 +177,7 @@ where
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
         let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
 
-        let updated = self
-            .conn
+        let updated = tx
             .execute(
                 "UPDATE files
                  SET content = ?1, size_bytes = ?2, version = ?3, updated_at_ms = ?4
@@ -183,8 +195,7 @@ where
             .map_err(db_err)?;
 
         if updated == 1 {
-            let created_at_ms = self
-                .conn
+            let created_at_ms = tx
                 .query_row(
                     "SELECT created_at_ms FROM files WHERE workspace_id = ?1 AND path = ?2",
                     rusqlite::params![workspace_id, path],
@@ -194,9 +205,13 @@ where
                 .map_err(db_err)?
                 .map(|v| i64_to_u64(v, "created_at_ms"))
                 .transpose()?
-                .unwrap_or(now_ms);
+                .ok_or_else(|| {
+                    Error::Db("missing created_at_ms after successful CAS update".to_string())
+                })?;
 
-            return Ok(FileRecord {
+            tx.commit().map_err(db_err)?;
+
+            return FileRecord {
                 workspace_id: workspace_id.to_string(),
                 path: path.to_string(),
                 content: content.to_string(),
@@ -205,11 +220,11 @@ where
                 created_at_ms,
                 updated_at_ms: now_ms,
                 metadata_json: None,
-            });
+            }
+            .validated();
         }
 
-        let exists = self
-            .conn
+        let exists = tx
             .query_row(
                 "SELECT version FROM files WHERE workspace_id = ?1 AND path = ?2",
                 rusqlite::params![workspace_id, path],
@@ -217,6 +232,7 @@ where
             )
             .optional()
             .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -248,7 +264,7 @@ where
                 .map_err(db_err)?,
         };
 
-        if deleted == 1 {
+        if deleted > 0 {
             return Ok(DeleteOutcome::Deleted);
         }
 
@@ -295,19 +311,28 @@ where
             .query_map(
                 rusqlite::params![workspace_id, lower, upper, limit],
                 |row| {
-                    Ok(FileMeta {
-                        path: row.get::<_, String>(0)?,
-                        size_bytes: i64_to_u64_sql(row.get::<_, i64>(1)?, "size_bytes")?,
-                        version: i64_to_u64_sql(row.get::<_, i64>(2)?, "version")?,
-                        updated_at_ms: i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms")?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        i64_to_u64_sql(row.get::<_, i64>(1)?, "size_bytes", 1)?,
+                        i64_to_u64_sql(row.get::<_, i64>(2)?, "version", 2)?,
+                        i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms", 3)?,
+                    ))
                 },
             )
             .map_err(db_err)?;
 
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(db_err)?);
+            let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+            out.push(
+                FileMeta {
+                    path,
+                    size_bytes,
+                    version,
+                    updated_at_ms,
+                }
+                .validated()?,
+            );
         }
         Ok(out)
     }
@@ -321,10 +346,10 @@ fn i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::Db(format!("invalid negative {field} value: {value}")))
 }
 
-fn i64_to_u64_sql(value: i64, field: &'static str) -> rusqlite::Result<u64> {
+fn i64_to_u64_sql(value: i64, field: &'static str, column_idx: usize) -> rusqlite::Result<u64> {
     i64_to_u64(value, field).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(
-            0,
+            column_idx,
             rusqlite::types::Type::Integer,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

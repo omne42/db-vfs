@@ -176,7 +176,7 @@ fn write_rejects_expected_version_overflow() {
             expected_version: Some(too_large),
         })
         .expect_err("should reject expected_version overflow");
-    assert_eq!(err.code(), "invalid_path");
+    assert_eq!(err.code(), "conflict");
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn delete_rejects_expected_version_overflow() {
             ignore_missing: true,
         })
         .expect_err("should reject expected_version overflow");
-    assert_eq!(err.code(), "invalid_path");
+    assert_eq!(err.code(), "conflict");
 }
 
 #[test]
