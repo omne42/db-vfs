@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
@@ -50,6 +51,7 @@ pub(super) fn build_auth_mode(
     }
 
     let mut rules = Vec::with_capacity(policy.auth.tokens.len());
+    let mut seen = HashSet::<[u8; 32]>::with_capacity(policy.auth.tokens.len());
     for (idx, rule) in policy.auth.tokens.iter().enumerate() {
         let token_sha256 = if let Some(token) = rule.token.as_deref() {
             parse_token_sha256(token)?
@@ -69,6 +71,10 @@ pub(super) fn build_auth_mode(
         } else {
             anyhow::bail!("auth token entry {idx} is missing token / token_env_var");
         };
+
+        if !seen.insert(token_sha256) {
+            anyhow::bail!("auth token entry {idx} duplicates a previous token hash");
+        }
 
         rules.push(AuthRule {
             token_sha256,
@@ -99,16 +105,7 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
-    if !workspace_id.starts_with(prefix) {
-        return false;
-    }
-    if prefix.ends_with('-') {
-        return true;
-    }
-    workspace_id
-        .as_bytes()
-        .get(prefix.len())
-        .is_some_and(|next| *next == b'-')
+    prefix.ends_with('-') && workspace_id.starts_with(prefix)
 }
 
 pub(super) fn workspace_allowed(patterns: &[String], workspace_id: &str) -> bool {
@@ -225,6 +222,7 @@ mod tests {
     use super::*;
 
     use axum::http::HeaderValue;
+    use db_vfs_core::policy::AuthToken;
 
     #[test]
     fn bearer_token_parsing_is_case_insensitive_and_strict() {
@@ -267,7 +265,7 @@ mod tests {
         assert!(workspace_allowed(&[String::from("ws")], "ws"));
         assert!(!workspace_allowed(&[String::from("ws")], "ws2"));
         assert!(workspace_allowed(&[String::from("team-*")], "team-123"));
-        assert!(workspace_allowed(&[String::from("team*")], "team-123"));
+        assert!(!workspace_allowed(&[String::from("team*")], "team-123"));
         assert!(!workspace_allowed(&[String::from("team*")], "teammate"));
         assert!(!workspace_allowed(&[String::from("team-*")], "other"));
     }
@@ -289,5 +287,28 @@ mod tests {
 
         let err = build_auth_mode(&policy, false).err().expect("should fail");
         assert!(err.to_string().contains("no auth tokens configured"));
+    }
+
+    #[test]
+    fn build_auth_mode_rejects_duplicate_token_hashes() {
+        let mut policy = VfsPolicy::default();
+        let token = format!("sha256:{}", "a".repeat(64));
+        policy.auth.tokens = vec![
+            AuthToken {
+                token: Some(token.clone()),
+                token_env_var: None,
+                allowed_workspaces: vec!["team-a".to_string()],
+            },
+            AuthToken {
+                token: Some(token),
+                token_env_var: None,
+                allowed_workspaces: vec!["team-b".to_string()],
+            },
+        ];
+
+        let err = build_auth_mode(&policy, false)
+            .err()
+            .expect("duplicate token hashes should be rejected");
+        assert!(err.to_string().contains("duplicates a previous token hash"));
     }
 }

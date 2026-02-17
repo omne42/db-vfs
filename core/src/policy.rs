@@ -15,6 +15,9 @@ const MAX_LIMIT_MAX_WALK_FILES: usize = 500_000;
 const MAX_LIMIT_MAX_WALK_ENTRIES: usize = 1_000_000;
 const MAX_LIMIT_MAX_WALK_MS: u64 = 600_000;
 const MAX_LIMIT_MAX_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_SCAN_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+// Keep in sync with `core::path::normalize_path_inner` max path bytes.
+const MAX_NORMALIZED_PATH_BYTES: usize = 4096;
 const MAX_REDACT_REGEXES: usize = 128;
 const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
 const MAX_ALLOWED_WORKSPACE_PATTERN_BYTES: usize = 1024;
@@ -255,11 +258,7 @@ impl fmt::Debug for AuthToken {
         f.debug_struct("AuthToken")
             .field(
                 "token",
-                &self
-                    .token
-                    .as_ref()
-                    .map(|_| "<redacted>")
-                    .unwrap_or("<none>"),
+                &self.token.as_ref().map_or("<none>", |_| "<redacted>"),
             )
             .field("token_env_var", &self.token_env_var)
             .field("allowed_workspaces", &self.allowed_workspaces)
@@ -449,6 +448,47 @@ impl VfsPolicy {
                 MAX_LIMIT_MAX_LINE_BYTES
             )));
         }
+        let glob_response_budget = self
+            .limits
+            .max_results
+            .checked_mul(MAX_NORMALIZED_PATH_BYTES)
+            .ok_or_else(|| {
+                Error::InvalidPolicy(
+                    "limits.max_results * path_max_bytes overflows usize".to_string(),
+                )
+            })?;
+        if glob_response_budget > MAX_SCAN_RESPONSE_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_results * path_max_bytes is too large ({} bytes; max {} bytes)",
+                glob_response_budget, MAX_SCAN_RESPONSE_BYTES
+            )));
+        }
+
+        let grep_entry_max_bytes = self
+            .limits
+            .max_line_bytes
+            .checked_add(MAX_NORMALIZED_PATH_BYTES)
+            .ok_or_else(|| {
+                Error::InvalidPolicy(
+                    "limits.max_line_bytes + path_max_bytes overflows usize".to_string(),
+                )
+            })?;
+        let grep_response_budget = self
+            .limits
+            .max_results
+            .checked_mul(grep_entry_max_bytes)
+            .ok_or_else(|| {
+                Error::InvalidPolicy(
+                    "limits.max_results * (limits.max_line_bytes + path_max_bytes) overflows usize"
+                        .to_string(),
+                )
+            })?;
+        if grep_response_budget > MAX_SCAN_RESPONSE_BYTES {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_results * (limits.max_line_bytes + path_max_bytes) is too large ({} bytes; max {} bytes)",
+                grep_response_budget, MAX_SCAN_RESPONSE_BYTES
+            )));
+        }
         if let Some(max_walk_ms) = self.limits.max_walk_ms {
             if max_walk_ms == 0 {
                 return Err(Error::InvalidPolicy(
@@ -572,7 +612,7 @@ impl VfsPolicy {
                         "auth.tokens[{idx}].allowed_workspaces[{j}] must be non-empty"
                     )));
                 }
-                if pattern.chars().any(|ch| ch.is_whitespace()) {
+                if pattern.chars().any(char::is_whitespace) {
                     return Err(Error::InvalidPolicy(format!(
                         "auth.tokens[{idx}].allowed_workspaces[{j}] must not contain whitespace"
                     )));
@@ -590,6 +630,18 @@ impl VfsPolicy {
                         return Err(Error::InvalidPolicy(format!(
                             "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
                         )));
+                    }
+                    if star_count == 1 {
+                        let prefix = pattern.strip_suffix('*').ok_or_else(|| {
+                            Error::InvalidPolicy(format!(
+                                "auth.tokens[{idx}].allowed_workspaces[{j}] has invalid trailing wildcard syntax"
+                            ))
+                        })?;
+                        if prefix.is_empty() || !prefix.ends_with('-') {
+                            return Err(Error::InvalidPolicy(format!(
+                                "auth.tokens[{idx}].allowed_workspaces[{j}] trailing wildcard patterns must end with '-*'"
+                            )));
+                        }
                     }
                 }
             }
@@ -710,7 +762,7 @@ impl VfsPolicy {
                     "audit.jsonl_path must not contain NUL bytes".to_string(),
                 ));
             }
-            if path.chars().any(|ch| ch.is_control()) {
+            if path.chars().any(char::is_control) {
                 return Err(Error::InvalidPolicy(
                     "audit.jsonl_path must not contain control characters".to_string(),
                 ));
@@ -802,6 +854,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_excessive_grep_response_budget() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_results = MAX_LIMIT_MAX_RESULTS;
+        policy.limits.max_line_bytes = 1;
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_excessive_glob_response_budget() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_results =
+            (MAX_SCAN_RESPONSE_BYTES / MAX_NORMALIZED_PATH_BYTES).saturating_add(1);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
     fn validate_rejects_zero_max_walk_ms_when_set() {
         let mut policy = VfsPolicy::default();
         policy.limits.max_walk_ms = Some(0);
@@ -864,6 +934,18 @@ mod tests {
             token: Some(format!("sha256:{}", "a".repeat(64))),
             token_env_var: None,
             allowed_workspaces: vec!["foo*bar*".to_string()],
+        }];
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_trailing_wildcard_without_dash_prefix() {
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(format!("sha256:{}", "a".repeat(64))),
+            token_env_var: None,
+            allowed_workspaces: vec!["team*".to_string()],
         }];
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");

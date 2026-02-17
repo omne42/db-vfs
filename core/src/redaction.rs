@@ -15,7 +15,28 @@ const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
 const MAX_REDACT_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
 
-fn normalize_runtime_path_for_matching(path: &str) -> Option<String> {
+fn is_canonical_runtime_path(path: &str) -> bool {
+    path == path.trim()
+        && !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with("./")
+        && !path.starts_with("../")
+        && path != "."
+        && path != ".."
+        && !path.contains('\\')
+        && !path.contains("//")
+        && !path.contains("/./")
+        && !path.contains("/../")
+        && !path.ends_with('/')
+        && !path.ends_with("/.")
+        && !path.ends_with("/..")
+}
+
+fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
+    if is_canonical_runtime_path(path) {
+        return Some(Cow::Borrowed(path));
+    }
+
     let mut normalized = path.trim().replace('\\', "/");
     while normalized.starts_with("./") {
         normalized.drain(..2);
@@ -38,7 +59,7 @@ fn normalize_runtime_path_for_matching(path: &str) -> Option<String> {
     if out.is_empty() {
         return None;
     }
-    Some(out.join("/"))
+    Some(Cow::Owned(out.join("/")))
 }
 
 #[derive(Debug, Clone)]
@@ -140,10 +161,13 @@ impl SecretRedactor {
         let Some(path) = normalize_runtime_path_for_matching(path) else {
             return false;
         };
-        self.deny.is_match(std::path::Path::new(&path))
+        self.deny.is_match(std::path::Path::new(path.as_ref()))
     }
 
     pub fn redact_text(&self, input: &str) -> String {
+        if self.redact.is_empty() {
+            return input.to_string();
+        }
         let mut current: Cow<'_, str> = Cow::Borrowed(input);
         for regex in &self.redact {
             let replaced = regex.replace_all(current.as_ref(), NoExpand(&self.replacement));
@@ -154,6 +178,90 @@ impl SecretRedactor {
         }
         current.into_owned()
     }
+
+    pub fn redact_text_owned(&self, mut input: String) -> String {
+        if self.redact.is_empty() {
+            return input;
+        }
+
+        for regex in &self.redact {
+            let replaced = regex.replace_all(input.as_str(), NoExpand(&self.replacement));
+            if let Cow::Owned(next) = replaced {
+                input = next;
+            }
+        }
+        input
+    }
+
+    pub fn redact_text_owned_bounded(
+        &self,
+        mut input: String,
+        max_output_bytes: usize,
+    ) -> std::result::Result<String, usize> {
+        if input.len() > max_output_bytes {
+            return Err(input.len());
+        }
+        if self.redact.is_empty() {
+            return Ok(input);
+        }
+
+        for regex in &self.redact {
+            input = redact_with_literal_replacement_bounded(
+                input,
+                regex,
+                &self.replacement,
+                max_output_bytes,
+            )?;
+        }
+        Ok(input)
+    }
+
+    pub fn has_redact_rules(&self) -> bool {
+        !self.redact.is_empty()
+    }
+
+    pub fn replacement(&self) -> &str {
+        &self.replacement
+    }
+}
+
+fn redact_with_literal_replacement_bounded(
+    input: String,
+    regex: &Regex,
+    replacement: &str,
+    max_output_bytes: usize,
+) -> std::result::Result<String, usize> {
+    let mut matches = regex.find_iter(&input);
+    let Some(first) = matches.next() else {
+        return Ok(input);
+    };
+
+    let mut out = String::with_capacity(input.len().min(max_output_bytes));
+    let mut out_len = 0usize;
+    let mut last = 0usize;
+
+    for m in std::iter::once(first).chain(matches) {
+        let prefix = &input[last..m.start()];
+        if out_len > max_output_bytes.saturating_sub(prefix.len()) {
+            return Err(max_output_bytes.saturating_add(1));
+        }
+        out.push_str(prefix);
+        out_len += prefix.len();
+
+        if out_len > max_output_bytes.saturating_sub(replacement.len()) {
+            return Err(max_output_bytes.saturating_add(1));
+        }
+        out.push_str(replacement);
+        out_len += replacement.len();
+        last = m.end();
+    }
+
+    let tail = &input[last..];
+    if out_len > max_output_bytes.saturating_sub(tail.len()) {
+        return Err(max_output_bytes.saturating_add(1));
+    }
+    out.push_str(tail);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -212,5 +320,33 @@ mod tests {
         };
         let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
         assert_eq!(redactor.redact_text("foobar"), "xx");
+    }
+
+    #[test]
+    fn redact_text_owned_bounded_rejects_expansion() {
+        let rules = SecretRules {
+            redact_regexes: vec!["a".to_string()],
+            replacement: "xxxx".to_string(),
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        let err = redactor
+            .redact_text_owned_bounded("aaaa".to_string(), 8)
+            .expect_err("expansion should exceed limit");
+        assert!(err > 8);
+    }
+
+    #[test]
+    fn redact_text_owned_bounded_keeps_input_when_no_matches() {
+        let rules = SecretRules {
+            redact_regexes: vec!["secret".to_string()],
+            replacement: "x".to_string(),
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        let out = redactor
+            .redact_text_owned_bounded("public".to_string(), 8)
+            .expect("bounded redact");
+        assert_eq!(out, "public");
     }
 }

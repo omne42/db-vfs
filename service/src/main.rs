@@ -82,18 +82,21 @@ async fn main() -> anyhow::Result<()> {
         "sqlite"
     };
 
+    #[cfg(feature = "postgres")]
     let app = if let Some(url) = args.postgres {
-        #[cfg(feature = "postgres")]
-        {
-            db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            let _ = url;
-            anyhow::bail!(
-                "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
-            );
-        }
+        db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
+    } else {
+        let Some(sqlite) = args.sqlite else {
+            anyhow::bail!("missing --sqlite argument (clap should enforce exactly one DB backend)");
+        };
+        db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
+    };
+
+    #[cfg(not(feature = "postgres"))]
+    let app = if args.postgres.is_some() {
+        anyhow::bail!(
+            "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
+        );
     } else {
         let Some(sqlite) = args.sqlite else {
             anyhow::bail!("missing --sqlite argument (clap should enforce exactly one DB backend)");

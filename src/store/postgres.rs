@@ -2,7 +2,7 @@ use db_vfs_core::{Error, Result};
 
 use std::ops::DerefMut;
 
-use super::{DeleteOutcome, FileMeta, FileRecord, Store, db_err, make_prefix_bounds};
+use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds};
 
 pub struct PostgresStoreWithClient<C> {
     client: C,
@@ -96,7 +96,7 @@ where
         path: &str,
         content: &str,
         now_ms: u64,
-    ) -> Result<FileRecord> {
+    ) -> Result<u64> {
         let size_bytes = content.len() as u64;
         let version: u64 = 1;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
@@ -119,17 +119,7 @@ where
         );
 
         match res {
-            Ok(_) => FileRecord {
-                workspace_id: workspace_id.to_string(),
-                path: path.to_string(),
-                content: content.to_string(),
-                size_bytes,
-                version,
-                created_at_ms: now_ms,
-                updated_at_ms: now_ms,
-                metadata_json: None,
-            }
-            .validated(),
+            Ok(_) => Ok(version),
             Err(err) => {
                 if is_unique_violation(&err) {
                     return Err(Error::Conflict("file exists".to_string()));
@@ -146,7 +136,7 @@ where
         content: &str,
         expected_version: u64,
         now_ms: u64,
-    ) -> Result<FileRecord> {
+    ) -> Result<u64> {
         let mut tx = self.client.transaction().map_err(db_err)?;
         let size_bytes = content.len() as u64;
         let new_version = super::next_version(expected_version)?;
@@ -173,31 +163,8 @@ where
             .map_err(db_err)?;
 
         if updated == 1 {
-            let created_at_ms = tx
-                .query_opt(
-                    "SELECT created_at_ms FROM files WHERE workspace_id = $1 AND path = $2",
-                    &[&workspace_id, &path],
-                )
-                .map_err(db_err)?
-                .map(|row| i64_to_u64(row.get::<_, i64>(0), "created_at_ms"))
-                .transpose()?
-                .ok_or_else(|| {
-                    Error::Db("missing created_at_ms after successful CAS update".to_string())
-                })?;
-
             tx.commit().map_err(db_err)?;
-
-            return FileRecord {
-                workspace_id: workspace_id.to_string(),
-                path: path.to_string(),
-                content: content.to_string(),
-                size_bytes,
-                version: new_version,
-                created_at_ms,
-                updated_at_ms: now_ms,
-                metadata_json: None,
-            }
-            .validated();
+            return Ok(new_version);
         }
 
         let exists = tx
@@ -265,34 +232,89 @@ where
         prefix: &str,
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
+        self.list_metas_by_prefix_page(workspace_id, prefix, None, limit)
+    }
+
+    fn list_metas_by_prefix_page(
+        &mut self,
+        workspace_id: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileMeta>> {
         let (lower, upper) = make_prefix_bounds(prefix);
         let limit_i64 = u64_to_i64(limit as u64, "limit")?;
-        let rows = self
-            .client
-            .query(
-                "SELECT path, size_bytes, version, updated_at_ms
-                 FROM files
-                 WHERE workspace_id = $1 AND path >= $2 AND path < $3
-                 ORDER BY path
-                 LIMIT $4",
-                &[&workspace_id, &lower, &upper, &limit_i64],
-            )
-            .map_err(db_err)?;
+        let rows = match (after, upper.as_deref()) {
+            (Some(after), Some(upper)) => self
+                .client
+                .query(
+                    "SELECT path, size_bytes, version, updated_at_ms
+                     FROM files
+                     WHERE workspace_id = $1 AND path >= $2 AND path < $3 AND path > $4
+                     ORDER BY path
+                     LIMIT $5",
+                    &[&workspace_id, &lower, &upper, &after, &limit_i64],
+                )
+                .map_err(db_err)?,
+            (Some(after), None) => self
+                .client
+                .query(
+                    "SELECT path, size_bytes, version, updated_at_ms
+                     FROM files
+                     WHERE workspace_id = $1 AND path >= $2 AND path > $3
+                     ORDER BY path
+                     LIMIT $4",
+                    &[&workspace_id, &lower, &after, &limit_i64],
+                )
+                .map_err(db_err)?,
+            (None, Some(upper)) => self
+                .client
+                .query(
+                    "SELECT path, size_bytes, version, updated_at_ms
+                     FROM files
+                     WHERE workspace_id = $1 AND path >= $2 AND path < $3
+                     ORDER BY path
+                     LIMIT $4",
+                    &[&workspace_id, &lower, &upper, &limit_i64],
+                )
+                .map_err(db_err)?,
+            (None, None) => self
+                .client
+                .query(
+                    "SELECT path, size_bytes, version, updated_at_ms
+                     FROM files
+                     WHERE workspace_id = $1 AND path >= $2
+                     ORDER BY path
+                     LIMIT $3",
+                    &[&workspace_id, &lower, &limit_i64],
+                )
+                .map_err(db_err)?,
+        };
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
+            let (path, size_bytes, version, updated_at_ms) = decode_meta_row(&row)?;
             out.push(
                 FileMeta {
-                    path: row.get::<_, String>(0),
-                    size_bytes: i64_to_u64(row.get::<_, i64>(1), "size_bytes")?,
-                    version: i64_to_u64(row.get::<_, i64>(2), "version")?,
-                    updated_at_ms: i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
+                    path,
+                    size_bytes,
+                    version,
+                    updated_at_ms,
                 }
                 .validated()?,
             );
         }
         Ok(out)
     }
+}
+
+fn decode_meta_row(row: &postgres::Row) -> Result<(String, u64, u64, u64)> {
+    Ok((
+        row.get::<_, String>(0),
+        i64_to_u64(row.get::<_, i64>(1), "size_bytes")?,
+        i64_to_u64(row.get::<_, i64>(2), "version")?,
+        i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
+    ))
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {

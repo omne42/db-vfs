@@ -294,6 +294,7 @@ dependencies = [
  "db-vfs-core",
  "diffy",
  "globset",
+ "memchr",
  "postgres",
  "regex",
  "rusqlite",

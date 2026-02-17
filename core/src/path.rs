@@ -12,32 +12,63 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
             MAX_BYTES
         )));
     }
-    if workspace_id.contains('\0') {
+
+    let mut has_nul = false;
+    let mut has_whitespace = false;
+    let mut has_control = false;
+    let mut has_separator = false;
+    let mut has_colon = false;
+    let mut has_dotdot = false;
+    let mut prev_dot = false;
+
+    for ch in workspace_id.chars() {
+        if ch == '\0' {
+            has_nul = true;
+        }
+        if ch.is_whitespace() {
+            has_whitespace = true;
+        }
+        if ch.is_control() {
+            has_control = true;
+        }
+        if ch == '/' || ch == '\\' {
+            has_separator = true;
+        }
+        if ch == ':' {
+            has_colon = true;
+        }
+        if ch == '.' && prev_dot {
+            has_dotdot = true;
+        }
+        prev_dot = ch == '.';
+    }
+
+    if has_nul {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain NUL bytes".to_string(),
         ));
     }
-    if workspace_id.chars().any(|ch| ch.is_whitespace()) {
+    if has_whitespace {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain whitespace".to_string(),
         ));
     }
-    if workspace_id.chars().any(|ch| ch.is_control()) {
+    if has_control {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain control characters".to_string(),
         ));
     }
-    if workspace_id.contains('/') || workspace_id.contains('\\') {
+    if has_separator {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain path separators".to_string(),
         ));
     }
-    if workspace_id.contains(':') {
+    if has_colon {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain ':'".to_string(),
         ));
     }
-    if workspace_id.contains("..") {
+    if has_dotdot {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain '..'".to_string(),
         ));
@@ -57,6 +88,28 @@ pub fn normalize_path_prefix(prefix: &str) -> Result<String> {
 enum PathKind {
     File,
     Prefix,
+}
+
+fn is_windows_drive_absolute_path(s: &str) -> bool {
+    s.as_bytes().get(1) == Some(&b':') && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+}
+
+fn is_canonical_relative_path(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('/')
+        && !s.starts_with("./")
+        && !s.starts_with("../")
+        && s != "."
+        && s != ".."
+        && !s.contains('\\')
+        && !s.contains("//")
+        && !s.contains("/./")
+        && !s.contains("/../")
+        && !s.ends_with("/.")
+        && !s.ends_with("/..")
+        && !is_windows_drive_absolute_path(s)
+        && !s.contains('\0')
+        && !s.chars().any(char::is_control)
 }
 
 fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
@@ -79,13 +132,32 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
         )));
     }
 
+    if is_canonical_relative_path(input) {
+        return match kind {
+            PathKind::File => {
+                if input.ends_with('/') {
+                    Err(Error::InvalidPath(format!(
+                        "{label}: file path must not end with '/'"
+                    )))
+                } else {
+                    Ok(input.to_string())
+                }
+            }
+            PathKind::Prefix => {
+                if input.ends_with('/') {
+                    Ok(input.to_string())
+                } else {
+                    Ok(format!("{input}/"))
+                }
+            }
+        };
+    }
+
     let mut s = input.replace('\\', "/");
     while s.starts_with("./") {
         s.drain(..2);
     }
-    if s.as_bytes().get(1) == Some(&b':')
-        && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-    {
+    if is_windows_drive_absolute_path(&s) {
         return Err(Error::InvalidPath(format!(
             "{label}: absolute paths are not supported"
         )));
@@ -100,7 +172,7 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
             "{label}: NUL bytes are not allowed"
         )));
     }
-    if s.chars().any(|ch| ch.is_control()) {
+    if s.chars().any(char::is_control) {
         return Err(Error::InvalidPath(format!(
             "{label} must not contain control characters"
         )));
@@ -219,5 +291,12 @@ mod tests {
             normalize_path("C:\\tmp\\a.txt"),
             Err(Error::InvalidPath(_))
         ));
+    }
+
+    #[test]
+    fn normalize_path_fast_path_preserves_canonical_inputs() {
+        assert_eq!(normalize_path("docs/a.txt").unwrap(), "docs/a.txt");
+        assert_eq!(normalize_path_prefix("docs").unwrap(), "docs/");
+        assert_eq!(normalize_path_prefix("docs/").unwrap(), "docs/");
     }
 }

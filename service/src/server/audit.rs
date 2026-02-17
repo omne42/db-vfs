@@ -177,12 +177,18 @@ impl AuditLogger {
             Err(mpsc::TrySendError::Full(_)) => {
                 let dropped = DROPPED_AUDIT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
                 if dropped == 1 || dropped.is_multiple_of(1000) {
-                    tracing::warn!(dropped, "audit log channel is full; dropping audit events");
+                    tracing::warn!(
+                        dropped,
+                        capacity = AUDIT_CHANNEL_CAPACITY,
+                        "audit log channel is full; dropping audit events"
+                    );
                 }
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 if !self.disconnected_warned.swap(true, Ordering::Relaxed) {
+                    let dropped = DROPPED_AUDIT_EVENTS.load(Ordering::Relaxed);
                     tracing::warn!(
+                        dropped,
                         "audit log worker thread has stopped; audit events will be dropped"
                     );
                 }
@@ -258,24 +264,19 @@ fn audit_worker(
             Ok(mut event) => {
                 event.ts_ms = event.ts_ms.max(now_ms());
 
-                let mut line = match serde_json::to_vec(&event) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        write_failures = write_failures.saturating_add(1);
-                        if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                            tracing::warn!(
-                                err = %err,
-                                audit_path = ?path,
-                                write_failures,
-                                "failed to serialize audit event"
-                            );
-                        }
-                        continue;
+                if let Err(err) = serde_json::to_writer(&mut out, &event) {
+                    write_failures = write_failures.saturating_add(1);
+                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
+                        tracing::warn!(
+                            err = %err,
+                            audit_path = ?path,
+                            write_failures,
+                            "failed to serialize audit event"
+                        );
                     }
-                };
-                line.push(b'\n');
-
-                if let Err(err) = out.write_all(&line) {
+                    continue;
+                }
+                if let Err(err) = out.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
                     if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
@@ -316,8 +317,14 @@ fn audit_worker(
         }
     }
 
-    if pending > 0 {
-        let _ = out.flush();
+    if pending > 0
+        && let Err(err) = out.flush()
+    {
+        tracing::warn!(
+            err = %err,
+            audit_path = ?path,
+            "failed to flush audit log during worker shutdown"
+        );
     }
 }
 

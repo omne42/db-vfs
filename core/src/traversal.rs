@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use globset::{GlobSet, GlobSetBuilder};
 
 use crate::glob_utils::{
@@ -24,7 +26,28 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
     format!("{}…", &pattern[..end])
 }
 
-fn normalize_runtime_path_for_matching(path: &str) -> Option<String> {
+fn is_canonical_runtime_path(path: &str) -> bool {
+    path == path.trim()
+        && !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with("./")
+        && !path.starts_with("../")
+        && path != "."
+        && path != ".."
+        && !path.contains('\\')
+        && !path.contains("//")
+        && !path.contains("/./")
+        && !path.contains("/../")
+        && !path.ends_with('/')
+        && !path.ends_with("/.")
+        && !path.ends_with("/..")
+}
+
+fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
+    if is_canonical_runtime_path(path) {
+        return Some(Cow::Borrowed(path));
+    }
+
     let mut normalized = path.trim().replace('\\', "/");
     while normalized.starts_with("./") {
         normalized.drain(..2);
@@ -47,7 +70,7 @@ fn normalize_runtime_path_for_matching(path: &str) -> Option<String> {
     if out.is_empty() {
         return None;
     }
-    Some(out.join("/"))
+    Some(Cow::Owned(out.join("/")))
 }
 
 impl TraversalSkipper {
@@ -92,7 +115,7 @@ impl TraversalSkipper {
         let Some(path) = normalize_runtime_path_for_matching(path) else {
             return false;
         };
-        skip.is_match(std::path::Path::new(&path))
+        skip.is_match(std::path::Path::new(path.as_ref()))
     }
 }
 

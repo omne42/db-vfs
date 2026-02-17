@@ -100,7 +100,7 @@ Tune policy `limits` for your workload:
 | `401` | missing/invalid token | `Authorization`, token hash/env var |
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
-| `408` | timeout budget exceeded | `limits.max_io_ms`, DB latency, queueing |
+| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, DB latency, queueing |
 | `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
 
 ## More docs

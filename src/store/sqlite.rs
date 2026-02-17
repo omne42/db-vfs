@@ -6,7 +6,7 @@ use rusqlite::OptionalExtension;
 
 use db_vfs_core::{Error, Result};
 
-use super::{DeleteOutcome, FileMeta, FileRecord, Store, db_err, make_prefix_bounds};
+use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds};
 
 pub struct SqliteStoreWithConn<C> {
     conn: C,
@@ -59,7 +59,7 @@ where
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT size_bytes, version, updated_at_ms
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2",
@@ -98,7 +98,7 @@ where
         let version = u64_to_i64(version, "version")?;
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT content
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
@@ -118,7 +118,7 @@ where
         path: &str,
         content: &str,
         now_ms: u64,
-    ) -> Result<FileRecord> {
+    ) -> Result<u64> {
         let size_bytes = content.len() as u64;
         let version: u64 = 1;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
@@ -141,17 +141,7 @@ where
         );
 
         match res {
-            Ok(_) => FileRecord {
-                workspace_id: workspace_id.to_string(),
-                path: path.to_string(),
-                content: content.to_string(),
-                size_bytes,
-                version,
-                created_at_ms: now_ms,
-                updated_at_ms: now_ms,
-                metadata_json: None,
-            }
-            .validated(),
+            Ok(_) => Ok(version),
             Err(err) => {
                 if is_unique_constraint_violation(&err) {
                     return Err(Error::Conflict("file exists".to_string()));
@@ -168,7 +158,7 @@ where
         content: &str,
         expected_version: u64,
         now_ms: u64,
-    ) -> Result<FileRecord> {
+    ) -> Result<u64> {
         let tx = self.conn.unchecked_transaction().map_err(db_err)?;
         let size_bytes = content.len() as u64;
         let new_version = super::next_version(expected_version)?;
@@ -195,33 +185,8 @@ where
             .map_err(db_err)?;
 
         if updated == 1 {
-            let created_at_ms = tx
-                .query_row(
-                    "SELECT created_at_ms FROM files WHERE workspace_id = ?1 AND path = ?2",
-                    rusqlite::params![workspace_id, path],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(db_err)?
-                .map(|v| i64_to_u64(v, "created_at_ms"))
-                .transpose()?
-                .ok_or_else(|| {
-                    Error::Db("missing created_at_ms after successful CAS update".to_string())
-                })?;
-
             tx.commit().map_err(db_err)?;
-
-            return FileRecord {
-                workspace_id: workspace_id.to_string(),
-                path: path.to_string(),
-                content: content.to_string(),
-                size_bytes,
-                version: new_version,
-                created_at_ms,
-                updated_at_ms: now_ms,
-                metadata_json: None,
-            }
-            .validated();
+            return Ok(new_version);
         }
 
         let exists = tx
@@ -294,48 +259,152 @@ where
         prefix: &str,
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
+        self.list_metas_by_prefix_page(workspace_id, prefix, None, limit)
+    }
+
+    fn list_metas_by_prefix_page(
+        &mut self,
+        workspace_id: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileMeta>> {
         let (lower, upper) = make_prefix_bounds(prefix);
-        let limit = u64_to_i64(limit as u64, "limit")?;
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT path, size_bytes, version, updated_at_ms
-                 FROM files
-                 WHERE workspace_id = ?1 AND path >= ?2 AND path < ?3
-                 ORDER BY path
-                 LIMIT ?4",
-            )
-            .map_err(db_err)?;
-
-        let rows = stmt
-            .query_map(
-                rusqlite::params![workspace_id, lower, upper, limit],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        i64_to_u64_sql(row.get::<_, i64>(1)?, "size_bytes", 1)?,
-                        i64_to_u64_sql(row.get::<_, i64>(2)?, "version", 2)?,
-                        i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms", 3)?,
-                    ))
-                },
-            )
-            .map_err(db_err)?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
-            out.push(
-                FileMeta {
-                    path,
-                    size_bytes,
-                    version,
-                    updated_at_ms,
+        let limit_i64 = u64_to_i64(limit as u64, "limit")?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        match (after, upper.as_deref()) {
+            (Some(after), Some(upper)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT path, size_bytes, version, updated_at_ms
+                         FROM files
+                         WHERE workspace_id = ?1 AND path >= ?2 AND path < ?3 AND path > ?4
+                         ORDER BY path
+                         LIMIT ?5",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![workspace_id, &lower, upper, after, limit_i64],
+                        decode_meta_row,
+                    )
+                    .map_err(db_err)?;
+                for row in rows {
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    out.push(
+                        FileMeta {
+                            path,
+                            size_bytes,
+                            version,
+                            updated_at_ms,
+                        }
+                        .validated()?,
+                    );
                 }
-                .validated()?,
-            );
+            }
+            (Some(after), None) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT path, size_bytes, version, updated_at_ms
+                         FROM files
+                         WHERE workspace_id = ?1 AND path >= ?2 AND path > ?3
+                         ORDER BY path
+                         LIMIT ?4",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![workspace_id, &lower, after, limit_i64],
+                        decode_meta_row,
+                    )
+                    .map_err(db_err)?;
+                for row in rows {
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    out.push(
+                        FileMeta {
+                            path,
+                            size_bytes,
+                            version,
+                            updated_at_ms,
+                        }
+                        .validated()?,
+                    );
+                }
+            }
+            (None, Some(upper)) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT path, size_bytes, version, updated_at_ms
+                         FROM files
+                         WHERE workspace_id = ?1 AND path >= ?2 AND path < ?3
+                         ORDER BY path
+                         LIMIT ?4",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![workspace_id, &lower, upper, limit_i64],
+                        decode_meta_row,
+                    )
+                    .map_err(db_err)?;
+                for row in rows {
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    out.push(
+                        FileMeta {
+                            path,
+                            size_bytes,
+                            version,
+                            updated_at_ms,
+                        }
+                        .validated()?,
+                    );
+                }
+            }
+            (None, None) => {
+                let mut stmt = self
+                    .conn
+                    .prepare_cached(
+                        "SELECT path, size_bytes, version, updated_at_ms
+                         FROM files
+                         WHERE workspace_id = ?1 AND path >= ?2
+                         ORDER BY path
+                         LIMIT ?3",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map(
+                        rusqlite::params![workspace_id, &lower, limit_i64],
+                        decode_meta_row,
+                    )
+                    .map_err(db_err)?;
+                for row in rows {
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    out.push(
+                        FileMeta {
+                            path,
+                            size_bytes,
+                            version,
+                            updated_at_ms,
+                        }
+                        .validated()?,
+                    );
+                }
+            }
         }
         Ok(out)
     }
+}
+
+fn decode_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, u64, u64, u64)> {
+    Ok((
+        row.get::<_, String>(0)?,
+        i64_to_u64_sql(row.get::<_, i64>(1)?, "size_bytes", 1)?,
+        i64_to_u64_sql(row.get::<_, i64>(2)?, "version", 2)?,
+        i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms", 3)?,
+    ))
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
@@ -413,5 +482,31 @@ mod tests {
             None,
         );
         assert!(!is_unique_constraint_violation(&other));
+    }
+
+    #[test]
+    fn list_metas_by_prefix_page_respects_after_cursor() {
+        let mut store = SqliteStore::open_in_memory().expect("open sqlite memory");
+        store
+            .insert_file_new("ws", "docs/a.txt", "a", 1)
+            .expect("insert a");
+        store
+            .insert_file_new("ws", "docs/b.txt", "b", 2)
+            .expect("insert b");
+        store
+            .insert_file_new("ws", "docs/c.txt", "c", 3)
+            .expect("insert c");
+
+        let page1 = store
+            .list_metas_by_prefix_page("ws", "docs/", None, 2)
+            .expect("page1");
+        let page1_paths = page1.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        assert_eq!(page1_paths, vec!["docs/a.txt", "docs/b.txt"]);
+
+        let page2 = store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/b.txt"), 2)
+            .expect("page2");
+        let page2_paths = page2.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        assert_eq!(page2_paths, vec!["docs/c.txt"]);
     }
 }

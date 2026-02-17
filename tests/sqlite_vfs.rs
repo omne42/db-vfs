@@ -67,6 +67,24 @@ fn responses_echo_requested_path() {
         .expect("read");
     assert_eq!(read.path, "docs/a.txt");
     assert_eq!(read.requested_path, "docs/a.txt");
+
+    let patched = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "./docs//a.txt".to_string(),
+            expected_version: 1,
+            patch: concat!(
+                "--- a/docs/a.txt\n",
+                "+++ b/docs/a.txt\n",
+                "@@ -1 +1 @@\n",
+                "-hello\n",
+                "+HELLO\n",
+            )
+            .to_string(),
+        })
+        .expect("patch");
+    assert_eq!(patched.path, "docs/a.txt");
+    assert_eq!(patched.requested_path, "docs/a.txt");
 }
 
 #[test]
@@ -197,6 +215,31 @@ fn delete_rejects_expected_version_overflow() {
 }
 
 #[test]
+fn patch_rejects_expected_version_overflow() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "docs/a.txt".to_string(),
+        content: "hello\n".to_string(),
+        expected_version: None,
+    })
+    .expect("seed write");
+
+    let too_large = i64::MAX as u64 + 1;
+    let err = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            patch: "".to_string(),
+            expected_version: too_large,
+        })
+        .expect_err("should reject expected_version overflow");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
 fn glob_requires_scope_for_broad_patterns() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);
@@ -278,6 +321,63 @@ fn grep_requires_explicit_path_prefix() {
     );
     assert_eq!(ok.matches.len(), 1);
     assert_eq!(ok.matches[0].path, "docs/a.txt");
+}
+
+#[test]
+fn glob_keeps_scanning_when_denied_entries_precede_visible_files() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .insert_file_new("ws", "a/secret.txt", "hidden", now_ms())
+        .unwrap();
+    store
+        .insert_file_new("ws", "b/visible.txt", "visible", now_ms())
+        .unwrap();
+
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.limits.max_walk_entries = 8;
+    policy.limits.max_walk_files = 1;
+    policy.secrets.deny_globs = vec!["a/*".to_string()];
+    let mut vfs = DbVfs::new(store, policy).unwrap();
+
+    let resp = vfs
+        .glob(GlobRequest {
+            workspace_id: "ws".to_string(),
+            pattern: "**/*.txt".to_string(),
+            path_prefix: Some("".to_string()),
+        })
+        .unwrap();
+    assert_eq!(resp.matches, vec!["b/visible.txt".to_string()]);
+}
+
+#[test]
+fn grep_keeps_scanning_when_denied_entries_precede_visible_files() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .insert_file_new("ws", "a/secret.txt", "needle", now_ms())
+        .unwrap();
+    store
+        .insert_file_new("ws", "b/visible.txt", "needle", now_ms())
+        .unwrap();
+
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.limits.max_walk_entries = 8;
+    policy.limits.max_walk_files = 1;
+    policy.secrets.deny_globs = vec!["a/*".to_string()];
+    let mut vfs = DbVfs::new(store, policy).unwrap();
+
+    let resp = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "needle".to_string(),
+            regex: false,
+            glob: Some("**/*.txt".to_string()),
+            path_prefix: Some("".to_string()),
+        })
+        .unwrap();
+    assert_eq!(resp.matches.len(), 1);
+    assert_eq!(resp.matches[0].path, "b/visible.txt");
 }
 
 #[test]

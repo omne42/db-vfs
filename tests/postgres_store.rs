@@ -64,7 +64,7 @@ fn postgres_store_roundtrip() {
     let ws = format!("test_{unique}");
     let path = format!("docs/{unique}.txt");
     let _cleanup = CleanupGuard {
-        url: url.clone(),
+        url,
         workspace_id: ws.clone(),
         path: path.clone(),
     };
@@ -74,7 +74,7 @@ fn postgres_store_roundtrip() {
     let inserted = store
         .insert_file_new(&ws, &path, "hello", now)
         .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
-    assert_eq!(inserted.version, 1);
+    assert_eq!(inserted, 1);
 
     let meta = store
         .get_meta(&ws, &path)
@@ -85,7 +85,7 @@ fn postgres_store_roundtrip() {
     let updated = store
         .update_file_cas(&ws, &path, "hi", 1, now_ms())
         .unwrap_or_else(|err| panic!("update_file_cas failed for ws={ws}, path={path}: {err}"));
-    assert_eq!(updated.version, 2);
+    assert_eq!(updated, 2);
 
     let outcome = store
         .delete_file(&ws, &path, Some(2))

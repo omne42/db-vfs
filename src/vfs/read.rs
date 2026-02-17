@@ -8,6 +8,7 @@ use super::DbVfs;
 
 const MAX_CONTENT_LOAD_ATTEMPTS: usize = 8;
 const CONTENT_RETRY_BACKOFF_MS: u64 = 2;
+const CONTENT_RETRY_YIELD_ATTEMPTS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
@@ -42,18 +43,18 @@ pub(super) fn read<S: crate::store::Store>(
     validate_workspace_id(&request.workspace_id)?;
 
     let requested_path = normalize_path(&request.path)?;
-    let path = requested_path.clone();
-    if vfs.redactor.is_path_denied(&path) {
-        return Err(Error::SecretPathDenied(path));
+    if vfs.redactor.is_path_denied(&requested_path) {
+        return Err(Error::SecretPathDenied(requested_path));
     }
 
-    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
+    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
         return Err(Error::NotFound("file not found".to_string()));
     };
 
     let (mut content, version) = match (request.start_line, request.end_line) {
         (None, None) => {
-            let (meta, content) = load_content_with_retry(vfs, &request.workspace_id, &path, meta)?;
+            let (meta, content) =
+                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta)?;
             (content, meta.version)
         }
         (Some(start_line), Some(end_line)) => {
@@ -64,14 +65,15 @@ pub(super) fn read<S: crate::store::Store>(
                 )));
             }
 
-            let (meta, content) = load_content_with_retry(vfs, &request.workspace_id, &path, meta)?;
+            let (meta, content) =
+                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta)?;
             let extracted = extract_line_range(
                 &content,
                 start_line,
                 end_line,
                 vfs.policy.limits.max_read_bytes,
                 meta.size_bytes,
-                &path,
+                &requested_path,
             )?;
             (extracted, meta.version)
         }
@@ -82,18 +84,28 @@ pub(super) fn read<S: crate::store::Store>(
         }
     };
 
-    content = vfs.redactor.redact_text(&content);
+    let max_read_bytes = vfs.policy.limits.max_read_bytes;
+    let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
+    content = vfs
+        .redactor
+        .redact_text_owned_bounded(content, max_read_bytes_usize)
+        .map_err(|size| Error::FileTooLarge {
+            path: requested_path.clone(),
+            size_bytes: size as u64,
+            max_bytes: max_read_bytes,
+        })?;
+
     let bytes_read = content.len() as u64;
-    if bytes_read > vfs.policy.limits.max_read_bytes {
+    if bytes_read > max_read_bytes {
         return Err(Error::FileTooLarge {
-            path,
+            path: requested_path,
             size_bytes: bytes_read,
-            max_bytes: vfs.policy.limits.max_read_bytes,
+            max_bytes: max_read_bytes,
         });
     }
     Ok(ReadResponse {
+        path: requested_path.clone(),
         requested_path,
-        path,
         bytes_read,
         content,
         truncated: false,
@@ -149,7 +161,14 @@ fn load_content_with_retry<S: crate::store::Store>(
                 meta = vfs.store.get_meta(workspace_id, path)?.ok_or_else(|| {
                     Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
                 })?;
-                std::thread::sleep(Duration::from_millis(CONTENT_RETRY_BACKOFF_MS));
+                // Favor immediate rescheduling on early misses to reduce blocked-worker time.
+                if attempts <= CONTENT_RETRY_YIELD_ATTEMPTS {
+                    std::thread::yield_now();
+                } else {
+                    // `read` is synchronous; service runs it in a blocking worker.
+                    // Keep a tiny backoff here to avoid tight spinning on rapidly mutating rows.
+                    std::thread::sleep(Duration::from_millis(CONTENT_RETRY_BACKOFF_MS));
+                }
             }
         }
     }
@@ -172,13 +191,10 @@ fn extract_line_range(
     let mut end_pos: Option<usize> = None;
 
     while pos < bytes.len() {
-        let mut next = pos;
-        while next < bytes.len() && bytes[next] != b'\n' {
-            next += 1;
-        }
-        if next < bytes.len() && bytes[next] == b'\n' {
-            next += 1; // include newline
-        }
+        let next = match memchr::memchr(b'\n', &bytes[pos..]) {
+            Some(offset) => pos.saturating_add(offset).saturating_add(1), // include newline
+            None => bytes.len(),
+        };
 
         scanned_bytes = scanned_bytes.saturating_add((next - pos) as u64);
         if scanned_bytes > max_scan_bytes {
@@ -223,7 +239,7 @@ fn extract_line_range(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, FileRecord, Store};
+    use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::VfsPolicy;
 
     struct MissingContentStore {
@@ -250,7 +266,7 @@ mod tests {
             _path: &str,
             _content: &str,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -261,7 +277,7 @@ mod tests {
             _content: &str,
             _expected_version: u64,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -340,7 +356,7 @@ mod tests {
             _path: &str,
             _content: &str,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -351,7 +367,7 @@ mod tests {
             _content: &str,
             _expected_version: u64,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -425,7 +441,7 @@ mod tests {
             _path: &str,
             _content: &str,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -436,7 +452,7 @@ mod tests {
             _content: &str,
             _expected_version: u64,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 

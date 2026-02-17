@@ -32,9 +32,8 @@ pub(super) fn write<S: crate::store::Store>(
     validate_workspace_id(&request.workspace_id)?;
 
     let requested_path = normalize_path(&request.path)?;
-    let path = requested_path.clone();
-    if vfs.redactor.is_path_denied(&path) {
-        return Err(Error::SecretPathDenied(path));
+    if vfs.redactor.is_path_denied(&requested_path) {
+        return Err(Error::SecretPathDenied(requested_path));
     }
 
     if let Some(expected_version) = request.expected_version
@@ -52,21 +51,23 @@ pub(super) fn write<S: crate::store::Store>(
     })?;
     if bytes_written > vfs.policy.limits.max_write_bytes {
         return Err(Error::FileTooLarge {
-            path,
+            path: requested_path,
             size_bytes: bytes_written,
             max_bytes: vfs.policy.limits.max_write_bytes,
         });
     }
 
     let now_ms = now_ms();
-    let record = match request.expected_version {
-        None => {
-            vfs.store
-                .insert_file_new(&request.workspace_id, &path, &request.content, now_ms)?
-        }
+    let version = match request.expected_version {
+        None => vfs.store.insert_file_new(
+            &request.workspace_id,
+            &requested_path,
+            &request.content,
+            now_ms,
+        )?,
         Some(expected) => vfs.store.update_file_cas(
             &request.workspace_id,
-            &path,
+            &requested_path,
             &request.content,
             expected,
             now_ms,
@@ -74,10 +75,10 @@ pub(super) fn write<S: crate::store::Store>(
     };
 
     Ok(WriteResponse {
+        path: requested_path.clone(),
         requested_path,
-        path,
         bytes_written,
         created: request.expected_version.is_none(),
-        version: record.version,
+        version,
     })
 }

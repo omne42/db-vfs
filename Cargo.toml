@@ -16,6 +16,7 @@ diffy = "0.4"
 globset = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+memchr = "2"
 
 postgres = { version = "0.19", optional = true }
 rusqlite = { version = "0.32", optional = true }

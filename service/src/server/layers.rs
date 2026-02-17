@@ -10,6 +10,7 @@ use tracing::Instrument;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MISSING_IP_COUNT: AtomicU64 = AtomicU64::new(0);
+const FALLBACK_RATE_LIMIT_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 
 #[derive(Clone, Debug)]
 pub(super) struct RequestId(pub String);
@@ -33,29 +34,33 @@ pub(super) async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let client_ip = peer_ip(&req);
-    if client_ip.is_none() {
+    let peer_ip = peer_ip(&req);
+    let limiter_ip = match peer_ip {
+        Some(ip) => Some(ip),
+        None => Some(FALLBACK_RATE_LIMIT_IP),
+    };
+    if peer_ip.is_none() {
         let missing = MISSING_IP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         if missing == 1 || missing.is_multiple_of(1000) {
             tracing::warn!(
                 missing_ip_total = missing,
-                "request missing peer ip; rate limit bypassed"
+                fallback_ip = %FALLBACK_RATE_LIMIT_IP,
+                "request missing peer ip; applying shared fallback rate-limit bucket"
             );
         }
     }
 
-    if !state.inner.rate_limiter.allow(client_ip).await {
+    if !state.inner.rate_limiter.allow(limiter_ip).await {
         if let Some(audit) = state.inner.audit.as_ref()
             && let Some(op) = super::audit::op_from_path(req.uri().path())
         {
             let request_id = req
                 .extensions()
                 .get::<RequestId>()
-                .map(|value| value.0.clone())
-                .unwrap_or_else(generate_request_id);
+                .map_or_else(generate_request_id, |value| value.0.clone());
             audit.log(super::audit::minimal_event(
                 request_id,
-                client_ip,
+                peer_ip,
                 op,
                 StatusCode::TOO_MANY_REQUESTS.as_u16(),
                 Some("rate_limited"),
@@ -79,8 +84,7 @@ pub(super) async fn request_id_middleware(req: Request, next: Next) -> Response 
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| is_valid_request_id(value))
-        .map(ToString::to_string)
-        .unwrap_or_else(generate_request_id);
+        .map_or_else(generate_request_id, ToString::to_string);
 
     let mut req = req;
     req.extensions_mut().insert(RequestId(request_id.clone()));

@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use db_vfs_core::policy::VfsPolicy;
@@ -26,8 +26,13 @@ pub fn load_policy(
     let limit = u64::try_from(MAX_POLICY_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
-    let mut bytes = Vec::<u8>::new();
-    file.take(limit)
+    let capacity = usize::try_from(meta.len().min(limit))
+        .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
+        .min(MAX_POLICY_BYTES.saturating_add(1));
+    let mut bytes = Vec::<u8>::with_capacity(capacity);
+    let reader = BufReader::new(file);
+    reader
+        .take(limit)
         .read_to_end(&mut bytes)
         .map_err(|err| anyhow::anyhow!("failed to read policy file {}: {err}", path.display()))?;
     if bytes.len() > MAX_POLICY_BYTES {

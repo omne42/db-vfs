@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
+use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
 use db_vfs_core::{Error, Result};
 
-use super::util::{compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match};
+use super::util::{
+    compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
+    u64_decimal_len,
+};
 use super::{DbVfs, ScanLimitReason};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,17 +60,41 @@ pub struct GrepResponse {
 const MAX_GREP_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
+const META_PAGE_SIZE: usize = 2048;
+const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
+
+fn grep_match_json_bytes(path: &str, line_no: u64, text: &str, line_truncated: bool) -> usize {
+    // {"path":"...","line":123,"text":"...","line_truncated":false}
+    let bool_len = if line_truncated { 4 } else { 5 };
+    "{\"path\":\""
+        .len()
+        .saturating_add(json_escaped_str_len(path))
+        .saturating_add("\",\"line\":".len())
+        .saturating_add(u64_decimal_len(line_no))
+        .saturating_add(",\"text\":\"".len())
+        .saturating_add(json_escaped_str_len(text))
+        .saturating_add("\",\"line_truncated\":".len())
+        .saturating_add(bool_len)
+        .saturating_add("}".len())
+}
+
+fn clamp_char_boundary(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &input[..end]
+}
 
 fn summarize_pattern_for_error(pattern: &str) -> String {
     const MAX_BYTES: usize = 200;
     if pattern.len() <= MAX_BYTES {
         return pattern.to_string();
     }
-    let mut end = MAX_BYTES;
-    while end > 0 && !pattern.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    format!("{}…", &pattern[..end])
+    format!("{}…", clamp_char_boundary(pattern, MAX_BYTES))
 }
 
 fn validate_grep_query(query: &str, regex: bool) -> Result<()> {
@@ -161,136 +189,184 @@ pub(super) fn grep<S: crate::store::Store>(
         None
     };
 
-    let max_scan = vfs
-        .policy
-        .limits
-        .max_walk_entries
-        .min(vfs.policy.limits.max_walk_files)
-        .max(1);
-    let mut metas = vfs.store.list_metas_by_prefix(
-        &request.workspace_id,
-        &prefix,
-        max_scan.saturating_add(1),
-    )?;
-    let truncated_by_store_limit = metas.len() > max_scan;
-    if truncated_by_store_limit {
-        metas.truncate(max_scan);
-    }
-    let truncated_reason = if vfs.policy.limits.max_walk_entries <= vfs.policy.limits.max_walk_files
-    {
-        ScanLimitReason::Entries
-    } else {
-        ScanLimitReason::Files
-    };
+    let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
+    let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
 
-    let mut matches = Vec::<GrepMatch>::new();
+    let mut matches = Vec::<GrepMatch>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut skipped_too_large_files: u64 = 0;
     let mut skipped_traversal_skipped: u64 = 0;
     let mut skipped_secret_denied: u64 = 0;
     let mut skipped_glob_mismatch: u64 = 0;
     let mut skipped_missing_content: u64 = 0;
     let mut scanned_files: u64 = 0;
-    let mut scanned_entries: u64 = 0;
-    let mut scan_limit_reached = truncated_by_store_limit;
-    let mut scan_limit_reason: Option<ScanLimitReason> =
-        truncated_by_store_limit.then_some(truncated_reason);
+    let mut scanned_entries: usize = 0;
+    let mut scan_limit_reached = false;
+    let mut scan_limit_reason: Option<ScanLimitReason> = None;
+    let mut response_bytes: usize = GREP_RESPONSE_JSON_FIXED_OVERHEAD;
+    let has_redaction_rules = vfs.redactor.has_redact_rules();
+    let max_line_bytes = vfs.policy.limits.max_line_bytes;
+    let mut needs_sort = false;
+    let mut after: Option<String> = None;
 
-    for meta in metas {
-        scanned_entries = scanned_entries.saturating_add(1);
-
+    'scan: loop {
         if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
             scan_limit_reached = true;
             scan_limit_reason = Some(ScanLimitReason::Time);
             break;
         }
 
-        if vfs.traversal.is_path_skipped(&meta.path) {
-            skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
-            continue;
-        }
-
-        if vfs.redactor.is_path_denied(&meta.path) {
-            skipped_secret_denied = skipped_secret_denied.saturating_add(1);
-            continue;
-        }
-
-        if let Some(glob) = &file_glob
-            && !glob_is_match(glob, &meta.path)
-        {
-            skipped_glob_mismatch = skipped_glob_mismatch.saturating_add(1);
-            continue;
-        }
-
-        scanned_files = scanned_files.saturating_add(1);
-        if scanned_files as usize > vfs.policy.limits.max_walk_files {
+        let remaining_entries = max_scan_entries.saturating_sub(scanned_entries);
+        if remaining_entries == 0 {
             scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Files);
+            scan_limit_reason = Some(ScanLimitReason::Entries);
             break;
         }
 
-        if meta.size_bytes > vfs.policy.limits.max_read_bytes {
-            skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-            continue;
+        let page_budget = remaining_entries.min(META_PAGE_SIZE);
+        let fetch_limit = page_budget.saturating_add(1);
+        let mut metas = vfs.store.list_metas_by_prefix_page(
+            &request.workspace_id,
+            &prefix,
+            after.as_deref(),
+            fetch_limit,
+        )?;
+        let has_more = metas.len() > page_budget;
+        if has_more {
+            metas.truncate(page_budget);
         }
 
-        let Some(content) =
-            vfs.store
-                .get_content(&request.workspace_id, &meta.path, meta.version)?
-        else {
-            skipped_missing_content = skipped_missing_content.saturating_add(1);
-            continue;
-        };
+        if metas.is_empty() {
+            break;
+        }
+        after = metas.last().map(|meta| meta.path.clone());
 
-        for (idx, line) in content.lines().enumerate() {
+        for meta in metas {
+            let path = meta.path;
+            let meta_version = meta.version;
+            let meta_size_bytes = meta.size_bytes;
+
+            scanned_entries = scanned_entries.saturating_add(1);
+
             if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                 scan_limit_reached = true;
                 scan_limit_reason = Some(ScanLimitReason::Time);
-                break;
+                break 'scan;
             }
 
-            let ok = match &regex {
-                Some(regex) => regex.is_match(line),
-                None => line.contains(&request.query),
-            };
-            if !ok {
+            if vfs.traversal.is_path_skipped(&path) {
+                skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
                 continue;
             }
 
-            let max_line_bytes = vfs.policy.limits.max_line_bytes;
-            let mut line_truncated = line.len() > max_line_bytes;
-            let mut end = line.len().min(max_line_bytes);
-            while end > 0 && !line.is_char_boundary(end) {
-                end = end.saturating_sub(1);
+            if vfs.redactor.is_path_denied(&path) {
+                skipped_secret_denied = skipped_secret_denied.saturating_add(1);
+                continue;
             }
-            let mut text = vfs.redactor.redact_text(&line[..end]);
-            if text.len() > max_line_bytes {
-                line_truncated = true;
-                let mut out_end = max_line_bytes;
-                while out_end > 0 && !text.is_char_boundary(out_end) {
-                    out_end = out_end.saturating_sub(1);
-                }
-                text.truncate(out_end);
-            }
-            matches.push(GrepMatch {
-                path: meta.path.clone(),
-                line: idx.saturating_add(1) as u64,
-                text,
-                line_truncated,
-            });
 
-            if matches.len() >= vfs.policy.limits.max_results {
+            if let Some(glob) = &file_glob
+                && !glob_is_match(glob, &path)
+            {
+                skipped_glob_mismatch = skipped_glob_mismatch.saturating_add(1);
+                continue;
+            }
+
+            if scanned_files >= max_scan_files as u64 {
                 scan_limit_reached = true;
-                scan_limit_reason = Some(ScanLimitReason::Results);
-                break;
+                scan_limit_reason = Some(ScanLimitReason::Files);
+                break 'scan;
+            }
+            scanned_files = scanned_files.saturating_add(1);
+
+            if meta_size_bytes > vfs.policy.limits.max_read_bytes {
+                skipped_too_large_files = skipped_too_large_files.saturating_add(1);
+                continue;
+            }
+
+            let Some(content) =
+                vfs.store
+                    .get_content(&request.workspace_id, &path, meta_version)?
+            else {
+                skipped_missing_content = skipped_missing_content.saturating_add(1);
+                continue;
+            };
+
+            for (idx, line) in content.lines().enumerate() {
+                if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+                    scan_limit_reached = true;
+                    scan_limit_reason = Some(ScanLimitReason::Time);
+                    break 'scan;
+                }
+
+                let ok = match &regex {
+                    Some(regex) => regex.is_match(line),
+                    None => line.contains(&request.query),
+                };
+                if !ok {
+                    continue;
+                }
+
+                let line_slice = clamp_char_boundary(line, max_line_bytes);
+                let mut line_truncated = line_slice.len() < line.len();
+                let text = if has_redaction_rules {
+                    match vfs
+                        .redactor
+                        .redact_text_owned_bounded(line_slice.to_string(), max_line_bytes)
+                    {
+                        Ok(text) => text,
+                        Err(_) => {
+                            line_truncated = true;
+                            clamp_char_boundary(vfs.redactor.replacement(), max_line_bytes)
+                                .to_string()
+                        }
+                    }
+                } else {
+                    line_slice.to_string()
+                };
+                let line_no = idx.saturating_add(1) as u64;
+                // Budget against JSON-encoded output size (escaped strings + object structure).
+                let entry_bytes = grep_match_json_bytes(&path, line_no, &text, line_truncated)
+                    .saturating_add(usize::from(!matches.is_empty()));
+                let next_response_bytes = response_bytes.saturating_add(entry_bytes);
+                if next_response_bytes > MAX_SCAN_RESPONSE_BYTES {
+                    scan_limit_reached = true;
+                    scan_limit_reason = Some(ScanLimitReason::Results);
+                    break 'scan;
+                }
+                if matches.last().is_some_and(|prev| {
+                    prev.path > path || (prev.path == path && prev.line > line_no)
+                }) {
+                    needs_sort = true;
+                }
+                response_bytes = next_response_bytes;
+                matches.push(GrepMatch {
+                    path: path.clone(),
+                    line: line_no,
+                    text,
+                    line_truncated,
+                });
+
+                if matches.len() >= vfs.policy.limits.max_results {
+                    scan_limit_reached = true;
+                    scan_limit_reason = Some(ScanLimitReason::Results);
+                    break 'scan;
+                }
             }
         }
 
-        if scan_limit_reached && matches.len() >= vfs.policy.limits.max_results {
+        if has_more && scanned_entries >= max_scan_entries {
+            scan_limit_reached = true;
+            scan_limit_reason = Some(ScanLimitReason::Entries);
+            break;
+        }
+
+        if !has_more {
             break;
         }
     }
 
-    matches.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    if needs_sort {
+        matches.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    }
     Ok(GrepResponse {
         matches,
         truncated: scan_limit_reached,
@@ -303,7 +379,7 @@ pub(super) fn grep<S: crate::store::Store>(
         scan_limit_reached,
         scan_limit_reason,
         elapsed_ms: elapsed_ms(&started),
-        scanned_entries,
+        scanned_entries: scanned_entries as u64,
     })
 }
 
@@ -311,7 +387,7 @@ pub(super) fn grep<S: crate::store::Store>(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, FileRecord, Store};
+    use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::VfsPolicy;
 
     struct DummyStore;
@@ -336,7 +412,7 @@ mod tests {
             _path: &str,
             _content: &str,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -347,7 +423,7 @@ mod tests {
             _content: &str,
             _expected_version: u64,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -432,7 +508,7 @@ mod tests {
             _path: &str,
             _content: &str,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 
@@ -443,7 +519,7 @@ mod tests {
             _content: &str,
             _expected_version: u64,
             _now_ms: u64,
-        ) -> Result<FileRecord> {
+        ) -> Result<u64> {
             unimplemented!()
         }
 

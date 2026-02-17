@@ -40,6 +40,14 @@ fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) ->
     }
 }
 
+fn redact_path_owned(redactor: &db_vfs_core::redaction::SecretRedactor, path: String) -> String {
+    if redactor.is_path_denied(&path) {
+        "<secret>".to_string()
+    } else {
+        path
+    }
+}
+
 fn audit_event_base(
     request_id: String,
     peer: SocketAddr,
@@ -234,11 +242,11 @@ fn audit_err_hide_secret_path(
     event: &mut AuditEvent,
     body: &super::ErrorBody,
 ) {
-    if let Some(path) = event.requested_path.clone() {
-        event.requested_path = Some(redact_path(&state.inner.redactor, &path));
+    if let Some(path) = event.requested_path.take() {
+        event.requested_path = Some(redact_path_owned(&state.inner.redactor, path));
     }
-    if let Some(path) = event.path.clone() {
-        event.path = Some(redact_path(&state.inner.redactor, &path));
+    if let Some(path) = event.path.take() {
+        event.path = Some(redact_path_owned(&state.inner.redactor, path));
     }
     if body.code == "secret_path_denied" {
         event.requested_path = Some("<secret>".to_string());
@@ -275,13 +283,15 @@ fn audit_ok_delete(state: &super::AppState, event: &mut AuditEvent, resp: &Delet
 }
 
 fn audit_redact_scan_fields(state: &super::AppState, event: &mut AuditEvent) {
-    if let Some(prefix) = event.path_prefix.as_deref() {
-        event.path_prefix = Some(redact_path(&state.inner.redactor, prefix));
+    if let Some(prefix) = event.path_prefix.take() {
+        event.path_prefix = Some(redact_path_owned(&state.inner.redactor, prefix));
     }
-    if let Some(pattern) = event.glob_pattern.as_deref()
-        && state.inner.redactor.is_path_denied(pattern)
-    {
-        event.glob_pattern = Some("<secret>".to_string());
+    if let Some(pattern) = event.glob_pattern.take() {
+        event.glob_pattern = Some(if state.inner.redactor.is_path_denied(&pattern) {
+            "<secret>".to_string()
+        } else {
+            pattern
+        });
     }
 }
 
@@ -496,7 +506,7 @@ pub(super) async fn read(
         payload,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
-        |vfs, req| vfs.read(req),
+        DbVfs::read,
         AuditHooks {
             ok: audit_ok_read,
             err: audit_err_hide_secret_path,
@@ -519,7 +529,7 @@ pub(super) async fn write(
         payload,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
-        |vfs, req| vfs.write(req),
+        DbVfs::write,
         AuditHooks {
             ok: audit_ok_write,
             err: audit_err_hide_secret_path,
@@ -542,7 +552,7 @@ pub(super) async fn patch(
         payload,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
-        |vfs, req| vfs.apply_unified_patch(req),
+        DbVfs::apply_unified_patch,
         AuditHooks {
             ok: audit_ok_patch,
             err: audit_err_hide_secret_path,
@@ -565,7 +575,7 @@ pub(super) async fn delete(
         payload,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
-        |vfs, req| vfs.delete(req),
+        DbVfs::delete,
         AuditHooks {
             ok: audit_ok_delete,
             err: audit_err_hide_secret_path,
@@ -598,7 +608,7 @@ pub(super) async fn glob(
             grep_regex: None,
             grep_query_len: None,
         },
-        |vfs, req| vfs.glob(req),
+        DbVfs::glob,
         AuditHooks {
             ok: audit_ok_glob,
             err: audit_err_redact_scan_fields,
@@ -634,7 +644,7 @@ pub(super) async fn grep(
             grep_regex: Some(req.regex),
             grep_query_len: Some(req.query.len()),
         },
-        |vfs, req| vfs.grep(req),
+        DbVfs::grep,
         AuditHooks {
             ok: audit_ok_grep,
             err: audit_err_redact_scan_fields,

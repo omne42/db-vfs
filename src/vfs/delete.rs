@@ -32,9 +32,8 @@ pub(super) fn delete<S: crate::store::Store>(
     validate_workspace_id(&request.workspace_id)?;
 
     let requested_path = normalize_path(&request.path)?;
-    let path = requested_path.clone();
-    if vfs.redactor.is_path_denied(&path) {
-        return Err(Error::SecretPathDenied(path));
+    if vfs.redactor.is_path_denied(&requested_path) {
+        return Err(Error::SecretPathDenied(requested_path));
     }
 
     if let Some(expected_version) = request.expected_version
@@ -46,19 +45,21 @@ pub(super) fn delete<S: crate::store::Store>(
         )));
     }
 
-    let outcome = vfs
-        .store
-        .delete_file(&request.workspace_id, &path, request.expected_version)?;
+    let outcome = vfs.store.delete_file(
+        &request.workspace_id,
+        &requested_path,
+        request.expected_version,
+    )?;
 
     match outcome {
         DeleteOutcome::Deleted => Ok(DeleteResponse {
+            path: requested_path.clone(),
             requested_path,
-            path,
             deleted: true,
         }),
         DeleteOutcome::NotFound if request.ignore_missing => Ok(DeleteResponse {
+            path: requested_path.clone(),
             requested_path,
-            path,
             deleted: false,
         }),
         DeleteOutcome::NotFound => Err(Error::NotFound("file not found".to_string())),

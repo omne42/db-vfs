@@ -29,6 +29,26 @@ pub(super) fn elapsed_ms(started: &Instant) -> u64 {
     }
 }
 
+pub(super) fn json_escaped_str_len(input: &str) -> usize {
+    input
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' => 2,
+            '\u{08}' | '\u{0C}' | '\n' | '\r' | '\t' => 2,
+            '\u{2028}' | '\u{2029}' => 6,
+            c if c <= '\u{1F}' => 6,
+            _ => ch.len_utf8(),
+        })
+        .sum()
+}
+
+pub(super) fn u64_decimal_len(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    value.ilog10() as usize + 1
+}
+
 pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
     if pattern.len() > MAX_GLOB_PATTERN_BYTES {
         return Err(Error::InvalidPath(format!(
@@ -60,7 +80,30 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
         .map_err(|err| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {err}")))
 }
 
+fn is_canonical_runtime_path(path: &str) -> bool {
+    path == path.trim()
+        && !path.is_empty()
+        && !path.starts_with('/')
+        && !path.starts_with("./")
+        && !path.starts_with("../")
+        && path != "."
+        && path != ".."
+        && !path.contains('\\')
+        && !path.contains("//")
+        && !path.contains("/./")
+        && !path.contains("/../")
+        && !path.ends_with('/')
+        && !path.ends_with("/.")
+        && !path.ends_with("/..")
+        && !path.contains('\0')
+        && !path.chars().any(char::is_control)
+}
+
 pub(super) fn glob_is_match(glob: &GlobSet, path: &str) -> bool {
+    if is_canonical_runtime_path(path) {
+        return glob.is_match(std::path::Path::new(path));
+    }
+
     let mut normalized = path.trim().replace('\\', "/");
     while normalized.starts_with("./") {
         normalized.drain(..2);
@@ -104,4 +147,33 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
         prefix.push('/');
     }
     Some(prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_escaped_str_len_counts_escapes() {
+        assert_eq!(json_escaped_str_len("abc"), 3);
+        assert_eq!(json_escaped_str_len("\"\\\n"), 6);
+        assert_eq!(json_escaped_str_len("\u{2028}"), 6);
+    }
+
+    #[test]
+    fn u64_decimal_len_handles_zero_and_max() {
+        assert_eq!(u64_decimal_len(0), 1);
+        assert_eq!(u64_decimal_len(9), 1);
+        assert_eq!(u64_decimal_len(10), 2);
+        assert_eq!(u64_decimal_len(u64::MAX), 20);
+    }
+
+    #[test]
+    fn canonical_runtime_path_detection_is_strict() {
+        assert!(is_canonical_runtime_path("docs/a.txt"));
+        assert!(!is_canonical_runtime_path("./docs/a.txt"));
+        assert!(!is_canonical_runtime_path("/docs/a.txt"));
+        assert!(!is_canonical_runtime_path("docs//a.txt"));
+        assert!(!is_canonical_runtime_path("docs/a.txt/"));
+    }
 }

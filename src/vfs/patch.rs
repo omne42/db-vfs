@@ -31,10 +31,15 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs.ensure_allowed(vfs.policy.permissions.patch, "patch")?;
     validate_workspace_id(&request.workspace_id)?;
 
-    let requested_path = request.path.clone();
-    let path = normalize_path(&request.path)?;
-    if vfs.redactor.is_path_denied(&path) {
-        return Err(Error::SecretPathDenied(path));
+    let requested_path = normalize_path(&request.path)?;
+    if vfs.redactor.is_path_denied(&requested_path) {
+        return Err(Error::SecretPathDenied(requested_path));
+    }
+    if request.expected_version > i64::MAX as u64 {
+        return Err(Error::Conflict(format!(
+            "expected_version is too large (max {})",
+            i64::MAX
+        )));
     }
 
     let max_patch_bytes = vfs
@@ -62,43 +67,45 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         });
     }
 
-    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
+    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
         return Err(Error::NotFound(format!(
             "file not found (workspace_id={}, path={})",
-            request.workspace_id, path
+            request.workspace_id, requested_path
         )));
     };
 
     if meta.version != request.expected_version {
         return Err(Error::Conflict(format!(
             "version mismatch (workspace_id={}, path={}, expected_version={}, actual_version={})",
-            request.workspace_id, path, request.expected_version, meta.version
+            request.workspace_id, requested_path, request.expected_version, meta.version
         )));
     }
 
     let max_fetch_bytes = vfs.policy.limits.max_read_bytes;
     if meta.size_bytes > max_fetch_bytes {
         return Err(Error::FileTooLarge {
-            path,
+            path: requested_path,
             size_bytes: meta.size_bytes,
             max_bytes: max_fetch_bytes,
         });
     }
 
-    let Some(existing_content) =
-        vfs.store
-            .get_content(&request.workspace_id, &path, request.expected_version)?
+    let Some(existing_content) = vfs.store.get_content(
+        &request.workspace_id,
+        &requested_path,
+        request.expected_version,
+    )?
     else {
-        let Some(now_meta) = vfs.store.get_meta(&request.workspace_id, &path)? else {
+        let Some(now_meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
             return Err(Error::NotFound(format!(
                 "file not found (workspace_id={}, path={})",
-                request.workspace_id, path
+                request.workspace_id, requested_path
             )));
         };
         if now_meta.version != request.expected_version {
             return Err(Error::Conflict(format!(
                 "version mismatch (workspace_id={}, path={}, expected_version={}, actual_version={})",
-                request.workspace_id, path, request.expected_version, now_meta.version
+                request.workspace_id, requested_path, request.expected_version, now_meta.version
             )));
         }
         return Err(Error::Db("file content could not be loaded".to_string()));
@@ -110,25 +117,25 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     let bytes_written = updated.len() as u64;
     if bytes_written > vfs.policy.limits.max_write_bytes {
         return Err(Error::FileTooLarge {
-            path,
+            path: requested_path,
             size_bytes: bytes_written,
             max_bytes: vfs.policy.limits.max_write_bytes,
         });
     }
 
     let now_ms = now_ms();
-    let record = vfs.store.update_file_cas(
+    let version = vfs.store.update_file_cas(
         &request.workspace_id,
-        &path,
+        &requested_path,
         &updated,
         request.expected_version,
         now_ms,
     )?;
 
     Ok(PatchResponse {
+        path: requested_path.clone(),
         requested_path,
-        path,
         bytes_written,
-        version: record.version,
+        version,
     })
 }
