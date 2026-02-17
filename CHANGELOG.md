@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - store/pagination: restore compatibility for legacy `Store` implementations by adding default cursor-page fallback when only prefix listing is implemented.
 - store/pagination: optimize legacy fallback cursor scanning by avoiding redundant filtering work and adapting growth strategy based on cursor position.
 - audit: improve lock-path derivation, batch flush behavior, and failure handling for early rejection paths.
-- service/middleware: avoid creating rate-limit buckets for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
+- service/auth: enforce constant-time full-scan token matching path while still rejecting duplicate configured token hashes.
+- core/vfs: centralize scan-response byte cap constant so policy validation and `glob`/`grep` runtime truncation stay aligned.
+- service/middleware: apply a shared fallback rate-limit bucket for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
 
 ### Internal
 
