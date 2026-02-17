@@ -21,6 +21,14 @@ if [[ -x "$llms_script" ]]; then
   "$llms_script" --check
 fi
 
+strict_clippy_script="$repo_root/scripts/clippy-strict.sh"
+if [[ ! -x "$strict_clippy_script" ]]; then
+  echo "gate: missing or non-executable strict clippy script: $strict_clippy_script" >&2
+  exit 1
+fi
+echo "gate: strict clippy profile" >&2
+"$strict_clippy_script"
+
 echo "gate: rust (fmt/check/clippy/test)" >&2
 (
   cd "$repo_root"

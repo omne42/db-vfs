@@ -31,9 +31,9 @@ struct AppState {
 
 struct AppInner {
     backend: backend::Backend,
-    policy: ValidatedVfsPolicy,
-    redactor: SecretRedactor,
-    traversal: TraversalSkipper,
+    policy: Arc<ValidatedVfsPolicy>,
+    redactor: Arc<SecretRedactor>,
+    traversal: Arc<TraversalSkipper>,
     audit: Option<audit::AuditLogger>,
     auth: auth::AuthMode,
     rate_limiter: rate_limiter::RateLimiter,
@@ -77,6 +77,7 @@ const CODE_INPUT_TOO_LARGE: &str = "input_too_large";
 const CODE_FILE_TOO_LARGE: &str = "file_too_large";
 const CODE_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const CODE_TIMEOUT: &str = "timeout";
+const RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
 
 fn status_for_error_code(code: &str) -> StatusCode {
     match code {
@@ -131,6 +132,20 @@ fn build_state(
     mut policy: ValidatedVfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<(AppState, usize)> {
+    let estimated_scan_inflight_bytes = policy
+        .limits
+        .max_read_bytes
+        .saturating_mul(policy.limits.max_concurrency_scan as u64);
+    if estimated_scan_inflight_bytes > RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES {
+        tracing::warn!(
+            max_read_bytes = policy.limits.max_read_bytes,
+            max_concurrency_scan = policy.limits.max_concurrency_scan,
+            estimated_scan_inflight_bytes,
+            recommended_max_scan_inflight_bytes = RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES,
+            "scan memory budget is high; consider lowering limits.max_read_bytes or limits.max_concurrency_scan"
+        );
+    }
+
     let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
     let traversal = TraversalSkipper::from_rules(&policy.traversal).map_err(anyhow::Error::msg)?;
     let io_concurrency = policy.limits.max_concurrency_io;
@@ -142,11 +157,10 @@ fn build_state(
             .audit
             .flush_every_events
             .unwrap_or(audit::DEFAULT_AUDIT_FLUSH_EVERY_EVENTS);
-        let flush_max_interval = policy
-            .audit
-            .flush_max_interval_ms
-            .map(Duration::from_millis)
-            .unwrap_or(audit::DEFAULT_AUDIT_FLUSH_MAX_INTERVAL);
+        let flush_max_interval = policy.audit.flush_max_interval_ms.map_or(
+            audit::DEFAULT_AUDIT_FLUSH_MAX_INTERVAL,
+            Duration::from_millis,
+        );
 
         match audit::AuditLogger::new(path, flush_every_events, flush_max_interval) {
             Ok(logger) => Some(logger),
@@ -183,9 +197,9 @@ fn build_state(
     let state = AppState {
         inner: Arc::new(AppInner {
             backend,
-            policy,
-            redactor,
-            traversal,
+            policy: Arc::new(policy),
+            redactor: Arc::new(redactor),
+            traversal: Arc::new(traversal),
             audit,
             auth,
             rate_limiter,

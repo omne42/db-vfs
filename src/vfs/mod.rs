@@ -6,6 +6,8 @@ mod read;
 mod util;
 mod write;
 
+use std::sync::Arc;
+
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
@@ -24,9 +26,9 @@ pub use write::{WriteRequest, WriteResponse};
 
 #[derive(Debug)]
 pub struct DbVfs<S> {
-    policy: ValidatedVfsPolicy,
-    redactor: SecretRedactor,
-    traversal: TraversalSkipper,
+    policy: Arc<ValidatedVfsPolicy>,
+    redactor: Arc<SecretRedactor>,
+    traversal: Arc<TraversalSkipper>,
     store: S,
 }
 
@@ -41,9 +43,9 @@ impl<S: Store> DbVfs<S> {
         let policy = ValidatedVfsPolicy::new(policy)?;
         let (redactor, traversal) = Self::build_matchers(&policy)?;
         Ok(Self {
-            policy,
-            redactor,
-            traversal,
+            policy: Arc::new(policy),
+            redactor: Arc::new(redactor),
+            traversal: Arc::new(traversal),
             store,
         })
     }
@@ -51,9 +53,9 @@ impl<S: Store> DbVfs<S> {
     pub fn new_validated(store: S, policy: ValidatedVfsPolicy) -> Result<Self> {
         let (redactor, traversal) = Self::build_matchers(&policy)?;
         Ok(Self {
-            policy,
-            redactor,
-            traversal,
+            policy: Arc::new(policy),
+            redactor: Arc::new(redactor),
+            traversal: Arc::new(traversal),
             store,
         })
     }
@@ -66,9 +68,9 @@ impl<S: Store> DbVfs<S> {
         let policy = ValidatedVfsPolicy::new(policy)?;
         let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
-            policy,
-            redactor,
-            traversal,
+            policy: Arc::new(policy),
+            redactor: Arc::new(redactor),
+            traversal: Arc::new(traversal),
             store,
         })
     }
@@ -81,29 +83,29 @@ impl<S: Store> DbVfs<S> {
     ) -> Result<Self> {
         let policy = ValidatedVfsPolicy::new(policy)?;
         Ok(Self {
-            policy,
-            redactor,
-            traversal,
+            policy: Arc::new(policy),
+            redactor: Arc::new(redactor),
+            traversal: Arc::new(traversal),
             store,
         })
     }
 
     pub fn new_with_matchers_validated(
         store: S,
-        policy: ValidatedVfsPolicy,
-        redactor: SecretRedactor,
-        traversal: TraversalSkipper,
+        policy: Arc<ValidatedVfsPolicy>,
+        redactor: impl Into<Arc<SecretRedactor>>,
+        traversal: impl Into<Arc<TraversalSkipper>>,
     ) -> Self {
         Self {
             policy,
-            redactor,
-            traversal,
+            redactor: redactor.into(),
+            traversal: traversal.into(),
             store,
         }
     }
 
     pub fn policy(&self) -> &VfsPolicy {
-        &self.policy
+        self.policy.as_ref()
     }
 
     pub fn store_mut(&mut self) -> &mut S {

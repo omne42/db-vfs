@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
+- service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
 - vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
 - docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
@@ -27,12 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
+- store/pagination: restore compatibility for legacy `Store` implementations by adding default cursor-page fallback when only prefix listing is implemented.
+- store/pagination: optimize legacy fallback cursor scanning by avoiding redundant filtering work and adapting growth strategy based on cursor position.
 - audit: improve lock-path derivation, batch flush behavior, and failure handling for early rejection paths.
 - service/middleware: avoid creating rate-limit buckets for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
 
 ### Internal
 
 - ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
+- ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
 - tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 

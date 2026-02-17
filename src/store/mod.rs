@@ -75,7 +75,7 @@ pub trait Store {
         path: &str,
         content: &str,
         now_ms: u64,
-    ) -> Result<FileRecord>;
+    ) -> Result<u64>;
 
     fn update_file_cas(
         &mut self,
@@ -84,7 +84,7 @@ pub trait Store {
         content: &str,
         expected_version: u64,
         now_ms: u64,
-    ) -> Result<FileRecord>;
+    ) -> Result<u64>;
 
     /// Deletes a file for the given workspace/path.
     ///
@@ -104,16 +104,87 @@ pub trait Store {
         prefix: &str,
         limit: usize,
     ) -> Result<Vec<FileMeta>>;
+
+    fn list_metas_by_prefix_page(
+        &mut self,
+        workspace_id: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileMeta>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(after) = after else {
+            return self.list_metas_by_prefix(workspace_id, prefix, limit);
+        };
+
+        // Compatibility slow-path for legacy stores that only implement
+        // `list_metas_by_prefix`. This may require repeated prefix scans.
+        // Implement `list_metas_by_prefix_page` in concrete stores to avoid
+        // this fallback and provide predictable large-prefix performance.
+        let mut fetch_limit = limit.max(64);
+        loop {
+            let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
+            let rows_len = rows.len();
+            let split = rows.partition_point(|meta| meta.path.as_str() <= after);
+            let mut out = rows.split_off(split);
+            if out.len() >= limit {
+                out.truncate(limit);
+                return Ok(out);
+            }
+            if rows_len < fetch_limit {
+                return Ok(out);
+            }
+
+            let next = if split == rows_len {
+                fetch_limit.saturating_mul(2)
+            } else {
+                let missing = limit.saturating_sub(out.len());
+                fetch_limit.saturating_add(missing.max(fetch_limit / 2))
+            };
+            if next == fetch_limit {
+                return Ok(out);
+            }
+            fetch_limit = next;
+        }
+    }
 }
 
 fn db_err(err: impl std::fmt::Display) -> Error {
     Error::Db(err.to_string())
 }
 
-fn make_prefix_bounds(prefix: &str) -> (String, String) {
-    let lower = prefix.to_string();
-    let upper = format!("{prefix}\u{10FFFF}");
-    (lower, upper)
+fn make_prefix_bounds(prefix: &str) -> (String, Option<String>) {
+    (prefix.to_string(), prefix_successor(prefix))
+}
+
+fn prefix_successor(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+
+    let mut chars: Vec<char> = prefix.chars().collect();
+    for idx in (0..chars.len()).rev() {
+        if let Some(next) = next_scalar_char(chars[idx]) {
+            chars[idx] = next;
+            chars.truncate(idx + 1);
+            return Some(chars.into_iter().collect());
+        }
+    }
+
+    None
+}
+
+fn next_scalar_char(ch: char) -> Option<char> {
+    let mut code = (ch as u32).saturating_add(1);
+    while code <= char::MAX as u32 {
+        if let Some(next) = char::from_u32(code) {
+            return Some(next);
+        }
+        code = code.saturating_add(1);
+    }
+    None
 }
 
 fn next_version(expected_version: u64) -> Result<u64> {
@@ -203,13 +274,107 @@ mod tests {
 
     #[test]
     fn make_prefix_bounds_handles_empty_and_unicode() {
-        assert_eq!(
-            make_prefix_bounds(""),
-            ("".to_string(), "\u{10FFFF}".to_string())
-        );
+        assert_eq!(make_prefix_bounds(""), ("".to_string(), None));
 
         let (lower, upper) = make_prefix_bounds("文档/");
         assert_eq!(lower, "文档/");
-        assert_eq!(upper, "文档/\u{10FFFF}");
+        assert_eq!(upper, Some("文档0".to_string()));
+    }
+
+    #[test]
+    fn make_prefix_bounds_covers_max_scalar_tail() {
+        let (lower, upper) = make_prefix_bounds("a");
+        assert_eq!(lower, "a");
+        assert_eq!(upper, Some("b".to_string()));
+
+        let candidate = "a\u{10FFFF}x".to_string();
+        assert!(candidate.starts_with(&lower));
+        assert!(candidate < upper.expect("upper bound should exist"));
+    }
+
+    #[derive(Default)]
+    struct PrefixOnlyStore {
+        paths: Vec<String>,
+    }
+
+    impl Store for PrefixOnlyStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self
+                .paths
+                .iter()
+                .filter(|path| path.starts_with(prefix))
+                .take(limit)
+                .map(|path| FileMeta {
+                    path: path.clone(),
+                    size_bytes: 0,
+                    version: 1,
+                    updated_at_ms: 0,
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn default_page_impl_supports_cursor_pagination_with_legacy_stores() {
+        let mut store = PrefixOnlyStore {
+            paths: vec![
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+                "docs/c.txt".to_string(),
+            ],
+        };
+        let page = store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
+            .expect("cursor pagination fallback should work");
+        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
     }
 }
