@@ -44,10 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - store/pagination: make legacy cursor-pagination fallback robust against unsorted `list_metas_by_prefix` implementations by sorting before cursor partitioning.
 - service/rate-limiter: avoid preallocating large shard/capacity structures when rate limiting is disabled.
 - service/rate-limiter: reduce mutex hold times on hot allow/prune paths, avoid hash-index truncation on 32-bit targets, and use fused token refill math in bucket updates.
+- service/rate-limiter: reduce per-request shard-index overhead by replacing generic hasher-based indexing with lightweight IP-key mapping.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
 - vfs/read+grep+patch: enforce actual loaded content size against `limits.max_read_bytes` even when persisted metadata is stale/inconsistent, preventing oversized processing and tightening policy correctness.
+- vfs/grep: reuse prebuilt literal searcher state during line scans to cut repeated per-line matcher setup overhead.
+- service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
 
 ### Internal
 

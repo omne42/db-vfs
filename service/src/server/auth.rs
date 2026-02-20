@@ -66,7 +66,7 @@ pub(super) fn build_auth_mode(
             if value.starts_with("sha256:") {
                 parse_token_sha256(value)?
             } else {
-                hash_token_sha256(value)
+                hash_plaintext_token_sha256(value, &format!("auth token env var {env:?}"))?
             }
         } else {
             anyhow::bail!("auth token entry {idx} is missing token / token_env_var");
@@ -123,6 +123,17 @@ pub(super) fn workspace_allowed(patterns: &[String], workspace_id: &str) -> bool
 fn hash_token_sha256(token: &str) -> [u8; 32] {
     let digest = Sha256::digest(token.as_bytes());
     digest.into()
+}
+
+fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<[u8; 32]> {
+    if token.len() > MAX_BEARER_TOKEN_BYTES {
+        anyhow::bail!(
+            "{source} is too large ({} bytes; max {} bytes)",
+            token.len(),
+            MAX_BEARER_TOKEN_BYTES
+        );
+    }
+    Ok(hash_token_sha256(token))
 }
 
 fn parse_token_sha256(token: &str) -> anyhow::Result<[u8; 32]> {
@@ -277,6 +288,16 @@ mod tests {
 
         let ok = parse_token_sha256(&format!("sha256:{}", "a".repeat(64))).unwrap();
         assert_eq!(ok.len(), 32);
+    }
+
+    #[test]
+    fn hash_plaintext_token_rejects_oversized_token() {
+        let err = hash_plaintext_token_sha256(
+            &"a".repeat(MAX_BEARER_TOKEN_BYTES + 1),
+            "auth token env var \"DB_VFS_TOKEN\"",
+        )
+        .expect_err("oversized plaintext token must be rejected");
+        assert!(err.to_string().contains("max 4096 bytes"));
     }
 
     #[test]

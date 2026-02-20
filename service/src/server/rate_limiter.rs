@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,11 +142,19 @@ impl RateLimiter {
     }
 
     fn shard_index(&self, ip: &IpAddr) -> usize {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        ip.hash(&mut hasher);
-        let shard_count = self.shards.len() as u64;
-        let idx = hasher.finish() % shard_count;
-        usize::try_from(idx).unwrap_or(0)
+        let shard_count = self.shards.len();
+        let key = match ip {
+            IpAddr::V4(v4) => u64::from(u32::from_be_bytes(v4.octets())),
+            IpAddr::V6(v6) => {
+                let mut hash = 0xcbf29ce484222325u64;
+                for segment in v6.segments() {
+                    hash ^= u64::from(segment);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                hash
+            }
+        };
+        (key % shard_count as u64) as usize
     }
 
     fn try_reserve_ip_slot(&self) -> bool {
