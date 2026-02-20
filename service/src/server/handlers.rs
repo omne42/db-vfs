@@ -25,11 +25,27 @@ fn audit_preview(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_string();
     }
-    let mut end = max_bytes;
+    if max_bytes == 0 {
+        return String::new();
+    }
+
+    const ELLIPSIS: &str = "…";
+    if max_bytes <= ELLIPSIS.len() {
+        let mut end = max_bytes;
+        while end > 0 && !input.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        return input[..end].to_string();
+    }
+
+    let mut end = max_bytes.saturating_sub(ELLIPSIS.len());
     while end > 0 && !input.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    format!("{}…", &input[..end])
+    let mut out = String::with_capacity(end.saturating_add(ELLIPSIS.len()));
+    out.push_str(&input[..end]);
+    out.push_str(ELLIPSIS);
+    out
 }
 
 fn is_path_or_descendant_denied(
@@ -686,7 +702,10 @@ pub(super) async fn grep(
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_permit_with_budget, redact_glob_pattern, redact_path, redact_path_owned};
+    use super::{
+        acquire_permit_with_budget, audit_preview, redact_glob_pattern, redact_path,
+        redact_path_owned,
+    };
     use axum::http::StatusCode;
     use db_vfs_core::policy::SecretRules;
     use db_vfs_core::redaction::SecretRedactor;
@@ -715,5 +734,20 @@ mod tests {
             .expect_err("zero budget should time out");
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
         assert_eq!(body.0.code, "timeout");
+    }
+
+    #[test]
+    fn audit_preview_honors_byte_budget() {
+        let ascii = audit_preview("abcdef", 4);
+        assert_eq!(ascii, "a…");
+        assert!(ascii.len() <= 4);
+
+        let unicode = audit_preview("你好世界", 7);
+        assert_eq!(unicode, "你…");
+        assert!(unicode.len() <= 7);
+
+        let tiny = audit_preview("abcdef", 2);
+        assert_eq!(tiny, "ab");
+        assert!(tiny.len() <= 2);
     }
 }

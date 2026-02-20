@@ -362,6 +362,10 @@ pub(super) fn grep<S: crate::store::Store>(
                 continue;
             }
 
+            if literal_query_spans_lines {
+                continue;
+            }
+
             let Some(content) =
                 vfs.store
                     .get_content(&request.workspace_id, &path, meta_version)?
@@ -372,9 +376,6 @@ pub(super) fn grep<S: crate::store::Store>(
             let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
             if content_size_bytes > max_read_bytes {
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                continue;
-            }
-            if literal_query_spans_lines {
                 continue;
             }
             if let Some(finder) = literal_finder.as_ref()
@@ -743,6 +744,106 @@ mod tests {
 
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
+    }
+
+    struct NewlineLiteralNoContentStore {
+        meta: FileMeta,
+        content_calls: usize,
+    }
+
+    impl Store for NewlineLiteralNoContentStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            self.content_calls = self.content_calls.saturating_add(1);
+            Ok(Some("unused".to_string()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            if self.meta.path.starts_with(prefix) {
+                Ok(vec![self.meta.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[test]
+    fn grep_literal_query_spanning_newline_skips_content_load() {
+        let store = NewlineLiteralNoContentStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content_calls: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "x\ny".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.scanned_files, 1);
+        assert_eq!(vfs.store_mut().content_calls, 0);
     }
 
     struct NonMonotonicPageStore {
