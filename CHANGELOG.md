@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
 - core/path: add an ASCII fast path for `workspace_id` validation to reduce per-request character-class overhead on common hot-path inputs.
