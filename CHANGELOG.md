@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/grep: short-circuit newline-containing literal queries before file-size gating so impossible line matches no longer inflate `skipped_too_large_files`, while also skipping unnecessary hot-path checks.
+- vfs/read: simplify newline-scan index arithmetic in line-range extraction (bounds-proven `+` instead of saturating math) to trim per-line CPU overhead.
 - vfs/grep: short-circuit literal queries containing `\n` before content fetch so line-based impossible matches no longer trigger unnecessary `get_content` I/O on scanned files.
 - service/audit: make `audit_preview` enforce the configured byte budget even when adding the truncation marker, avoiding oversize preview fields on truncated inputs.
 - vfs/grep: skip impossible per-line scan work when a literal query contains `\n` (line-based grep cannot match newline-delimited literals), and trim per-match hot-path overhead by using a saturating line counter plus deferred text allocation until response-byte budget passes.

@@ -223,7 +223,7 @@ fn extract_line_range(
 
     while pos < bytes.len() {
         let next = match memchr::memchr(b'\n', &bytes[pos..]) {
-            Some(offset) => pos.saturating_add(offset).saturating_add(1), // include newline
+            Some(offset) => pos + offset + 1, // include newline
             None => bytes.len(),
         };
 
