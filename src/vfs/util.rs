@@ -5,7 +5,7 @@ use globset::GlobMatcher;
 
 use db_vfs_core::glob_utils::{
     build_glob_from_normalized, normalize_glob_pattern_for_matching,
-    validate_root_relative_glob_pattern,
+    validate_normalized_root_relative_glob_pattern,
 };
 use db_vfs_core::{Error, Result};
 
@@ -78,7 +78,7 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
             MAX_GLOB_PATTERN_BYTES
         )));
     }
-    validate_root_relative_glob_pattern(&normalized).map_err(|err| {
+    validate_normalized_root_relative_glob_pattern(&normalized).map_err(|err| {
         Error::InvalidPath(format!(
             "invalid glob pattern {pattern:?}: {}",
             err.as_message()

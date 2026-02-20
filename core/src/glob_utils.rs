@@ -46,10 +46,9 @@ pub fn normalize_glob_pattern_for_matching(pattern: &str) -> String {
 }
 
 /// Validate that a glob pattern is root-relative for `db-vfs`.
-pub fn validate_root_relative_glob_pattern(
-    pattern: &str,
+pub fn validate_normalized_root_relative_glob_pattern(
+    normalized: &str,
 ) -> std::result::Result<(), GlobPatternValidationError> {
-    let normalized = normalize_glob_pattern_for_matching(pattern);
     if normalized.is_empty() {
         return Err(GlobPatternValidationError::Empty);
     }
@@ -60,6 +59,14 @@ pub fn validate_root_relative_glob_pattern(
         return Err(GlobPatternValidationError::ParentTraversal);
     }
     Ok(())
+}
+
+/// Validate that a glob pattern is root-relative for `db-vfs`.
+pub fn validate_root_relative_glob_pattern(
+    pattern: &str,
+) -> std::result::Result<(), GlobPatternValidationError> {
+    let normalized = normalize_glob_pattern_for_matching(pattern);
+    validate_normalized_root_relative_glob_pattern(&normalized)
 }
 
 /// Expand a `dir/*`-style glob into a second pattern that matches descendants (`dir/**`).
@@ -92,6 +99,26 @@ mod tests {
         assert_eq!(
             normalize_glob_pattern_for_matching("./././docs\\*.txt"),
             "docs/*.txt"
+        );
+    }
+
+    #[test]
+    fn validate_normalized_glob_pattern_rejects_invalid_inputs() {
+        assert_eq!(
+            validate_normalized_root_relative_glob_pattern(""),
+            Err(GlobPatternValidationError::Empty)
+        );
+        assert_eq!(
+            validate_normalized_root_relative_glob_pattern("/docs/*.txt"),
+            Err(GlobPatternValidationError::Absolute)
+        );
+        assert_eq!(
+            validate_normalized_root_relative_glob_pattern("docs/../*.txt"),
+            Err(GlobPatternValidationError::ParentTraversal)
+        );
+        assert_eq!(
+            validate_normalized_root_relative_glob_pattern("docs/*.txt"),
+            Ok(())
         );
     }
 }

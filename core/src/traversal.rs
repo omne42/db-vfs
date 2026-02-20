@@ -4,7 +4,7 @@ use globset::{GlobSet, GlobSetBuilder};
 
 use crate::glob_utils::{
     build_glob_from_normalized, expand_dir_star_to_descendants,
-    normalize_glob_pattern_for_matching, validate_root_relative_glob_pattern,
+    normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
 use crate::policy::TraversalRules;
 use crate::{Error, Result};
@@ -110,14 +110,14 @@ impl TraversalSkipper {
         };
         for pattern in &rules.skip_globs {
             let normalized = normalize_glob_pattern_for_matching(pattern);
-            validate_root_relative_glob_pattern(&normalized)
+            validate_normalized_root_relative_glob_pattern(&normalized)
                 .map_err(|err| map_err(pattern, err.as_message().to_string()))?;
             let glob = build_glob_from_normalized(&normalized)
                 .map_err(|err| map_err(pattern, err.to_string()))?;
             builder.add(glob);
 
             if let Some(expanded) = expand_dir_star_to_descendants(&normalized) {
-                validate_root_relative_glob_pattern(&expanded)
+                validate_normalized_root_relative_glob_pattern(&expanded)
                     .map_err(|err| map_err(pattern, err.as_message().to_string()))?;
                 let glob = build_glob_from_normalized(&expanded)
                     .map_err(|err| map_err(pattern, err.to_string()))?;

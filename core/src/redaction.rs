@@ -5,7 +5,7 @@ use regex::{NoExpand, Regex};
 
 use crate::glob_utils::{
     build_glob_from_normalized, expand_dir_star_to_descendants,
-    normalize_glob_pattern_for_matching, validate_root_relative_glob_pattern,
+    normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
 use crate::policy::SecretRules;
 use crate::{Error, Result};
@@ -108,7 +108,7 @@ impl SecretRedactor {
         let mut deny_builder = GlobSetBuilder::new();
         for pattern in &rules.deny_globs {
             let normalized = normalize_glob_pattern_for_matching(pattern);
-            validate_root_relative_glob_pattern(&normalized).map_err(|err| {
+            validate_normalized_root_relative_glob_pattern(&normalized).map_err(|err| {
                 Error::InvalidPolicy(format!(
                     "invalid deny glob {pattern:?}: {}",
                     err.as_message()
@@ -120,7 +120,7 @@ impl SecretRedactor {
             deny_builder.add(glob);
 
             if let Some(expanded) = expand_dir_star_to_descendants(&normalized) {
-                validate_root_relative_glob_pattern(&expanded).map_err(|err| {
+                validate_normalized_root_relative_glob_pattern(&expanded).map_err(|err| {
                     Error::InvalidPolicy(format!(
                         "invalid deny glob {pattern:?}: {}",
                         err.as_message()
