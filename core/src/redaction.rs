@@ -217,25 +217,46 @@ impl SecretRedactor {
 
     pub fn redact_text_owned_bounded(
         &self,
-        mut input: String,
+        input: String,
         max_output_bytes: usize,
     ) -> std::result::Result<String, usize> {
-        if input.len() > max_output_bytes {
-            return Err(input.len());
-        }
-        if self.redact.is_empty() {
-            return Ok(input);
-        }
-
+        let mut current: Cow<'_, str> = Cow::Borrowed(input.as_str());
         for regex in &self.redact {
-            input = redact_with_literal_replacement_bounded(
-                input,
+            current = redact_with_literal_replacement_bounded(
+                current,
                 regex,
                 &self.replacement,
                 max_output_bytes,
             )?;
         }
-        Ok(input)
+        Ok(match current {
+            Cow::Borrowed(_) => input,
+            Cow::Owned(text) => text,
+        })
+    }
+
+    pub fn redact_text_bounded<'a>(
+        &self,
+        input: &'a str,
+        max_output_bytes: usize,
+    ) -> std::result::Result<Cow<'a, str>, usize> {
+        if input.len() > max_output_bytes {
+            return Err(input.len());
+        }
+        if self.redact.is_empty() {
+            return Ok(Cow::Borrowed(input));
+        }
+
+        let mut current: Cow<'a, str> = Cow::Borrowed(input);
+        for regex in &self.redact {
+            current = redact_with_literal_replacement_bounded(
+                current,
+                regex,
+                &self.replacement,
+                max_output_bytes,
+            )?;
+        }
+        Ok(current)
     }
 
     pub fn has_redact_rules(&self) -> bool {
@@ -247,23 +268,24 @@ impl SecretRedactor {
     }
 }
 
-fn redact_with_literal_replacement_bounded(
-    input: String,
+fn redact_with_literal_replacement_bounded<'a>(
+    input: Cow<'a, str>,
     regex: &Regex,
     replacement: &str,
     max_output_bytes: usize,
-) -> std::result::Result<String, usize> {
-    let mut matches = regex.find_iter(&input);
+) -> std::result::Result<Cow<'a, str>, usize> {
+    let mut matches = regex.find_iter(input.as_ref());
     let Some(first) = matches.next() else {
         return Ok(input);
     };
 
-    let mut out = String::with_capacity(input.len().min(max_output_bytes));
+    let input_ref = input.as_ref();
+    let mut out = String::with_capacity(input_ref.len().min(max_output_bytes));
     let mut out_len = 0usize;
     let mut last = 0usize;
 
     for m in std::iter::once(first).chain(matches) {
-        let prefix = &input[last..m.start()];
+        let prefix = &input_ref[last..m.start()];
         if out_len > max_output_bytes.saturating_sub(prefix.len()) {
             return Err(max_output_bytes.saturating_add(1));
         }
@@ -278,12 +300,12 @@ fn redact_with_literal_replacement_bounded(
         last = m.end();
     }
 
-    let tail = &input[last..];
+    let tail = &input_ref[last..];
     if out_len > max_output_bytes.saturating_sub(tail.len()) {
         return Err(max_output_bytes.saturating_add(1));
     }
     out.push_str(tail);
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 #[cfg(test)]
@@ -382,5 +404,21 @@ mod tests {
             .redact_text_owned_bounded("public".to_string(), 8)
             .expect("bounded redact");
         assert_eq!(out, "public");
+    }
+
+    #[test]
+    fn redact_text_bounded_borrows_input_when_no_matches() {
+        let rules = SecretRules {
+            redact_regexes: vec!["secret".to_string()],
+            replacement: "x".to_string(),
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        let input = "public";
+        let out = redactor
+            .redact_text_bounded(input, 8)
+            .expect("bounded redact");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.as_ref(), input);
     }
 }

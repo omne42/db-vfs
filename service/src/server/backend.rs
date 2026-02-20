@@ -106,12 +106,15 @@ impl CancelHandle {
             CancelHandle::Sqlite(handle) => handle.interrupt(),
             #[cfg(feature = "postgres")]
             CancelHandle::Postgres(token) => {
-                if let Some(cancel_tx) = postgres_cancel_tx()
-                    && cancel_tx.try_send(token.clone()).is_ok()
-                {
-                    return;
-                }
-                let token = token.clone();
+                let token = if let Some(cancel_tx) = postgres_cancel_tx() {
+                    match cancel_tx.try_send(token.clone()) {
+                        Ok(()) => return,
+                        Err(std::sync::mpsc::TrySendError::Full(token))
+                        | Err(std::sync::mpsc::TrySendError::Disconnected(token)) => token,
+                    }
+                } else {
+                    token.clone()
+                };
                 let fallback_count =
                     POSTGRES_CANCEL_QUEUE_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                 if fallback_count == 1 || fallback_count.is_multiple_of(100) {
@@ -137,8 +140,9 @@ impl CancelHandle {
                         }
                         return;
                     }
+                    let inflight_guard = PostgresCancelFallbackInflightGuard;
                     runtime.spawn_blocking(move || {
-                        let _inflight_guard = PostgresCancelFallbackInflightGuard;
+                        let _inflight_guard = inflight_guard;
                         if let Err(err) = token.cancel_query(r2d2_postgres::postgres::NoTls) {
                             tracing::warn!(err = %err, "failed to cancel postgres query");
                         }

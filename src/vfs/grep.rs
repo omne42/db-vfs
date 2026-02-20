@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
@@ -409,20 +411,16 @@ pub(super) fn grep<S: crate::store::Store>(
 
                 let line_slice = clamp_char_boundary(line, max_line_bytes);
                 let mut line_truncated = line_slice.len() < line.len();
-                let mut text: Option<String> = None;
+                let mut text: Option<Cow<'_, str>> = None;
                 if has_redaction_rules {
-                    let redacted = match vfs
-                        .redactor
-                        .redact_text_owned_bounded(line_slice.to_string(), max_line_bytes)
-                    {
-                        Ok(text) => text,
-                        Err(_) => {
-                            line_truncated = true;
-                            redaction_overflow_replacement
-                                .unwrap_or_default()
-                                .to_string()
-                        }
-                    };
+                    let redacted =
+                        match vfs.redactor.redact_text_bounded(line_slice, max_line_bytes) {
+                            Ok(text) => text,
+                            Err(_) => {
+                                line_truncated = true;
+                                Cow::Borrowed(redaction_overflow_replacement.unwrap_or_default())
+                            }
+                        };
                     text = Some(redacted);
                 }
                 let path_json_escaped_len =
@@ -443,7 +441,11 @@ pub(super) fn grep<S: crate::store::Store>(
                     break 'scan;
                 }
                 response_bytes = next_response_bytes;
-                let text = text.unwrap_or_else(|| line_slice.to_string());
+                let text = match text {
+                    Some(Cow::Borrowed(text)) => text.to_string(),
+                    Some(Cow::Owned(text)) => text,
+                    None => line_slice.to_string(),
+                };
                 matches.push(GrepMatch {
                     path: path.clone(),
                     line: line_no,
