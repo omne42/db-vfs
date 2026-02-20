@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{Error, Result};
 
 pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
@@ -94,6 +96,13 @@ fn is_windows_drive_absolute_path(s: &str) -> bool {
     s.as_bytes().get(1) == Some(&b':') && s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
 }
 
+fn strip_leading_dot_slashes(mut s: &str) -> &str {
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    s
+}
+
 fn is_canonical_relative_path(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('/')
@@ -153,11 +162,13 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
         };
     }
 
-    let mut s = input.replace('\\', "/");
-    while s.starts_with("./") {
-        s.drain(..2);
-    }
-    if is_windows_drive_absolute_path(&s) {
+    let normalized: Cow<'_, str> = if input.contains('\\') {
+        Cow::Owned(input.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(input)
+    };
+    let s = strip_leading_dot_slashes(normalized.as_ref());
+    if is_windows_drive_absolute_path(s) {
         return Err(Error::InvalidPath(format!(
             "{label}: absolute paths are not supported"
         )));
@@ -236,6 +247,12 @@ mod tests {
     #[test]
     fn normalize_path_ignores_leading_dot_slash() {
         assert_eq!(normalize_path("./a/b").unwrap(), "a/b");
+    }
+
+    #[test]
+    fn normalize_path_ignores_repeated_leading_dot_slash() {
+        assert_eq!(normalize_path("./././docs/a.txt").unwrap(), "docs/a.txt");
+        assert_eq!(normalize_path_prefix("././docs").unwrap(), "docs/");
     }
 
     #[test]

@@ -34,19 +34,30 @@ fn is_canonical_runtime_path(path: &str) -> bool {
         && !path.chars().any(char::is_control)
 }
 
+fn strip_leading_dot_slashes(mut s: &str) -> &str {
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    s
+}
+
+fn strip_leading_slashes(s: &str) -> &str {
+    s.trim_start_matches('/')
+}
+
 fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
     if is_canonical_runtime_path(path) {
         return Some(Cow::Borrowed(path));
     }
 
-    let mut normalized = path.trim().replace('\\', "/");
-    while normalized.starts_with("./") {
-        normalized.drain(..2);
-    }
-    let leading_slashes = normalized.bytes().take_while(|&b| b == b'/').count();
-    if leading_slashes > 0 {
-        normalized.drain(..leading_slashes);
-    }
+    let trimmed = path.trim();
+    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
+        Cow::Owned(trimmed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(trimmed)
+    };
+    let normalized = strip_leading_dot_slashes(normalized.as_ref());
+    let normalized = strip_leading_slashes(normalized);
     if normalized.is_empty()
         || normalized.contains('\0')
         || normalized.chars().any(char::is_control)
@@ -309,6 +320,8 @@ mod tests {
         };
         let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
         assert!(redactor.is_path_denied(".\\dir\\a.txt"));
+        assert!(redactor.is_path_denied("./././dir//a.txt"));
+        assert!(redactor.is_path_denied("///./dir/a.txt"));
     }
 
     #[test]

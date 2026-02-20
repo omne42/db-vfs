@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use globset::GlobBuilder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,17 +23,26 @@ impl GlobPatternValidationError {
     }
 }
 
+fn strip_leading_dot_slashes(mut s: &str) -> &str {
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    s
+}
+
 /// Normalize a glob pattern for matching against `db-vfs` root-relative paths.
 ///
 /// - Trims surrounding whitespace.
 /// - Converts `\` to `/` so patterns work consistently across platforms.
 /// - Strips leading `./` segments.
 pub fn normalize_glob_pattern_for_matching(pattern: &str) -> String {
-    let mut normalized = pattern.trim().replace('\\', "/");
-    while normalized.starts_with("./") {
-        normalized.drain(..2);
-    }
-    normalized
+    let trimmed = pattern.trim();
+    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
+        Cow::Owned(trimmed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(trimmed)
+    };
+    strip_leading_dot_slashes(normalized.as_ref()).to_string()
 }
 
 /// Validate that a glob pattern is root-relative for `db-vfs`.
@@ -70,4 +81,17 @@ pub fn build_glob_from_normalized(
     let mut builder = GlobBuilder::new(pattern);
     builder.literal_separator(true);
     builder.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_glob_pattern_strips_repeated_dot_prefixes() {
+        assert_eq!(
+            normalize_glob_pattern_for_matching("./././docs\\*.txt"),
+            "docs/*.txt"
+        );
+    }
 }

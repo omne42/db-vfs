@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/read+grep+patch: enforce actual loaded content size against `limits.max_read_bytes` even when persisted metadata is stale/inconsistent, preventing oversized processing and tightening policy correctness.
 - vfs/grep: reuse prebuilt literal searcher state during line scans to cut repeated per-line matcher setup overhead.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
+- core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
 
 ### Internal
 
