@@ -174,6 +174,11 @@ pub(super) fn glob<S: crate::store::Store>(
             after.as_deref(),
             fetch_limit,
         )?;
+        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+            scan_limit_reached = true;
+            scan_limit_reason = Some(ScanLimitReason::Time);
+            break;
+        }
         ensure_page_strictly_increasing(&metas, "glob")?;
         let has_more = metas.len() > page_budget;
         if has_more {
@@ -258,6 +263,8 @@ pub(super) fn glob<S: crate::store::Store>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Duration;
 
     use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::VfsPolicy;
@@ -583,5 +590,93 @@ mod tests {
                 .contains("not strictly after pagination cursor"),
             "unexpected error: {err}"
         );
+    }
+
+    struct SlowEmptyPageStore;
+
+    impl Store for SlowEmptyPageStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            std::thread::sleep(Duration::from_millis(3));
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn glob_marks_time_limit_when_store_page_fetch_exceeds_budget() {
+        let store = SlowEmptyPageStore;
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+        policy.limits.max_walk_ms = Some(1);
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let response = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "docs/*.txt".to_string(),
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect("glob");
+        assert!(response.truncated);
+        assert!(response.scan_limit_reached);
+        assert_eq!(response.scan_limit_reason, Some(ScanLimitReason::Time));
     }
 }

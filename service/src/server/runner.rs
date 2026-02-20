@@ -116,6 +116,7 @@ where
         let sleep = tokio::time::sleep(timeout);
         tokio::pin!(sleep);
         tokio::select! {
+            biased;
             res = &mut handle => res,
             _ = &mut sleep => {
                 if let Some(timed_out) = timed_out.as_ref() {

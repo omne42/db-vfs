@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/glob+grep time budget: re-check `max_walk_ms` immediately after each page fetch so slow store calls that return empty pages still report `truncated=true` with `scan_limit_reason=time`.
+- service/runner timeout race: bias timeout `select!` to prefer completed worker results over simultaneous timeout wakeups, avoiding false timeout responses at boundary conditions.
 - core/glob-validation: avoid re-normalizing already-normalized glob patterns in redaction/traversal/runtime glob compilation, reducing per-rule/per-request allocation and scan overhead without changing validation behavior.
 - vfs/glob+grep pagination: enforce that each fetched page starts strictly after the previous cursor, preventing duplicate/backtracking rows from misbehaving stores and removing now-redundant defensive result re-sorting work on scan hot paths.
 - store/sqlite+postgres: short-circuit `list_metas_by_prefix_page` when `limit=0` to avoid unnecessary database round-trips.
