@@ -159,12 +159,12 @@ impl SecretRedactor {
                         .to_string(),
                 ));
             }
-            let preview = summarize_pattern_for_error(pattern);
             let regex = regex::RegexBuilder::new(pattern)
                 .size_limit(MAX_REDACT_REGEX_COMPILED_SIZE_BYTES)
                 .nest_limit(MAX_REDACT_REGEX_NEST_LIMIT)
                 .build()
                 .map_err(|err| {
+                    let preview = summarize_pattern_for_error(pattern);
                     Error::InvalidPolicy(format!(
                         "invalid secrets.redact_regexes regex {preview:?}: {err}"
                     ))

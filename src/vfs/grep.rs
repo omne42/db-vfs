@@ -236,13 +236,13 @@ pub(super) fn grep<S: crate::store::Store>(
     }
 
     let regex = if request.regex {
-        let preview = summarize_pattern_for_error(&request.query);
         Some(
             regex::RegexBuilder::new(&request.query)
                 .size_limit(MAX_GREP_REGEX_COMPILED_SIZE_BYTES)
                 .nest_limit(MAX_GREP_REGEX_NEST_LIMIT)
                 .build()
                 .map_err(|err| {
+                    let preview = summarize_pattern_for_error(&request.query);
                     Error::InvalidRegex(format!("invalid grep regex {preview:?}: {err}"))
                 })?,
         )

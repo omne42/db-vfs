@@ -166,6 +166,14 @@ async fn acquire_permit_with_budget(
                     super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
                 })?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                drop(permit);
+                return Err(super::err(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "timeout",
+                    "request timed out before execution",
+                ));
+            }
             Ok((permit, Some(remaining)))
         }
         None => {
@@ -678,9 +686,12 @@ pub(super) async fn grep(
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_glob_pattern, redact_path, redact_path_owned};
+    use super::{acquire_permit_with_budget, redact_glob_pattern, redact_path, redact_path_owned};
+    use axum::http::StatusCode;
     use db_vfs_core::policy::SecretRules;
     use db_vfs_core::redaction::SecretRedactor;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn redact_path_hides_denied_prefix_root_paths() {
@@ -694,5 +705,15 @@ mod tests {
             "<secret>"
         );
         assert_eq!(redact_path_owned(&redactor, "docs".to_string()), "docs");
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_times_out_before_execution_when_budget_is_exhausted() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let (status, body) = acquire_permit_with_budget(semaphore, Some(Duration::ZERO))
+            .await
+            .expect_err("zero budget should time out");
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.0.code, "timeout");
     }
 }
