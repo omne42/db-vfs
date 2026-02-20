@@ -192,10 +192,18 @@ fn extract_line_range(
     file_size_bytes: u64,
     path: &str,
 ) -> Result<String> {
+    let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    if content_size_bytes > max_scan_bytes {
+        return Err(Error::FileTooLarge {
+            path: path.to_string(),
+            size_bytes: file_size_bytes.max(content_size_bytes),
+            max_bytes: max_scan_bytes,
+        });
+    }
+
     let bytes = content.as_bytes();
     let mut pos: usize = 0;
     let mut current_line: u64 = 0;
-    let mut scanned_bytes: u64 = 0;
 
     let mut start_pos: Option<usize> = None;
     let mut end_pos: Option<usize> = None;
@@ -205,16 +213,6 @@ fn extract_line_range(
             Some(offset) => pos.saturating_add(offset).saturating_add(1), // include newline
             None => bytes.len(),
         };
-
-        scanned_bytes = scanned_bytes.saturating_add(u64::try_from(next - pos).unwrap_or(u64::MAX));
-        if scanned_bytes > max_scan_bytes {
-            let size_bytes = file_size_bytes.max(scanned_bytes);
-            return Err(Error::FileTooLarge {
-                path: path.to_string(),
-                size_bytes,
-                max_bytes: max_scan_bytes,
-            });
-        }
 
         current_line += 1;
         if current_line == start_line {

@@ -87,6 +87,21 @@ fn advance_after_cursor(
     Ok(())
 }
 
+fn ensure_page_strictly_increasing(
+    metas: &[crate::store::FileMeta],
+    op: &'static str,
+) -> Result<()> {
+    for pair in metas.windows(2) {
+        if pair[0].path >= pair[1].path {
+            return Err(Error::Db(format!(
+                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
+                pair[0].path, pair[1].path
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn grep_match_json_bytes(
     path_json_escaped_len: usize,
     line_no: u64,
@@ -268,6 +283,7 @@ pub(super) fn grep<S: crate::store::Store>(
             after.as_deref(),
             fetch_limit,
         )?;
+        ensure_page_strictly_increasing(&metas, "grep")?;
         let has_more = metas.len() > page_budget;
         if has_more {
             metas.truncate(page_budget);
@@ -757,7 +773,121 @@ mod tests {
             .expect_err("should fail on non-monotonic cursor");
         assert_eq!(err.code(), "db");
         assert!(
-            err.to_string().contains("non-monotonic pagination cursor"),
+            err.to_string().contains("non-monotonic"),
+            "unexpected error: {err}"
+        );
+    }
+
+    struct NonMonotonicWithinPageStore {
+        rows: Vec<FileMeta>,
+    }
+
+    impl Store for NonMonotonicWithinPageStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self.rows.clone())
+        }
+    }
+
+    #[test]
+    fn grep_rejects_non_monotonic_within_page_ordering() {
+        let store = NonMonotonicWithinPageStore {
+            rows: vec![
+                FileMeta {
+                    path: "docs/a.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/c.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/b.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ],
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.limits.max_walk_entries = 2;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "x".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("should fail on non-monotonic page ordering");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string().contains("non-monotonic page ordering"),
             "unexpected error: {err}"
         );
     }
