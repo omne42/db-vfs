@@ -68,6 +68,13 @@ fn redact_path_owned(redactor: &db_vfs_core::redaction::SecretRedactor, path: St
     }
 }
 
+fn redact_glob_pattern(
+    redactor: &db_vfs_core::redaction::SecretRedactor,
+    pattern: String,
+) -> String {
+    redact_path_owned(redactor, pattern)
+}
+
 fn audit_event_base(
     request_id: String,
     peer: SocketAddr,
@@ -307,11 +314,7 @@ fn audit_redact_scan_fields(state: &super::AppState, event: &mut AuditEvent) {
         event.path_prefix = Some(redact_path_owned(&state.inner.redactor, prefix));
     }
     if let Some(pattern) = event.glob_pattern.take() {
-        event.glob_pattern = Some(if state.inner.redactor.is_path_denied(&pattern) {
-            "<secret>".to_string()
-        } else {
-            pattern
-        });
+        event.glob_pattern = Some(redact_glob_pattern(&state.inner.redactor, pattern));
     }
 }
 
@@ -675,7 +678,7 @@ pub(super) async fn grep(
 
 #[cfg(test)]
 mod tests {
-    use super::{redact_path, redact_path_owned};
+    use super::{redact_glob_pattern, redact_path, redact_path_owned};
     use db_vfs_core::policy::SecretRules;
     use db_vfs_core::redaction::SecretRedactor;
 
@@ -686,6 +689,10 @@ mod tests {
         assert_eq!(redact_path(&redactor, ".git"), "<secret>");
         assert_eq!(redact_path(&redactor, ".git/"), "<secret>");
         assert_eq!(redact_path_owned(&redactor, ".git".to_string()), "<secret>");
+        assert_eq!(
+            redact_glob_pattern(&redactor, ".git".to_string()),
+            "<secret>"
+        );
         assert_eq!(redact_path_owned(&redactor, "docs".to_string()), "docs");
     }
 }

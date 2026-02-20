@@ -282,7 +282,7 @@ pub(super) fn grep<S: crate::store::Store>(
             let path = meta.path;
             let meta_version = meta.version;
             let meta_size_bytes = meta.size_bytes;
-            let path_json_escaped_len = json_escaped_str_len(&path);
+            let mut path_json_escaped_len: Option<usize> = None;
 
             scanned_entries = scanned_entries.saturating_add(1);
 
@@ -370,6 +370,8 @@ pub(super) fn grep<S: crate::store::Store>(
                     line_slice.to_string()
                 };
                 let line_no = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
+                let path_json_escaped_len =
+                    *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
                 // Budget against JSON-encoded output size (escaped strings + object structure).
                 let entry_bytes =
                     grep_match_json_bytes(path_json_escaped_len, line_no, &text, line_truncated)
