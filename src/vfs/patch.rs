@@ -67,7 +67,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         });
     }
 
-    let Some(meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
+    let Some(mut meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
         return Err(Error::NotFound(format!(
             "file not found (workspace_id={}, path={})",
             request.workspace_id, requested_path
@@ -82,6 +82,27 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     }
 
     let max_fetch_bytes = vfs.policy.limits.max_read_bytes;
+    if meta.size_bytes > max_fetch_bytes {
+        // Re-check metadata once before failing hard. This avoids false
+        // `file_too_large` errors when metadata is stale and a newer/smaller
+        // version won the race between metadata and content reads.
+        let Some(now_meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
+            return Err(Error::NotFound(format!(
+                "file not found (workspace_id={}, path={})",
+                request.workspace_id, requested_path
+            )));
+        };
+        if now_meta.version != meta.version || now_meta.size_bytes <= max_fetch_bytes {
+            meta = now_meta;
+        }
+        if meta.version != request.expected_version {
+            return Err(Error::Conflict(format!(
+                "version mismatch (workspace_id={}, path={}, expected_version={}, actual_version={})",
+                request.workspace_id, requested_path, request.expected_version, meta.version
+            )));
+        }
+    }
+
     if meta.size_bytes > max_fetch_bytes {
         return Err(Error::FileTooLarge {
             path: requested_path,
@@ -250,5 +271,107 @@ mod tests {
             })
             .expect_err("should fail");
         assert_eq!(err.code(), "file_too_large");
+    }
+
+    struct StaleLargeMetaStore {
+        meta_calls: usize,
+    }
+
+    impl Store for StaleLargeMetaStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            self.meta_calls = self.meta_calls.saturating_add(1);
+            if self.meta_calls == 1 {
+                Ok(Some(FileMeta {
+                    path: path.to_string(),
+                    size_bytes: 9,
+                    version: 1,
+                    updated_at_ms: 0,
+                }))
+            } else {
+                Ok(Some(FileMeta {
+                    path: path.to_string(),
+                    size_bytes: 2,
+                    version: 1,
+                    updated_at_ms: 0,
+                }))
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if version == 1 {
+                Ok(Some("ok".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            if expected_version == 1 {
+                Ok(2)
+            } else {
+                Err(Error::Conflict("version mismatch".to_string()))
+            }
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn patch_rechecks_oversized_meta_before_failing() {
+        let store = StaleLargeMetaStore { meta_calls: 0 };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+        policy.limits.max_read_bytes = 4;
+        policy.limits.max_patch_bytes = Some(1024);
+
+        let patch = diffy::create_patch("ok", "go").to_string();
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch,
+                expected_version: 1,
+            })
+            .expect("patch should succeed after stale meta re-check");
+        assert_eq!(resp.version, 2);
     }
 }
