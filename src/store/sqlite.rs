@@ -235,6 +235,10 @@ where
             return Ok(DeleteOutcome::Deleted);
         }
 
+        if expected_version.is_none() {
+            return Ok(DeleteOutcome::NotFound);
+        }
+
         let exists = self
             .conn
             .query_row(
@@ -249,10 +253,7 @@ where
             return Ok(DeleteOutcome::NotFound);
         }
 
-        if expected_version.is_some() {
-            return Err(Error::Conflict("version mismatch".to_string()));
-        }
-        Ok(DeleteOutcome::NotFound)
+        Err(Error::Conflict("version mismatch".to_string()))
     }
 
     fn list_metas_by_prefix(

@@ -294,6 +294,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/read: when initial metadata reports an oversized file, re-check metadata before failing so concurrent newer/smaller versions do not return a false `file_too_large`.
+- store/sqlite+postgres: avoid redundant existence lookup on unconditional delete misses, removing an unnecessary DB round-trip on a common no-op path.
+- vfs/glob+grep time budget: re-check `max_walk_ms` immediately after each page fetch so slow store calls that return empty pages still report `truncated=true` with `scan_limit_reason=time`.
+- service/runner timeout race: bias timeout `select!` to prefer completed worker results over simultaneous timeout wakeups, avoiding false timeout responses at boundary conditions.
+- core/glob-validation: avoid re-normalizing already-normalized glob patterns in redaction/traversal/runtime glob compilation, reducing per-rule/per-request allocation and scan overhead without changing validation behavior.
+- vfs/glob+grep pagination: enforce that each fetched page starts strictly after the previous cursor, preventing duplicate/backtracking rows from misbehaving stores and removing now-redundant defensive result re-sorting work on scan hot paths.
+- store/sqlite+postgres: short-circuit `list_metas_by_prefix_page` when `limit=0` to avoid unnecessary database round-trips.
+- vfs/read: remove per-line byte-limit recount in line-range extraction by enforcing a single upfront content-size guard, reducing hot-loop overhead without changing limit behavior.
+- vfs/glob+grep pagination: reject non-monotonic path ordering within a single store page to avoid silent row skips on misordered paginated backends.
+- service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.
+- vfs/glob+grep: compile single-pattern scan globs into `GlobMatcher` (instead of a one-entry `GlobSet`) to trim matcher overhead on scan hot paths.
+- store/sqlite+postgres+core: replace lossy `usize -> u64` casts in persisted size/pagination conversions with checked conversions to avoid silent truncation on wide-pointer targets.
+- vfs/grep: cache per-file escaped-path byte length while budgeting JSON response size, removing repeated per-match path escaping work on hot scan paths.
 - store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
 - service/audit: preserve request-time `ts_ms` in async audit worker instead of overwriting it with worker flush time.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
@@ -313,6 +326,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reduce mutex hold times on hot allow/prune paths, avoid hash-index truncation on 32-bit targets, and use fused token refill math in bucket updates.
 - service/rate-limiter: reduce per-request shard-index overhead by replacing generic hasher-based indexing with lightweight IP-key mapping.
 - service/rate-limiter: reclaim empty/low-utilization shard `HashMap` capacity at the configured prune threshold to reduce long-lived memory retention after bursty traffic.
+- service/rate-limiter: re-check per-IP buckets after prune/retry capacity paths before denying, avoiding false rejections under concurrent bucket churn at max tracked-IP limits.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
@@ -321,6 +335,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
 - core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
+- core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
+- service/audit-redaction: apply descendant-aware secret masking to audited `glob_pattern` values so protected roots (for example `.git`) are redacted consistently.
+- vfs/grep: defer escaped-path JSON-size accounting until a file produces a match, avoiding unnecessary per-file escape work for non-matching content.
 
 ### Internal
 

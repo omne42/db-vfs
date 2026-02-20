@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/read: when initial metadata reports an oversized file, re-check metadata before failing so concurrent newer/smaller versions do not return a false `file_too_large`.
+- store/sqlite+postgres: avoid redundant existence lookup on unconditional delete misses, removing an unnecessary DB round-trip on a common no-op path.
 - vfs/glob+grep time budget: re-check `max_walk_ms` immediately after each page fetch so slow store calls that return empty pages still report `truncated=true` with `scan_limit_reason=time`.
 - service/runner timeout race: bias timeout `select!` to prefer completed worker results over simultaneous timeout wakeups, avoiding false timeout responses at boundary conditions.
 - core/glob-validation: avoid re-normalizing already-normalized glob patterns in redaction/traversal/runtime glob compilation, reducing per-rule/per-request allocation and scan overhead without changing validation behavior.

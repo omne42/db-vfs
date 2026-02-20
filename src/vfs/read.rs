@@ -124,20 +124,10 @@ fn load_content_with_retry<S: crate::store::Store>(
     let max_bytes = vfs.policy.limits.max_read_bytes;
     let mut attempts: usize = 0;
     loop {
-        if meta.size_bytes > max_bytes {
-            return Err(Error::FileTooLarge {
-                path: path.to_string(),
-                size_bytes: meta.size_bytes,
-                max_bytes,
-            });
-        }
-
         if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
             let now = vfs.store.get_meta(workspace_id, path)?;
             return Err(match now {
-                None => {
-                    Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
-                }
+                None => read_not_found_err(path, attempts),
                 Some(now) => {
                     if now.version != meta.version {
                         Error::Conflict(format!(
@@ -155,6 +145,24 @@ fn load_content_with_retry<S: crate::store::Store>(
         }
         attempts += 1;
 
+        if meta.size_bytes > max_bytes {
+            // Re-check metadata once before failing hard. This avoids false
+            // `file_too_large` errors when a newer/smaller version won the race
+            // between the caller's initial meta read and content fetch.
+            let Some(now) = vfs.store.get_meta(workspace_id, path)? else {
+                return Err(read_not_found_err(path, attempts));
+            };
+            if now.version != meta.version || now.size_bytes <= max_bytes {
+                meta = now;
+                continue;
+            }
+            return Err(Error::FileTooLarge {
+                path: path.to_string(),
+                size_bytes: now.size_bytes.max(meta.size_bytes),
+                max_bytes,
+            });
+        }
+
         match vfs.store.get_content(workspace_id, path, meta.version)? {
             Some(content) => {
                 let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
@@ -168,9 +176,10 @@ fn load_content_with_retry<S: crate::store::Store>(
                 return Ok((meta, content));
             }
             None => {
-                meta = vfs.store.get_meta(workspace_id, path)?.ok_or_else(|| {
-                    Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
-                })?;
+                meta = vfs
+                    .store
+                    .get_meta(workspace_id, path)?
+                    .ok_or_else(|| read_not_found_err(path, attempts))?;
                 // Favor immediate rescheduling on early misses to reduce blocked-worker time.
                 if attempts <= CONTENT_RETRY_YIELD_ATTEMPTS {
                     std::thread::yield_now();
@@ -182,6 +191,10 @@ fn load_content_with_retry<S: crate::store::Store>(
             }
         }
     }
+}
+
+fn read_not_found_err(path: &str, attempts: usize) -> Error {
+    Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
 }
 
 fn extract_line_range(
@@ -414,6 +427,103 @@ mod tests {
             })
             .expect_err("should fail");
         assert_eq!(err.code(), "conflict");
+    }
+
+    struct StaleLargeMetaStore {
+        meta_calls: usize,
+    }
+
+    impl Store for StaleLargeMetaStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            self.meta_calls = self.meta_calls.saturating_add(1);
+            if self.meta_calls == 1 {
+                Ok(Some(FileMeta {
+                    path: path.to_string(),
+                    size_bytes: 9,
+                    version: 1,
+                    updated_at_ms: 0,
+                }))
+            } else {
+                Ok(Some(FileMeta {
+                    path: path.to_string(),
+                    size_bytes: 2,
+                    version: 2,
+                    updated_at_ms: 0,
+                }))
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if version == 2 {
+                Ok(Some("ok".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn read_rechecks_oversized_meta_before_failing() {
+        let store = StaleLargeMetaStore { meta_calls: 0 };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 4;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect("read");
+        assert_eq!(resp.version, 2);
+        assert_eq!(resp.content, "ok");
     }
 
     struct StaticContentStore {
