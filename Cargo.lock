@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "db-vfs"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "db-vfs-core",
  "diffy",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "db-vfs-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "globset",
  "regex",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "db-vfs-service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
