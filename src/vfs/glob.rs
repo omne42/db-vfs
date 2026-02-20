@@ -40,6 +40,25 @@ pub struct GlobResponse {
     pub scanned_entries: u64,
 }
 
+fn advance_after_cursor(
+    after: &mut Option<String>,
+    metas: &[crate::store::FileMeta],
+    op: &'static str,
+) -> Result<()> {
+    let Some(next_after) = metas.last().map(|meta| meta.path.clone()) else {
+        return Ok(());
+    };
+    if let Some(prev_after) = after.as_ref()
+        && next_after <= *prev_after
+    {
+        return Err(Error::Db(format!(
+            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
+        )));
+    }
+    *after = Some(next_after);
+    Ok(())
+}
+
 pub(super) fn glob<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: GlobRequest,
@@ -127,7 +146,7 @@ pub(super) fn glob<S: crate::store::Store>(
         if metas.is_empty() {
             break;
         }
-        after = metas.last().map(|meta| meta.path.clone());
+        advance_after_cursor(&mut after, &metas, "glob")?;
 
         for meta in metas {
             let path = meta.path;
@@ -189,7 +208,7 @@ pub(super) fn glob<S: crate::store::Store>(
     }
 
     if needs_sort {
-        matches.sort();
+        matches.sort_unstable();
     }
     Ok(GlobResponse {
         matches,
@@ -202,4 +221,109 @@ pub(super) fn glob<S: crate::store::Store>(
         elapsed_ms: elapsed_ms(&started),
         scanned_entries: u64::try_from(scanned_entries).unwrap_or(u64::MAX),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use db_vfs_core::policy::VfsPolicy;
+
+    struct NonMonotonicPageStore {
+        row: FileMeta,
+    }
+
+    impl Store for NonMonotonicPageStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(vec![self.row.clone(); META_PAGE_SIZE + 1])
+        }
+    }
+
+    #[test]
+    fn glob_rejects_non_monotonic_pagination_cursor() {
+        let store = NonMonotonicPageStore {
+            row: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "other/*.txt".to_string(),
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("should fail on non-monotonic cursor");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string().contains("non-monotonic pagination cursor"),
+            "unexpected error: {err}"
+        );
+    }
 }
