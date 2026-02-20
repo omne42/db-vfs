@@ -266,7 +266,9 @@ fn prune_stale_buckets(state: &mut RateLimitState, now: Instant) -> usize {
         .retain(|_, bucket| now.saturating_duration_since(bucket.last_seen) <= BUCKET_TTL);
     let len = state.buckets.len();
     let capacity = state.buckets.capacity();
-    if capacity >= MAX_BUCKETS_BEFORE_PRUNE && len.saturating_mul(4) < capacity {
+    if len == 0 && capacity > 1 {
+        state.buckets.shrink_to(1);
+    } else if capacity >= MAX_BUCKETS_BEFORE_PRUNE && len.saturating_mul(4) < capacity {
         state.buckets.shrink_to(len.max(1));
     }
     state.last_prune = now;
@@ -331,6 +333,39 @@ mod tests {
         };
         let removed = prune_stale_buckets(&mut state, now);
         assert_eq!(removed, 8);
+        assert!(state.buckets.is_empty());
+        assert!(state.buckets.capacity() < before_capacity);
+    }
+
+    #[test]
+    fn prune_stale_buckets_reclaims_small_empty_maps() {
+        let now = Instant::now();
+        let stale = now
+            .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
+            .unwrap_or(now);
+
+        let mut buckets = HashMap::with_capacity(512);
+        for idx in 0u8..4 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 1, idx));
+            buckets.insert(
+                ip,
+                RateLimitBucket {
+                    tokens: 1.0,
+                    last: stale,
+                    last_seen: stale,
+                },
+            );
+        }
+        let before_capacity = buckets.capacity();
+        assert!(before_capacity >= 512);
+        assert!(before_capacity < MAX_BUCKETS_BEFORE_PRUNE);
+
+        let mut state = RateLimitState {
+            buckets,
+            last_prune: stale,
+        };
+        let removed = prune_stale_buckets(&mut state, now);
+        assert_eq!(removed, 4);
         assert!(state.buckets.is_empty());
         assert!(state.buckets.capacity() < before_capacity);
     }

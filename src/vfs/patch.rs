@@ -61,9 +61,11 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     let parsed =
         diffy::Patch::from_str(&request.patch).map_err(|err| Error::Patch(err.to_string()))?;
     if parsed.hunks().len() > MAX_PATCH_HUNKS {
+        let hunk_count = u64::try_from(parsed.hunks().len()).unwrap_or(u64::MAX);
+        let max_hunks = u64::try_from(MAX_PATCH_HUNKS).unwrap_or(u64::MAX);
         return Err(Error::InputTooLarge {
-            size_bytes: parsed.hunks().len() as u64,
-            max_bytes: MAX_PATCH_HUNKS as u64,
+            size_bytes: hunk_count,
+            max_bytes: max_hunks,
         });
     }
 

@@ -159,6 +159,7 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
 }
 
 fn validate_grep_query(query: &str, regex: bool) -> Result<()> {
+    let query_len = query.len();
     if query.is_empty() {
         return Err(if regex {
             Error::InvalidRegex("grep regex must be non-empty".to_string())
@@ -167,17 +168,18 @@ fn validate_grep_query(query: &str, regex: bool) -> Result<()> {
         });
     }
 
-    if query.len() > MAX_GREP_QUERY_BYTES {
+    if query_len > MAX_GREP_QUERY_BYTES {
+        let size_bytes = u64::try_from(query_len).unwrap_or(u64::MAX);
+        let max_bytes = u64::try_from(MAX_GREP_QUERY_BYTES).unwrap_or(u64::MAX);
         return Err(if regex {
             Error::InvalidRegex(format!(
                 "grep regex is too large ({} bytes; max {} bytes)",
-                query.len(),
-                MAX_GREP_QUERY_BYTES
+                query_len, MAX_GREP_QUERY_BYTES
             ))
         } else {
             Error::InputTooLarge {
-                size_bytes: query.len() as u64,
-                max_bytes: MAX_GREP_QUERY_BYTES as u64,
+                size_bytes,
+                max_bytes,
             }
         });
     }

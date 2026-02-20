@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reduce per-request shard-index overhead by replacing generic hasher-based indexing with lightweight IP-key mapping.
 - service/rate-limiter: reclaim empty/low-utilization shard `HashMap` capacity at the configured prune threshold to reduce long-lived memory retention after bursty traffic.
 - service/rate-limiter: re-check per-IP buckets after prune/retry capacity paths before denying, avoiding false rejections under concurrent bucket churn at max tracked-IP limits.
+- service/rate-limiter: when a shard is fully pruned to empty, shrink its bucket map even below the high-capacity threshold to reclaim long-lived memory after bursty traffic.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
@@ -84,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
 - service/audit-redaction: apply descendant-aware secret masking to audited `glob_pattern` values so protected roots (for example `.git`) are redacted consistently.
 - vfs/grep: defer escaped-path JSON-size accounting until a file produces a match, avoiding unnecessary per-file escape work for non-matching content.
+- vfs/grep+patch: replace remaining lossy `usize -> u64` casts in input-size error accounting with checked/saturating conversions to avoid theoretical truncation on wide-pointer targets.
 
 ### Internal
 
