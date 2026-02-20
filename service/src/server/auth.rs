@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 
 use db_vfs_core::policy::VfsPolicy;
 
-static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[String]>> = OnceLock::new();
+static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[WorkspacePattern]>> = OnceLock::new();
 
 const MAX_BEARER_TOKEN_BYTES: usize = 4096;
 
-fn allow_all_workspaces() -> Arc<[String]> {
+fn allow_all_workspaces() -> Arc<[WorkspacePattern]> {
     ALLOW_ALL_WORKSPACES
-        .get_or_init(|| Arc::from(vec!["*".to_string()]))
+        .get_or_init(|| Arc::from(vec![WorkspacePattern::Any]))
         .clone()
 }
 
@@ -29,12 +29,36 @@ pub(super) enum AuthMode {
 #[derive(Clone)]
 pub(super) struct AuthRule {
     token_sha256: [u8; 32],
-    allowed_workspaces: Arc<[String]>,
+    allowed_workspaces: Arc<[WorkspacePattern]>,
 }
 
 #[derive(Clone)]
 pub(super) struct AuthContext {
-    pub(super) allowed_workspaces: Arc<[String]>,
+    pub(super) allowed_workspaces: Arc<[WorkspacePattern]>,
+}
+
+#[derive(Clone)]
+pub(super) enum WorkspacePattern {
+    Any,
+    Prefix(String),
+    Exact(String),
+}
+
+fn compile_workspace_patterns(patterns: &[String]) -> Arc<[WorkspacePattern]> {
+    Arc::from(
+        patterns
+            .iter()
+            .map(|pattern| {
+                if pattern == "*" {
+                    WorkspacePattern::Any
+                } else if let Some(prefix) = pattern.strip_suffix('*') {
+                    WorkspacePattern::Prefix(prefix.to_string())
+                } else {
+                    WorkspacePattern::Exact(pattern.clone())
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(super) fn build_auth_mode(
@@ -78,7 +102,7 @@ pub(super) fn build_auth_mode(
 
         rules.push(AuthRule {
             token_sha256,
-            allowed_workspaces: Arc::from(rule.allowed_workspaces.clone()),
+            allowed_workspaces: compile_workspace_patterns(&rule.allowed_workspaces),
         });
     }
 
@@ -108,15 +132,11 @@ fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
     prefix.ends_with('-') && workspace_id.starts_with(prefix)
 }
 
-pub(super) fn workspace_allowed(patterns: &[String], workspace_id: &str) -> bool {
-    patterns.iter().any(|pattern| {
-        if pattern == "*" {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return prefix_pattern_matches(prefix, workspace_id);
-        }
-        pattern == workspace_id
+pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &str) -> bool {
+    patterns.iter().any(|pattern| match pattern {
+        WorkspacePattern::Any => true,
+        WorkspacePattern::Prefix(prefix) => prefix_pattern_matches(prefix, workspace_id),
+        WorkspacePattern::Exact(exact) => exact == workspace_id,
     })
 }
 
@@ -140,11 +160,11 @@ fn parse_token_sha256(token: &str) -> anyhow::Result<[u8; 32]> {
     let Some(hex) = token.strip_prefix("sha256:") else {
         anyhow::bail!("auth token must be sha256:<64 hex chars>");
     };
-    let bytes = hex::decode(hex).map_err(anyhow::Error::msg)?;
-    let hash: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid sha256 token hash length"))?;
+    if hex.len() != 64 {
+        anyhow::bail!("invalid sha256 token hash length");
+    }
+    let mut hash = [0u8; 32];
+    hex::decode_to_slice(hex, &mut hash).map_err(anyhow::Error::msg)?;
     Ok(hash)
 }
 
@@ -272,13 +292,34 @@ mod tests {
 
     #[test]
     fn workspace_allowlist_supports_star_and_prefix() {
-        assert!(workspace_allowed(&[String::from("*")], "ws"));
-        assert!(workspace_allowed(&[String::from("ws")], "ws"));
-        assert!(!workspace_allowed(&[String::from("ws")], "ws2"));
-        assert!(workspace_allowed(&[String::from("team-*")], "team-123"));
-        assert!(!workspace_allowed(&[String::from("team*")], "team-123"));
-        assert!(!workspace_allowed(&[String::from("team*")], "teammate"));
-        assert!(!workspace_allowed(&[String::from("team-*")], "other"));
+        assert!(workspace_allowed(
+            &compile_workspace_patterns(&[String::from("*")]),
+            "ws"
+        ));
+        assert!(workspace_allowed(
+            &compile_workspace_patterns(&[String::from("ws")]),
+            "ws"
+        ));
+        assert!(!workspace_allowed(
+            &compile_workspace_patterns(&[String::from("ws")]),
+            "ws2"
+        ));
+        assert!(workspace_allowed(
+            &compile_workspace_patterns(&[String::from("team-*")]),
+            "team-123"
+        ));
+        assert!(!workspace_allowed(
+            &compile_workspace_patterns(&[String::from("team*")]),
+            "team-123"
+        ));
+        assert!(!workspace_allowed(
+            &compile_workspace_patterns(&[String::from("team*")]),
+            "teammate"
+        ));
+        assert!(!workspace_allowed(
+            &compile_workspace_patterns(&[String::from("team-*")]),
+            "other"
+        ));
     }
 
     #[test]
