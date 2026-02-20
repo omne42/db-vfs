@@ -45,17 +45,22 @@ fn advance_after_cursor(
     metas: &[crate::store::FileMeta],
     op: &'static str,
 ) -> Result<()> {
-    let Some(next_after) = metas.last().map(|meta| meta.path.clone()) else {
+    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
         return Ok(());
     };
     if let Some(prev_after) = after.as_ref()
-        && next_after <= *prev_after
+        && next_after <= prev_after.as_str()
     {
         return Err(Error::Db(format!(
             "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
         )));
     }
-    *after = Some(next_after);
+    if let Some(cursor) = after.as_mut() {
+        cursor.clear();
+        cursor.push_str(next_after);
+    } else {
+        *after = Some(next_after.to_string());
+    }
     Ok(())
 }
 

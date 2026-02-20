@@ -246,13 +246,18 @@ fn allow_from_bucket(
 }
 
 fn prune_stale_buckets(state: &mut RateLimitState, now: Instant) -> usize {
+    if state.buckets.is_empty() {
+        state.last_prune = now;
+        return 0;
+    }
+
     let before = state.buckets.len();
     state
         .buckets
         .retain(|_, bucket| now.saturating_duration_since(bucket.last_seen) <= BUCKET_TTL);
     let len = state.buckets.len();
     let capacity = state.buckets.capacity();
-    if capacity > MAX_BUCKETS_BEFORE_PRUNE && len.saturating_mul(4) < capacity {
+    if capacity >= MAX_BUCKETS_BEFORE_PRUNE && len.saturating_mul(4) < capacity {
         state.buckets.shrink_to(len.max(1));
     }
     state.last_prune = now;
@@ -263,6 +268,7 @@ fn prune_stale_buckets(state: &mut RateLimitState, now: Instant) -> usize {
 mod tests {
     use super::*;
     use db_vfs_core::policy::VfsPolicy;
+    use std::collections::HashMap;
 
     fn ips_for_shard(limiter: &RateLimiter, target: usize, count: usize) -> Vec<IpAddr> {
         let mut out = Vec::with_capacity(count);
@@ -286,6 +292,38 @@ mod tests {
             }
         }
         panic!("no ip found for shard");
+    }
+
+    #[test]
+    fn prune_stale_buckets_reclaims_threshold_capacity() {
+        let now = Instant::now();
+        let stale = now
+            .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
+            .unwrap_or(now);
+
+        let mut buckets = HashMap::with_capacity(MAX_BUCKETS_BEFORE_PRUNE);
+        for idx in 0u8..8 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 0, idx));
+            buckets.insert(
+                ip,
+                RateLimitBucket {
+                    tokens: 1.0,
+                    last: stale,
+                    last_seen: stale,
+                },
+            );
+        }
+        let before_capacity = buckets.capacity();
+        assert!(before_capacity >= MAX_BUCKETS_BEFORE_PRUNE);
+
+        let mut state = RateLimitState {
+            buckets,
+            last_prune: stale,
+        };
+        let removed = prune_stale_buckets(&mut state, now);
+        assert_eq!(removed, 8);
+        assert!(state.buckets.is_empty());
+        assert!(state.buckets.capacity() < before_capacity);
     }
 
     #[tokio::test]
