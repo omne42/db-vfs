@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/scan: speed up literal `grep` matching and JSON escaped-byte accounting on ASCII-heavy content paths to reduce scan CPU overhead.
 - store/pagination: make legacy cursor-pagination fallback robust against unsorted `list_metas_by_prefix` implementations by sorting before cursor partitioning.
 - service/rate-limiter: avoid preallocating large shard/capacity structures when rate limiting is disabled.
+- service/rate-limiter: reduce mutex hold times on hot allow/prune paths, avoid hash-index truncation on 32-bit targets, and use fused token refill math in bucket updates.
 
 ### Internal
 

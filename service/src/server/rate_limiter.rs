@@ -96,7 +96,10 @@ impl RateLimiter {
         }
 
         if let Some(bucket) = state.buckets.get_mut(&ip) {
-            return allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+            let allowed =
+                allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+            drop(state);
+            return allowed;
         }
 
         if !self.try_reserve_ip_slot() {
@@ -110,7 +113,10 @@ impl RateLimiter {
             let mut state = self.shards[idx].lock().await;
             if let Some(bucket) = state.buckets.get_mut(&ip) {
                 self.release_ip_slots(1);
-                return allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+                let allowed =
+                    allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+                drop(state);
+                return allowed;
             }
 
             let bucket = state.buckets.entry(ip).or_insert(RateLimitBucket {
@@ -119,7 +125,10 @@ impl RateLimiter {
                 last_seen: now,
             });
 
-            return allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+            let allowed =
+                allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+            drop(state);
+            return allowed;
         }
 
         let bucket = state.buckets.entry(ip).or_insert(RateLimitBucket {
@@ -128,13 +137,17 @@ impl RateLimiter {
             last_seen: now,
         });
 
-        allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity)
+        let allowed = allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+        drop(state);
+        allowed
     }
 
     fn shard_index(&self, ip: &IpAddr) -> usize {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         ip.hash(&mut hasher);
-        (hasher.finish() as usize) % self.shards.len()
+        let shard_count = self.shards.len() as u64;
+        let idx = hasher.finish() % shard_count;
+        usize::try_from(idx).unwrap_or(0)
     }
 
     fn try_reserve_ip_slot(&self) -> bool {
@@ -177,9 +190,12 @@ impl RateLimiter {
         for shard in self.shards.iter() {
             let mut state = shard.lock().await;
             if now.saturating_duration_since(state.last_prune) < PRUNE_INTERVAL {
+                drop(state);
                 continue;
             }
-            removed_total = removed_total.saturating_add(prune_stale_buckets(&mut state, now));
+            let removed = prune_stale_buckets(&mut state, now);
+            drop(state);
+            removed_total = removed_total.saturating_add(removed);
         }
         self.release_ip_slots(removed_total);
         removed_total
@@ -211,7 +227,7 @@ fn allow_from_bucket(
     bucket.last_seen = now;
 
     let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
-    bucket.tokens = (bucket.tokens + elapsed * refill_per_sec).min(capacity);
+    bucket.tokens = elapsed.mul_add(refill_per_sec, bucket.tokens).min(capacity);
     bucket.last = now;
 
     if bucket.tokens >= 1.0 {
