@@ -156,7 +156,17 @@ fn load_content_with_retry<S: crate::store::Store>(
         attempts += 1;
 
         match vfs.store.get_content(workspace_id, path, meta.version)? {
-            Some(content) => return Ok((meta, content)),
+            Some(content) => {
+                let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+                if content_size_bytes > max_bytes {
+                    return Err(Error::FileTooLarge {
+                        path: path.to_string(),
+                        size_bytes: content_size_bytes,
+                        max_bytes,
+                    });
+                }
+                return Ok((meta, content));
+            }
             None => {
                 meta = vfs.store.get_meta(workspace_id, path)?.ok_or_else(|| {
                     Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
@@ -492,6 +502,34 @@ mod tests {
         policy.limits.max_read_bytes = 5;
         policy.secrets.redact_regexes = vec!["a".to_string()];
         policy.secrets.replacement = "xxxxxx".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: None,
+                end_line: None,
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "file_too_large");
+    }
+
+    #[test]
+    fn read_fails_when_actual_content_exceeds_read_limit_even_if_meta_is_stale() {
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "abcdef".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 4;
 
         let mut vfs = DbVfs::new(store, policy).expect("vfs");
         let err = vfs

@@ -110,6 +110,14 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         }
         return Err(Error::Db("file content could not be loaded".to_string()));
     };
+    let existing_size_bytes = u64::try_from(existing_content.len()).unwrap_or(u64::MAX);
+    if existing_size_bytes > max_fetch_bytes {
+        return Err(Error::FileTooLarge {
+            path: requested_path.clone(),
+            size_bytes: existing_size_bytes,
+            max_bytes: max_fetch_bytes,
+        });
+    }
 
     let updated =
         diffy::apply(&existing_content, &parsed).map_err(|err| Error::Patch(err.to_string()))?;
@@ -138,4 +146,109 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
         bytes_written,
         version,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use db_vfs_core::policy::VfsPolicy;
+
+    struct InconsistentSizeStore {
+        meta: FileMeta,
+        content: String,
+    }
+
+    impl Store for InconsistentSizeStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.meta.path && version == self.meta.version {
+                Ok(Some(self.content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn patch_fails_when_actual_content_exceeds_read_limit_even_if_meta_is_stale() {
+        let store = InconsistentSizeStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "abcdef".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+        policy.limits.max_read_bytes = 4;
+        policy.limits.max_patch_bytes = Some(1024);
+
+        let patch = diffy::create_patch("abcdef", "abcxef").to_string();
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch,
+                expected_version: 1,
+            })
+            .expect_err("should fail");
+        assert_eq!(err.code(), "file_too_large");
+    }
 }

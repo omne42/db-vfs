@@ -216,6 +216,7 @@ pub(super) fn grep<S: crate::store::Store>(
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
     let max_scan_files_u64 = u64::try_from(max_scan_files).unwrap_or(u64::MAX);
+    let max_read_bytes = vfs.policy.limits.max_read_bytes;
 
     let mut matches = Vec::<GrepMatch>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut skipped_too_large_files: u64 = 0;
@@ -302,7 +303,7 @@ pub(super) fn grep<S: crate::store::Store>(
             }
             scanned_files = scanned_files.saturating_add(1);
 
-            if meta_size_bytes > vfs.policy.limits.max_read_bytes {
+            if meta_size_bytes > max_read_bytes {
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
                 continue;
             }
@@ -314,6 +315,11 @@ pub(super) fn grep<S: crate::store::Store>(
                 skipped_missing_content = skipped_missing_content.saturating_add(1);
                 continue;
             };
+            let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+            if content_size_bytes > max_read_bytes {
+                skipped_too_large_files = skipped_too_large_files.saturating_add(1);
+                continue;
+            }
 
             for (idx, line) in content.lines().enumerate() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
@@ -607,6 +613,38 @@ mod tests {
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].text, "X");
         assert!(resp.matches[0].line_truncated);
+    }
+
+    #[test]
+    fn grep_skips_file_when_actual_content_exceeds_read_limit_even_if_meta_is_stale() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "abcdef".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.limits.max_read_bytes = 4;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "a".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.skipped_too_large_files, 1);
     }
 
     struct NonMonotonicPageStore {
