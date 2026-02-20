@@ -87,12 +87,17 @@ fn advance_after_cursor(
     Ok(())
 }
 
-fn grep_match_json_bytes(path: &str, line_no: u64, text: &str, line_truncated: bool) -> usize {
+fn grep_match_json_bytes(
+    path_json_escaped_len: usize,
+    line_no: u64,
+    text: &str,
+    line_truncated: bool,
+) -> usize {
     // {"path":"...","line":123,"text":"...","line_truncated":false}
     let bool_len = if line_truncated { 4 } else { 5 };
     "{\"path\":\""
         .len()
-        .saturating_add(json_escaped_str_len(path))
+        .saturating_add(path_json_escaped_len)
         .saturating_add("\",\"line\":".len())
         .saturating_add(u64_decimal_len(line_no))
         .saturating_add(",\"text\":\"".len())
@@ -275,6 +280,7 @@ pub(super) fn grep<S: crate::store::Store>(
             let path = meta.path;
             let meta_version = meta.version;
             let meta_size_bytes = meta.size_bytes;
+            let path_json_escaped_len = json_escaped_str_len(&path);
 
             scanned_entries = scanned_entries.saturating_add(1);
 
@@ -362,8 +368,9 @@ pub(super) fn grep<S: crate::store::Store>(
                 };
                 let line_no = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
                 // Budget against JSON-encoded output size (escaped strings + object structure).
-                let entry_bytes = grep_match_json_bytes(&path, line_no, &text, line_truncated)
-                    .saturating_add(usize::from(!matches.is_empty()));
+                let entry_bytes =
+                    grep_match_json_bytes(path_json_escaped_len, line_no, &text, line_truncated)
+                        .saturating_add(usize::from(!matches.is_empty()));
                 let next_response_bytes = response_bytes.saturating_add(entry_bytes);
                 if next_response_bytes > MAX_SCAN_RESPONSE_BYTES {
                     scan_limit_reached = true;

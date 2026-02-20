@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.
+- vfs/grep: cache per-file escaped-path byte length while budgeting JSON response size, removing repeated per-match path escaping work on hot scan paths.
 - store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
 - service/audit: preserve request-time `ts_ms` in async audit worker instead of overwriting it with worker flush time.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.

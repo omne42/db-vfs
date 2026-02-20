@@ -32,8 +32,28 @@ fn audit_preview(input: &str, max_bytes: usize) -> String {
     format!("{}…", &input[..end])
 }
 
-fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) -> String {
+fn is_path_or_descendant_denied(
+    redactor: &db_vfs_core::redaction::SecretRedactor,
+    path: &str,
+) -> bool {
     if redactor.is_path_denied(path) {
+        return true;
+    }
+
+    let trimmed = path.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let mut descendant_probe = String::with_capacity(trimmed.len().saturating_add(24));
+    descendant_probe.push_str(trimmed);
+    descendant_probe.push('/');
+    descendant_probe.push_str("__db_vfs_audit_probe__");
+    redactor.is_path_denied(&descendant_probe)
+}
+
+fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) -> String {
+    if is_path_or_descendant_denied(redactor, path) {
         "<secret>".to_string()
     } else {
         path.to_string()
@@ -41,7 +61,7 @@ fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) ->
 }
 
 fn redact_path_owned(redactor: &db_vfs_core::redaction::SecretRedactor, path: String) -> String {
-    if redactor.is_path_denied(&path) {
+    if is_path_or_descendant_denied(redactor, &path) {
         "<secret>".to_string()
     } else {
         path
@@ -651,4 +671,21 @@ pub(super) async fn grep(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{redact_path, redact_path_owned};
+    use db_vfs_core::policy::SecretRules;
+    use db_vfs_core::redaction::SecretRedactor;
+
+    #[test]
+    fn redact_path_hides_denied_prefix_root_paths() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert_eq!(redact_path(&redactor, ".git"), "<secret>");
+        assert_eq!(redact_path(&redactor, ".git/"), "<secret>");
+        assert_eq!(redact_path_owned(&redactor, ".git".to_string()), "<secret>");
+        assert_eq!(redact_path_owned(&redactor, "docs".to_string()), "docs");
+    }
 }
