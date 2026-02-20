@@ -114,7 +114,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     let updated =
         diffy::apply(&existing_content, &parsed).map_err(|err| Error::Patch(err.to_string()))?;
 
-    let bytes_written = updated.len() as u64;
+    let bytes_written = u64::try_from(updated.len()).unwrap_or(u64::MAX);
     if bytes_written > vfs.policy.limits.max_write_bytes {
         return Err(Error::FileTooLarge {
             path: requested_path,

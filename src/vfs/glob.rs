@@ -85,6 +85,7 @@ pub(super) fn glob<S: crate::store::Store>(
 
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
+    let max_scan_files_u64 = u64::try_from(max_scan_files).unwrap_or(u64::MAX);
     let mut matches = Vec::<String>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: usize = 0;
@@ -146,7 +147,7 @@ pub(super) fn glob<S: crate::store::Store>(
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
                 continue;
             }
-            if scanned_files >= max_scan_files as u64 {
+            if scanned_files >= max_scan_files_u64 {
                 scan_limit_reached = true;
                 scan_limit_reason = Some(ScanLimitReason::Files);
                 break 'scan;
@@ -199,6 +200,6 @@ pub(super) fn glob<S: crate::store::Store>(
         scan_limit_reached,
         scan_limit_reason,
         elapsed_ms: elapsed_ms(&started),
-        scanned_entries: scanned_entries as u64,
+        scanned_entries: u64::try_from(scanned_entries).unwrap_or(u64::MAX),
     })
 }

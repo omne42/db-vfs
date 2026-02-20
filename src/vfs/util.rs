@@ -108,8 +108,36 @@ pub(super) fn glob_is_match(glob: &GlobSet, path: &str) -> bool {
     while normalized.starts_with("./") {
         normalized.drain(..2);
     }
-    normalized = normalized.trim_start_matches('/').to_string();
-    glob.is_match(std::path::Path::new(&normalized))
+    let leading_slashes = normalized.bytes().take_while(|&b| b == b'/').count();
+    if leading_slashes > 0 {
+        normalized.drain(..leading_slashes);
+    }
+    if normalized.is_empty()
+        || normalized.contains('\0')
+        || normalized.chars().any(char::is_control)
+    {
+        return false;
+    }
+
+    let mut out = String::with_capacity(normalized.len());
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return false;
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(segment);
+    }
+
+    if out.is_empty() {
+        return false;
+    }
+
+    glob.is_match(std::path::Path::new(&out))
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
@@ -175,5 +203,13 @@ mod tests {
         assert!(!is_canonical_runtime_path("/docs/a.txt"));
         assert!(!is_canonical_runtime_path("docs//a.txt"));
         assert!(!is_canonical_runtime_path("docs/a.txt/"));
+    }
+
+    #[test]
+    fn glob_match_runtime_normalization_rejects_invalid_paths() {
+        let glob = compile_glob("docs/*.txt").expect("glob");
+        assert!(glob_is_match(&glob, "./docs//a.txt"));
+        assert!(!glob_is_match(&glob, "docs/../a.txt"));
+        assert!(!glob_is_match(&glob, "docs/\na.txt"));
     }
 }

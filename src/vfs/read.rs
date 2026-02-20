@@ -95,7 +95,7 @@ pub(super) fn read<S: crate::store::Store>(
             max_bytes: max_read_bytes,
         })?;
 
-    let bytes_read = content.len() as u64;
+    let bytes_read = u64::try_from(content.len()).unwrap_or(u64::MAX);
     if bytes_read > max_read_bytes {
         return Err(Error::FileTooLarge {
             path: requested_path,
@@ -196,7 +196,7 @@ fn extract_line_range(
             None => bytes.len(),
         };
 
-        scanned_bytes = scanned_bytes.saturating_add((next - pos) as u64);
+        scanned_bytes = scanned_bytes.saturating_add(u64::try_from(next - pos).unwrap_or(u64::MAX));
         if scanned_bytes > max_scan_bytes {
             let size_bytes = file_size_bytes.max(scanned_bytes);
             return Err(Error::FileTooLarge {

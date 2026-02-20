@@ -30,6 +30,8 @@ fn is_canonical_runtime_path(path: &str) -> bool {
         && !path.ends_with('/')
         && !path.ends_with("/.")
         && !path.ends_with("/..")
+        && !path.contains('\0')
+        && !path.chars().any(char::is_control)
 }
 
 fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
@@ -41,12 +43,18 @@ fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
     while normalized.starts_with("./") {
         normalized.drain(..2);
     }
-    normalized = normalized.trim_start_matches('/').to_string();
-    if normalized.is_empty() {
+    let leading_slashes = normalized.bytes().take_while(|&b| b == b'/').count();
+    if leading_slashes > 0 {
+        normalized.drain(..leading_slashes);
+    }
+    if normalized.is_empty()
+        || normalized.contains('\0')
+        || normalized.chars().any(char::is_control)
+    {
         return None;
     }
 
-    let mut out = Vec::<&str>::new();
+    let mut out = String::with_capacity(normalized.len());
     for segment in normalized.split('/') {
         if segment.is_empty() || segment == "." {
             continue;
@@ -54,12 +62,15 @@ fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
         if segment == ".." {
             return None;
         }
-        out.push(segment);
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(segment);
     }
     if out.is_empty() {
         return None;
     }
-    Some(Cow::Owned(out.join("/")))
+    Some(Cow::Owned(out))
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +309,16 @@ mod tests {
         };
         let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
         assert!(redactor.is_path_denied(".\\dir\\a.txt"));
+    }
+
+    #[test]
+    fn deny_path_rejects_control_characters_at_runtime() {
+        let rules = SecretRules {
+            deny_globs: vec!["dir/*".to_string()],
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        assert!(!redactor.is_path_denied("dir/\nsecret.txt"));
     }
 
     #[test]

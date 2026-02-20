@@ -191,6 +191,7 @@ pub(super) fn grep<S: crate::store::Store>(
 
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
+    let max_scan_files_u64 = u64::try_from(max_scan_files).unwrap_or(u64::MAX);
 
     let mut matches = Vec::<GrepMatch>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut skipped_too_large_files: u64 = 0;
@@ -270,7 +271,7 @@ pub(super) fn grep<S: crate::store::Store>(
                 continue;
             }
 
-            if scanned_files >= max_scan_files as u64 {
+            if scanned_files >= max_scan_files_u64 {
                 scan_limit_reached = true;
                 scan_limit_reason = Some(ScanLimitReason::Files);
                 break 'scan;
@@ -322,7 +323,7 @@ pub(super) fn grep<S: crate::store::Store>(
                 } else {
                     line_slice.to_string()
                 };
-                let line_no = idx.saturating_add(1) as u64;
+                let line_no = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
                 // Budget against JSON-encoded output size (escaped strings + object structure).
                 let entry_bytes = grep_match_json_bytes(&path, line_no, &text, line_truncated)
                     .saturating_add(usize::from(!matches.is_empty()));
@@ -379,7 +380,7 @@ pub(super) fn grep<S: crate::store::Store>(
         scan_limit_reached,
         scan_limit_reason,
         elapsed_ms: elapsed_ms(&started),
-        scanned_entries: scanned_entries as u64,
+        scanned_entries: u64::try_from(scanned_entries).unwrap_or(u64::MAX),
     })
 }
 
