@@ -7,6 +7,7 @@ use db_vfs_core::glob_utils::{
     build_glob_from_normalized, normalize_glob_pattern_for_matching,
     validate_normalized_root_relative_glob_pattern,
 };
+use db_vfs_core::path::is_canonical_runtime_relative_path;
 use db_vfs_core::{Error, Result};
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
@@ -90,22 +91,7 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
 }
 
 fn is_canonical_runtime_path(path: &str) -> bool {
-    path == path.trim()
-        && !path.is_empty()
-        && !path.starts_with('/')
-        && !path.starts_with("./")
-        && !path.starts_with("../")
-        && path != "."
-        && path != ".."
-        && !path.contains('\\')
-        && !path.contains("//")
-        && !path.contains("/./")
-        && !path.contains("/../")
-        && !path.ends_with('/')
-        && !path.ends_with("/.")
-        && !path.ends_with("/..")
-        && !path.contains('\0')
-        && !path.chars().any(char::is_control)
+    is_canonical_runtime_relative_path(path)
 }
 
 fn strip_leading_dot_slashes(mut s: &str) -> &str {

@@ -2,6 +2,62 @@ use std::borrow::Cow;
 
 use crate::{Error, Result};
 
+#[inline]
+pub fn is_canonical_runtime_relative_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if first.is_whitespace() || first == '/' {
+        return false;
+    }
+    if path.chars().next_back().is_some_and(char::is_whitespace) {
+        return false;
+    }
+
+    let mut at_segment_start = true;
+    let mut segment_len = 0usize;
+    let mut segment_is_dot = false;
+    let mut segment_is_dotdot = false;
+
+    for ch in path.chars() {
+        if ch == '\\' || ch == '\0' || ch.is_control() {
+            return false;
+        }
+
+        if ch == '/' {
+            if at_segment_start || segment_is_dot || segment_is_dotdot {
+                return false;
+            }
+            at_segment_start = true;
+            segment_len = 0;
+            segment_is_dot = false;
+            segment_is_dotdot = false;
+            continue;
+        }
+
+        if at_segment_start {
+            at_segment_start = false;
+            segment_len = 1;
+            segment_is_dot = ch == '.';
+            segment_is_dotdot = ch == '.';
+            continue;
+        }
+
+        segment_len = segment_len.saturating_add(1);
+        if segment_len == 2 {
+            segment_is_dot = false;
+            segment_is_dotdot = segment_is_dotdot && ch == '.';
+        } else {
+            segment_is_dot = false;
+            segment_is_dotdot = false;
+        }
+    }
+
+    !at_segment_start && !segment_is_dot && !segment_is_dotdot
+}
+
 pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
     const MAX_BYTES: usize = 256;
     if workspace_id.is_empty() {
@@ -368,5 +424,24 @@ mod tests {
         assert_eq!(normalize_path("docs/a.txt").unwrap(), "docs/a.txt");
         assert_eq!(normalize_path_prefix("docs").unwrap(), "docs/");
         assert_eq!(normalize_path_prefix("docs/").unwrap(), "docs/");
+    }
+
+    #[test]
+    fn canonical_runtime_relative_path_detection_is_strict() {
+        assert!(is_canonical_runtime_relative_path("docs/a.txt"));
+        assert!(is_canonical_runtime_relative_path("team/a b.txt"));
+        assert!(!is_canonical_runtime_relative_path(""));
+        assert!(!is_canonical_runtime_relative_path("./docs/a.txt"));
+        assert!(!is_canonical_runtime_relative_path("../docs/a.txt"));
+        assert!(!is_canonical_runtime_relative_path("."));
+        assert!(!is_canonical_runtime_relative_path(".."));
+        assert!(!is_canonical_runtime_relative_path("/docs/a.txt"));
+        assert!(!is_canonical_runtime_relative_path("docs//a.txt"));
+        assert!(!is_canonical_runtime_relative_path("docs/./a.txt"));
+        assert!(!is_canonical_runtime_relative_path("docs/../a.txt"));
+        assert!(!is_canonical_runtime_relative_path("docs/a.txt/"));
+        assert!(!is_canonical_runtime_relative_path(" docs/a.txt"));
+        assert!(!is_canonical_runtime_relative_path("docs/a.txt "));
+        assert!(!is_canonical_runtime_relative_path("docs\\a.txt"));
     }
 }

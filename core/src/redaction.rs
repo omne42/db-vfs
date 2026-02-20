@@ -7,6 +7,7 @@ use crate::glob_utils::{
     build_glob_from_normalized, expand_dir_star_to_descendants,
     normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
+use crate::path::is_canonical_runtime_relative_path;
 use crate::policy::SecretRules;
 use crate::{Error, Result};
 
@@ -16,22 +17,7 @@ const MAX_REDACT_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
 
 fn is_canonical_runtime_path(path: &str) -> bool {
-    path == path.trim()
-        && !path.is_empty()
-        && !path.starts_with('/')
-        && !path.starts_with("./")
-        && !path.starts_with("../")
-        && path != "."
-        && path != ".."
-        && !path.contains('\\')
-        && !path.contains("//")
-        && !path.contains("/./")
-        && !path.contains("/../")
-        && !path.ends_with('/')
-        && !path.ends_with("/.")
-        && !path.ends_with("/..")
-        && !path.contains('\0')
-        && !path.chars().any(char::is_control)
+    is_canonical_runtime_relative_path(path)
 }
 
 fn strip_leading_dot_slashes(mut s: &str) -> &str {

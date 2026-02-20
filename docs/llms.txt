@@ -294,6 +294,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
+- service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
+- core/path: add an ASCII fast path for `workspace_id` validation to reduce per-request character-class overhead on common hot-path inputs.
 - service/auth: precompile `allowed_workspaces` patterns at startup and decode `sha256:` token hashes directly into fixed-size buffers, reducing per-request auth matching overhead and startup-time transient allocations.
 - core/redaction: make `redact_text_owned_bounded` enforce `max_output_bytes` even when no regex rules/matches apply, closing a bounds-check bypass and skipping unnecessary regex traversal for oversized inputs.
 - core/redaction+vfs/grep: add borrowed bounded-redaction path and use it in grep so matched lines avoid eager string allocation before response-byte budgeting when redaction rules are enabled.
