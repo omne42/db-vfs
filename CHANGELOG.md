@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- core/redaction: make `redact_text_owned_bounded` enforce `max_output_bytes` even when no regex rules/matches apply, closing a bounds-check bypass and skipping unnecessary regex traversal for oversized inputs.
 - core/redaction+vfs/grep: add borrowed bounded-redaction path and use it in grep so matched lines avoid eager string allocation before response-byte budgeting when redaction rules are enabled.
 - service/postgres-cancel: reuse cancel tokens from queue fallback errors and move fallback in-flight guards into spawned task captures so slot accounting is released even if execution is canceled before task start.
 - service/audit-handlers: de-duplicate secret-path redaction when `requested_path` and `path` are identical, reducing redundant matcher checks and transient allocations on read/write/patch/delete audit paths.

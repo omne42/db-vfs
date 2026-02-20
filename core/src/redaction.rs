@@ -220,6 +220,10 @@ impl SecretRedactor {
         input: String,
         max_output_bytes: usize,
     ) -> std::result::Result<String, usize> {
+        if input.len() > max_output_bytes {
+            return Err(input.len());
+        }
+
         let mut current: Cow<'_, str> = Cow::Borrowed(input.as_str());
         for regex in &self.redact {
             current = redact_with_literal_replacement_bounded(
@@ -404,6 +408,29 @@ mod tests {
             .redact_text_owned_bounded("public".to_string(), 8)
             .expect("bounded redact");
         assert_eq!(out, "public");
+    }
+
+    #[test]
+    fn redact_text_owned_bounded_rejects_oversized_input_without_match() {
+        let rules = SecretRules {
+            redact_regexes: vec!["secret".to_string()],
+            replacement: "x".to_string(),
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        let err = redactor
+            .redact_text_owned_bounded("public-data".to_string(), 6)
+            .expect_err("oversized input should fail even without regex matches");
+        assert_eq!(err, "public-data".len());
+    }
+
+    #[test]
+    fn redact_text_owned_bounded_rejects_oversized_input_without_rules() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        let err = redactor
+            .redact_text_owned_bounded("public-data".to_string(), 6)
+            .expect_err("oversized input should fail even without redact rules");
+        assert_eq!(err, "public-data".len());
     }
 
     #[test]
