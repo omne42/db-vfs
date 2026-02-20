@@ -189,7 +189,9 @@ pub(super) fn glob<S: crate::store::Store>(
         if metas.is_empty() {
             break;
         }
-        advance_after_cursor(&mut after, &metas, "glob")?;
+        if has_more {
+            advance_after_cursor(&mut after, &metas, "glob")?;
+        }
 
         for meta in metas {
             let path = meta.path;

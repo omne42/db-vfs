@@ -107,7 +107,8 @@ fn generate_request_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64;
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
     let seq = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = u64::from(std::process::id());
     format!("{pid:08x}{millis:016x}{seq:016x}")

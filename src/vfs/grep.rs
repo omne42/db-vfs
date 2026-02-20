@@ -314,7 +314,9 @@ pub(super) fn grep<S: crate::store::Store>(
         if metas.is_empty() {
             break;
         }
-        advance_after_cursor(&mut after, &metas, "grep")?;
+        if has_more {
+            advance_after_cursor(&mut after, &metas, "grep")?;
+        }
 
         for meta in metas {
             let path = meta.path;
@@ -369,6 +371,11 @@ pub(super) fn grep<S: crate::store::Store>(
             let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
             if content_size_bytes > max_read_bytes {
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
+                continue;
+            }
+            if let Some(finder) = literal_finder.as_ref()
+                && finder.find(content.as_bytes()).is_none()
+            {
                 continue;
             }
 
@@ -693,6 +700,37 @@ mod tests {
 
         assert!(resp.matches.is_empty());
         assert_eq!(resp.skipped_too_large_files, 1);
+    }
+
+    #[test]
+    fn grep_literal_query_spanning_newline_does_not_match_across_lines() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 5,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "ab\ncd".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "b\nc".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.scanned_files, 1);
     }
 
     struct NonMonotonicPageStore {
