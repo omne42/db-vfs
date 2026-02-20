@@ -127,6 +127,11 @@ pub trait Store {
         loop {
             let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
             let rows_len = rows.len();
+            if rows_len > 1 && rows.windows(2).any(|pair| pair[0].path > pair[1].path) {
+                // Legacy stores may not return rows in lexical path order. Keep the
+                // fallback deterministic/correct for cursor pagination.
+                rows.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            }
             let split = rows.partition_point(|meta| meta.path.as_str() <= after);
             let mut out = rows.split_off(split);
             if out.len() >= limit {
@@ -362,6 +367,78 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct UnsortedPrefixStore {
+        paths: Vec<String>,
+    }
+
+    impl Store for UnsortedPrefixStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            let mut rows = self
+                .paths
+                .iter()
+                .filter(|path| path.starts_with(prefix))
+                .take(limit)
+                .map(|path| FileMeta {
+                    path: path.clone(),
+                    size_bytes: 0,
+                    version: 1,
+                    updated_at_ms: 0,
+                })
+                .collect::<Vec<_>>();
+            rows.reverse();
+            Ok(rows)
+        }
+    }
+
     #[test]
     fn default_page_impl_supports_cursor_pagination_with_legacy_stores() {
         let mut store = PrefixOnlyStore {
@@ -374,6 +451,23 @@ mod tests {
         let page = store
             .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
             .expect("cursor pagination fallback should work");
+        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+    }
+
+    #[test]
+    fn default_page_impl_handles_unsorted_legacy_rows() {
+        let mut store = UnsortedPrefixStore {
+            paths: vec![
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+                "docs/c.txt".to_string(),
+            ],
+        };
+
+        let page = store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
+            .expect("fallback should sort unsorted legacy rows");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
     }

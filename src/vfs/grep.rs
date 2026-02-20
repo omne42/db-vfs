@@ -188,6 +188,11 @@ pub(super) fn grep<S: crate::store::Store>(
     } else {
         None
     };
+    let literal_query = if request.regex {
+        None
+    } else {
+        Some(request.query.as_bytes())
+    };
 
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
@@ -300,7 +305,10 @@ pub(super) fn grep<S: crate::store::Store>(
 
                 let ok = match &regex {
                     Some(regex) => regex.is_match(line),
-                    None => line.contains(&request.query),
+                    None => match literal_query {
+                        Some(query) => memchr::memmem::find(line.as_bytes(), query).is_some(),
+                        None => false,
+                    },
                 };
                 if !ok {
                     continue;

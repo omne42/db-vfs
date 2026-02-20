@@ -52,8 +52,16 @@ impl RateLimiter {
         };
         let now = Instant::now();
 
-        let initial_capacity = cfg.max_ips.clamp(1, MAX_BUCKETS_BEFORE_PRUNE);
-        let shard_count = shard_count_for(cfg.max_ips);
+        let initial_capacity = if cfg.enabled {
+            cfg.max_ips.clamp(1, MAX_BUCKETS_BEFORE_PRUNE)
+        } else {
+            1
+        };
+        let shard_count = if cfg.enabled {
+            shard_count_for(cfg.max_ips)
+        } else {
+            1
+        };
         let per_shard_capacity = initial_capacity.div_ceil(shard_count).max(1);
         let mut shards = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
@@ -298,6 +306,29 @@ mod tests {
         assert!(limiter.allow(None).await);
         assert!(limiter.allow(None).await);
 
+        assert_eq!(limiter.total_bucket_count().await, 0);
+        assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_rate_limiter_keeps_single_minimal_shard() {
+        let policy = VfsPolicy {
+            limits: db_vfs_core::policy::Limits {
+                max_requests_per_ip_per_sec: 0,
+                max_requests_burst_per_ip: 0,
+                max_rate_limit_ips: 1_000_000,
+                ..db_vfs_core::policy::Limits::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let limiter = RateLimiter::new(&policy);
+
+        assert_eq!(limiter.shards.len(), 1);
+        assert!(
+            limiter
+                .allow(Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))))
+                .await
+        );
         assert_eq!(limiter.total_bucket_count().await, 0);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 0);
     }

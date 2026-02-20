@@ -30,6 +30,18 @@ pub(super) fn elapsed_ms(started: &Instant) -> u64 {
 }
 
 pub(super) fn json_escaped_str_len(input: &str) -> usize {
+    if input.is_ascii() {
+        return input
+            .as_bytes()
+            .iter()
+            .map(|byte| match byte {
+                b'"' | b'\\' | b'\x08' | b'\x0C' | b'\n' | b'\r' | b'\t' => 2,
+                0x00..=0x1F => 6,
+                _ => 1,
+            })
+            .sum();
+    }
+
     input
         .chars()
         .map(|ch| match ch {
@@ -185,6 +197,7 @@ mod tests {
     fn json_escaped_str_len_counts_escapes() {
         assert_eq!(json_escaped_str_len("abc"), 3);
         assert_eq!(json_escaped_str_len("\"\\\n"), 6);
+        assert_eq!(json_escaped_str_len("abc\u{0001}"), 9);
         assert_eq!(json_escaped_str_len("\u{2028}"), 6);
     }
 
