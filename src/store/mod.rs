@@ -169,12 +169,12 @@ fn prefix_successor(prefix: &str) -> Option<String> {
         return None;
     }
 
-    let mut chars: Vec<char> = prefix.chars().collect();
-    for idx in (0..chars.len()).rev() {
-        if let Some(next) = next_scalar_char(chars[idx]) {
-            chars[idx] = next;
-            chars.truncate(idx + 1);
-            return Some(chars.into_iter().collect());
+    for (idx, ch) in prefix.char_indices().rev() {
+        if let Some(next) = next_scalar_char(ch) {
+            let mut out = String::with_capacity(idx.saturating_add(next.len_utf8()));
+            out.push_str(&prefix[..idx]);
+            out.push(next);
+            return Some(out);
         }
     }
 

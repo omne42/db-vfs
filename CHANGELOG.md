@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - store/vfs: reject version overflow and enforce record/meta invariants to avoid silent persistence inconsistencies.
+- service/audit: preserve request-time `ts_ms` in async audit worker instead of overwriting it with worker flush time.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
 - core/redaction+traversal+glob-match: reject control/NUL and parent-segment runtime paths during matcher normalization to close invalid-path bypass edges.
 - vfs/scan counters: avoid lossy `usize -> u64` casts in scan/read/patch accounting paths on wide-pointer targets.
@@ -45,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reduce mutex hold times on hot allow/prune paths, avoid hash-index truncation on 32-bit targets, and use fused token refill math in bucket updates.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
+- store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
 
 ### Internal
 
@@ -52,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
 - tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
+- tests: add regression coverage to ensure audit worker keeps provided event timestamps unchanged.
 - tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
 
 ## [0.1.0] - 2026-01-31

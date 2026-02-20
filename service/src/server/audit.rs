@@ -262,7 +262,9 @@ fn audit_worker(
     loop {
         match receiver.recv_timeout(flush_max_interval) {
             Ok(mut event) => {
-                event.ts_ms = event.ts_ms.max(now_ms());
+                if event.ts_ms == 0 {
+                    event.ts_ms = now_ms();
+                }
 
                 if let Err(err) = serde_json::to_writer(&mut out, &event) {
                     write_failures = write_failures.saturating_add(1);
@@ -331,6 +333,7 @@ fn audit_worker(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     #[test]
     fn lock_path_for_appends_lock_suffix() {
@@ -350,5 +353,36 @@ mod tests {
             super::lock_path_for(Path::new("audit.lock")),
             PathBuf::from("audit.lock.audit-lock")
         );
+    }
+
+    #[test]
+    fn audit_worker_preserves_provided_event_timestamp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let (lock_file, file) = super::open_audit_file(&path).expect("open audit file");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+
+        let mut event = super::minimal_event("req-1".to_string(), None, "read", 200, None);
+        event.ts_ms = 42;
+        sender.send(event).expect("send event");
+        drop(sender);
+
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || {
+            super::audit_worker(
+                file,
+                receiver,
+                worker_path,
+                lock_file,
+                1,
+                Duration::from_millis(1),
+            )
+        });
+        worker.join().expect("worker join");
+
+        let raw = std::fs::read_to_string(&path).expect("read audit log");
+        let line = raw.lines().next().expect("audit line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parse json");
+        assert_eq!(parsed["ts_ms"].as_u64(), Some(42));
     }
 }
