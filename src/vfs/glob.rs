@@ -79,6 +79,23 @@ fn ensure_page_strictly_increasing(
     Ok(())
 }
 
+fn ensure_page_starts_after_cursor(
+    metas: &[crate::store::FileMeta],
+    after: Option<&str>,
+    op: &'static str,
+) -> Result<()> {
+    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
+        return Ok(());
+    };
+    if first.path.as_str() <= prev_after {
+        return Err(Error::Db(format!(
+            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
+            first.path
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn glob<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: GlobRequest,
@@ -133,7 +150,6 @@ pub(super) fn glob<S: crate::store::Store>(
     let mut scan_limit_reached = false;
     let mut scan_limit_reason: Option<ScanLimitReason> = None;
     let mut response_bytes: usize = GLOB_RESPONSE_JSON_FIXED_OVERHEAD;
-    let mut needs_sort = false;
     let mut after: Option<String> = None;
 
     'scan: loop {
@@ -163,6 +179,7 @@ pub(super) fn glob<S: crate::store::Store>(
         if has_more {
             metas.truncate(page_budget);
         }
+        ensure_page_starts_after_cursor(&metas, after.as_deref(), "glob")?;
 
         if metas.is_empty() {
             break;
@@ -204,9 +221,6 @@ pub(super) fn glob<S: crate::store::Store>(
                     scan_limit_reason = Some(ScanLimitReason::Results);
                     break 'scan;
                 }
-                if matches.last().is_some_and(|prev| prev > &path) {
-                    needs_sort = true;
-                }
                 response_bytes = next_response_bytes;
                 matches.push(path);
                 if matches.len() >= vfs.policy.limits.max_results {
@@ -228,9 +242,6 @@ pub(super) fn glob<S: crate::store::Store>(
         }
     }
 
-    if needs_sort {
-        matches.sort_unstable();
-    }
     Ok(GlobResponse {
         matches,
         truncated: scan_limit_reached,
@@ -456,6 +467,120 @@ mod tests {
         assert_eq!(err.code(), "db");
         assert!(
             err.to_string().contains("non-monotonic page ordering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    struct NonMonotonicAcrossPagesStore;
+
+    impl Store for NonMonotonicAcrossPagesStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            if after.is_none() {
+                return Ok((0..=META_PAGE_SIZE)
+                    .map(|idx| FileMeta {
+                        path: format!("docs/{idx:04}.txt"),
+                        size_bytes: 1,
+                        version: 1,
+                        updated_at_ms: 0,
+                    })
+                    .collect());
+            }
+
+            Ok(vec![
+                FileMeta {
+                    path: "docs/0001.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/9999.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ])
+        }
+    }
+
+    #[test]
+    fn glob_rejects_rows_not_strictly_after_cursor_across_pages() {
+        let store = NonMonotonicAcrossPagesStore;
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+        policy.limits.max_walk_entries = META_PAGE_SIZE + 8;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "other/*.txt".to_string(),
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("should fail on rows at/before previous cursor");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string()
+                .contains("not strictly after pagination cursor"),
             "unexpected error: {err}"
         );
     }

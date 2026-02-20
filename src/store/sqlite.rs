@@ -271,6 +271,10 @@ where
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let (lower, upper) = make_prefix_bounds(prefix);
         let limit_u64 = u64::try_from(limit)
             .map_err(|_| Error::Db("integer overflow converting limit".to_string()))?;
