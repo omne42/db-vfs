@@ -179,32 +179,45 @@ async fn acquire_permit_with_budget(
     (tokio::sync::OwnedSemaphorePermit, Option<Duration>),
     (StatusCode, Json<super::ErrorBody>),
 > {
-    match budget {
-        Some(budget) => {
-            let deadline = tokio::time::Instant::now() + budget;
-            let permit = tokio::time::timeout_at(deadline, semaphore.acquire_owned())
-                .await
-                .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?
-                .map_err(|_| {
-                    super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
-                })?;
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                drop(permit);
-                return Err(super::err(
-                    StatusCode::REQUEST_TIMEOUT,
-                    "timeout",
-                    "request timed out before execution",
-                ));
-            }
-            Ok((permit, Some(remaining)))
+    if let Some(budget) = budget {
+        if budget.is_zero() {
+            return Err(super::err(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                "request timed out before execution",
+            ));
         }
-        None => {
+
+        let now = tokio::time::Instant::now();
+        let Some(deadline) = now.checked_add(budget) else {
+            // Overflow means the configured budget exceeds what `tokio::Instant`
+            // can represent; treat it as effectively unbounded instead of panicking.
             let permit = semaphore.acquire_owned().await.map_err(|_| {
                 super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy")
             })?;
-            Ok((permit, None))
+            return Ok((permit, None));
+        };
+
+        let permit = tokio::time::timeout_at(deadline, semaphore.acquire_owned())
+            .await
+            .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?
+            .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            drop(permit);
+            return Err(super::err(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                "request timed out before execution",
+            ));
         }
+        Ok((permit, Some(remaining)))
+    } else {
+        let permit = semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
+        Ok((permit, None))
     }
 }
 
@@ -772,6 +785,15 @@ mod tests {
             .expect_err("zero budget should time out");
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
         assert_eq!(body.0.code, "timeout");
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_handles_unrepresentable_deadline_budget() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let (_permit, remaining) = acquire_permit_with_budget(semaphore, Some(Duration::MAX))
+            .await
+            .expect("overflowing deadline budget should not panic");
+        assert_eq!(remaining, None);
     }
 
     #[test]

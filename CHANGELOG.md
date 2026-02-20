@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: advance the cursor only when another page is expected, trimming redundant cursor string writes on terminal pages.
 - service/request-id: saturate UNIX-millis narrowing when generating `x-request-id` to avoid lossy timestamp wrap on extreme clock values.
 - service/handlers timeout budgeting: when queue wait consumes the full request budget, fail fast before spawning blocking VFS work, avoiding guaranteed-timeout worker churn under saturation.
+- service/handlers timeout budgeting: guard `tokio::Instant` deadline construction with `checked_add` so extremely large budgets no longer panic on overflow, and fast-fail zero-budget requests before semaphore wait.
 - vfs/grep + core/redaction: build regex error previews lazily only on compile failure, removing avoidable per-request/per-rule string allocations on successful paths.
 - vfs/read: when initial metadata reports an oversized file, re-check metadata before failing so concurrent newer/smaller versions do not return a false `file_too_large`.
 - vfs/patch: when initial metadata reports an oversized file, re-check metadata before failing so stale metadata does not return a false `file_too_large`, and return correct conflict/success outcomes after refresh.
