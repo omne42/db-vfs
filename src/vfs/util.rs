@@ -170,7 +170,7 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
         return None;
     }
 
-    let mut out = Vec::<&str>::new();
+    let mut prefix = String::with_capacity(normalized.len());
     let mut stopped_on_wildcard = normalized.ends_with('/');
 
     for segment in normalized.split('/') {
@@ -187,14 +187,16 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
             stopped_on_wildcard = true;
             break;
         }
-        out.push(segment);
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
     }
 
-    if out.is_empty() {
+    if prefix.is_empty() {
         return None;
     }
 
-    let mut prefix = out.join("/");
     if stopped_on_wildcard {
         prefix.push('/');
     }

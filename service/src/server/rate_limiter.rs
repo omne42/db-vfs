@@ -106,6 +106,15 @@ impl RateLimiter {
 
             let removed = self.prune_stale_across_shards(now).await;
             if removed == 0 || !self.try_reserve_ip_slot() {
+                // Another request may have created this bucket while we were
+                // pruning/retrying capacity; re-check before denying.
+                let mut state = self.shards[idx].lock().await;
+                if let Some(bucket) = state.buckets.get_mut(&ip) {
+                    let allowed =
+                        allow_from_bucket(bucket, now, self.cfg.refill_per_sec, self.cfg.capacity);
+                    drop(state);
+                    return allowed;
+                }
                 return false;
             }
 
@@ -525,6 +534,65 @@ mod tests {
 
         let fresh_ip = ip_for_shard(&limiter, target_shard);
         assert!(limiter.allow(Some(fresh_ip)).await);
+        assert_eq!(limiter.total_bucket_count().await, 1);
+        assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rate_limiter_rechecks_bucket_before_deny_when_capacity_is_full() {
+        let policy = VfsPolicy {
+            limits: db_vfs_core::policy::Limits {
+                max_requests_per_ip_per_sec: 10,
+                max_requests_burst_per_ip: 10,
+                max_rate_limit_ips: 1,
+                ..db_vfs_core::policy::Limits::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let limiter = RateLimiter::new(&policy);
+        let target_ip = ip_for_shard(&limiter, 0);
+        let filler_ip = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 10));
+        let now = Instant::now();
+
+        {
+            let mut state = limiter.shards[0].lock().await;
+            state.buckets.insert(
+                filler_ip,
+                RateLimitBucket {
+                    tokens: limiter.cfg.capacity,
+                    last: now,
+                    last_seen: now,
+                },
+            );
+            state.last_prune = now;
+        }
+        limiter.tracked_ips.store(1, Ordering::Release);
+
+        let held = limiter.shards[0].lock().await;
+        let limiter_for_task = limiter.clone();
+        let allow_task = tokio::spawn(async move { limiter_for_task.allow(Some(target_ip)).await });
+
+        // Ensure the spawned request is queued on the shard lock.
+        tokio::task::yield_now().await;
+        drop(held);
+
+        {
+            // Simulate another request swapping the tracked bucket while this request
+            // is between capacity checks.
+            let mut state = limiter.shards[0].lock().await;
+            state.buckets.remove(&filler_ip);
+            state.buckets.insert(
+                target_ip,
+                RateLimitBucket {
+                    tokens: limiter.cfg.capacity,
+                    last: now,
+                    last_seen: now,
+                },
+            );
+            state.last_prune = Instant::now();
+        }
+
+        assert!(allow_task.await.expect("join task"));
         assert_eq!(limiter.total_bucket_count().await, 1);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
     }

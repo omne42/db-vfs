@@ -190,7 +190,7 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
     }
 
     let ends_with_slash = s.ends_with('/');
-    let mut out = Vec::<&str>::new();
+    let mut normalized = String::with_capacity(s.len());
     for seg in s.split('/') {
         if seg.is_empty() || seg == "." {
             continue;
@@ -200,7 +200,10 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
                 "{label}: '..' segments are not allowed"
             )));
         }
-        out.push(seg);
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(seg);
     }
 
     match kind {
@@ -214,8 +217,7 @@ fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
         PathKind::Prefix => {}
     }
 
-    let mut normalized = out.join("/");
-    if matches!(kind, PathKind::Prefix) && !normalized.is_empty() && !normalized.ends_with('/') {
+    if matches!(kind, PathKind::Prefix) && !normalized.is_empty() {
         normalized.push('/');
     }
 

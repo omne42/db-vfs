@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reduce mutex hold times on hot allow/prune paths, avoid hash-index truncation on 32-bit targets, and use fused token refill math in bucket updates.
 - service/rate-limiter: reduce per-request shard-index overhead by replacing generic hasher-based indexing with lightweight IP-key mapping.
 - service/rate-limiter: reclaim empty/low-utilization shard `HashMap` capacity at the configured prune threshold to reduce long-lived memory retention after bursty traffic.
+- service/rate-limiter: re-check per-IP buckets after prune/retry capacity paths before denying, avoiding false rejections under concurrent bucket churn at max tracked-IP limits.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
 - core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
+- core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
 
 ### Internal
 
