@@ -44,21 +44,25 @@ pub(super) enum WorkspacePattern {
     Exact(String),
 }
 
-fn compile_workspace_patterns(patterns: &[String]) -> Arc<[WorkspacePattern]> {
-    Arc::from(
-        patterns
-            .iter()
-            .map(|pattern| {
-                if pattern == "*" {
-                    WorkspacePattern::Any
-                } else if let Some(prefix) = pattern.strip_suffix('*') {
-                    WorkspacePattern::Prefix(prefix.to_string())
-                } else {
-                    WorkspacePattern::Exact(pattern.clone())
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
+fn compile_workspace_patterns(patterns: &[String]) -> anyhow::Result<Arc<[WorkspacePattern]>> {
+    let mut compiled = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        if pattern == "*" {
+            compiled.push(WorkspacePattern::Any);
+            continue;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            if prefix.ends_with('-') && !prefix.is_empty() {
+                compiled.push(WorkspacePattern::Prefix(prefix.to_string()));
+                continue;
+            }
+            anyhow::bail!(
+                "invalid auth workspace pattern {pattern:?}: trailing wildcard must be \"-*\" or exactly \"*\""
+            );
+        }
+        compiled.push(WorkspacePattern::Exact(pattern.clone()));
+    }
+    Ok(Arc::from(compiled))
 }
 
 pub(super) fn build_auth_mode(
@@ -102,7 +106,7 @@ pub(super) fn build_auth_mode(
 
         rules.push(AuthRule {
             token_sha256,
-            allowed_workspaces: compile_workspace_patterns(&rule.allowed_workspaces),
+            allowed_workspaces: compile_workspace_patterns(&rule.allowed_workspaces)?,
         });
     }
 
@@ -129,7 +133,7 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
-    prefix.ends_with('-') && workspace_id.starts_with(prefix)
+    workspace_id.starts_with(prefix)
 }
 
 pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &str) -> bool {
@@ -293,33 +297,35 @@ mod tests {
     #[test]
     fn workspace_allowlist_supports_star_and_prefix() {
         assert!(workspace_allowed(
-            &compile_workspace_patterns(&[String::from("*")]),
+            &compile_workspace_patterns(&[String::from("*")]).expect("compile workspace patterns"),
             "ws"
         ));
         assert!(workspace_allowed(
-            &compile_workspace_patterns(&[String::from("ws")]),
+            &compile_workspace_patterns(&[String::from("ws")]).expect("compile workspace patterns"),
             "ws"
         ));
         assert!(!workspace_allowed(
-            &compile_workspace_patterns(&[String::from("ws")]),
+            &compile_workspace_patterns(&[String::from("ws")]).expect("compile workspace patterns"),
             "ws2"
         ));
         assert!(workspace_allowed(
-            &compile_workspace_patterns(&[String::from("team-*")]),
+            &compile_workspace_patterns(&[String::from("team-*")])
+                .expect("compile workspace patterns"),
             "team-123"
         ));
         assert!(!workspace_allowed(
-            &compile_workspace_patterns(&[String::from("team*")]),
-            "team-123"
-        ));
-        assert!(!workspace_allowed(
-            &compile_workspace_patterns(&[String::from("team*")]),
-            "teammate"
-        ));
-        assert!(!workspace_allowed(
-            &compile_workspace_patterns(&[String::from("team-*")]),
+            &compile_workspace_patterns(&[String::from("team-*")])
+                .expect("compile workspace patterns"),
             "other"
         ));
+    }
+
+    #[test]
+    fn compile_workspace_patterns_rejects_invalid_wildcards() {
+        let err = compile_workspace_patterns(&[String::from("team*")])
+            .err()
+            .expect("invalid wildcard pattern should fail");
+        assert!(err.to_string().contains("trailing wildcard must be"));
     }
 
     #[test]

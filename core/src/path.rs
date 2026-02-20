@@ -15,35 +15,86 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
         )));
     }
 
-    let mut has_nul = false;
-    let mut has_whitespace = false;
-    let mut has_control = false;
-    let mut has_separator = false;
-    let mut has_colon = false;
-    let mut has_dotdot = false;
-    let mut prev_dot = false;
+    let (has_nul, has_whitespace, has_control, has_separator, has_colon, has_dotdot) =
+        if workspace_id.is_ascii() {
+            let mut has_nul = false;
+            let mut has_whitespace = false;
+            let mut has_control = false;
+            let mut has_separator = false;
+            let mut has_colon = false;
+            let mut has_dotdot = false;
+            let mut prev_dot = false;
 
-    for ch in workspace_id.chars() {
-        if ch == '\0' {
-            has_nul = true;
-        }
-        if ch.is_whitespace() {
-            has_whitespace = true;
-        }
-        if ch.is_control() {
-            has_control = true;
-        }
-        if ch == '/' || ch == '\\' {
-            has_separator = true;
-        }
-        if ch == ':' {
-            has_colon = true;
-        }
-        if ch == '.' && prev_dot {
-            has_dotdot = true;
-        }
-        prev_dot = ch == '.';
-    }
+            for &byte in workspace_id.as_bytes() {
+                if byte == b'\0' {
+                    has_nul = true;
+                }
+                if byte.is_ascii_whitespace() {
+                    has_whitespace = true;
+                }
+                if byte.is_ascii_control() {
+                    has_control = true;
+                }
+                if byte == b'/' || byte == b'\\' {
+                    has_separator = true;
+                }
+                if byte == b':' {
+                    has_colon = true;
+                }
+                if byte == b'.' && prev_dot {
+                    has_dotdot = true;
+                }
+                prev_dot = byte == b'.';
+            }
+
+            (
+                has_nul,
+                has_whitespace,
+                has_control,
+                has_separator,
+                has_colon,
+                has_dotdot,
+            )
+        } else {
+            let mut has_nul = false;
+            let mut has_whitespace = false;
+            let mut has_control = false;
+            let mut has_separator = false;
+            let mut has_colon = false;
+            let mut has_dotdot = false;
+            let mut prev_dot = false;
+
+            for ch in workspace_id.chars() {
+                if ch == '\0' {
+                    has_nul = true;
+                }
+                if ch.is_whitespace() {
+                    has_whitespace = true;
+                }
+                if ch.is_control() {
+                    has_control = true;
+                }
+                if ch == '/' || ch == '\\' {
+                    has_separator = true;
+                }
+                if ch == ':' {
+                    has_colon = true;
+                }
+                if ch == '.' && prev_dot {
+                    has_dotdot = true;
+                }
+                prev_dot = ch == '.';
+            }
+
+            (
+                has_nul,
+                has_whitespace,
+                has_control,
+                has_separator,
+                has_colon,
+                has_dotdot,
+            )
+        };
 
     if has_nul {
         return Err(Error::InvalidPath(
