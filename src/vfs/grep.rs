@@ -254,6 +254,7 @@ pub(super) fn grep<S: crate::store::Store>(
     } else {
         Some(memchr::memmem::Finder::new(request.query.as_bytes()))
     };
+    let literal_query_spans_lines = !request.regex && request.query.as_bytes().contains(&b'\n');
 
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
@@ -373,13 +374,17 @@ pub(super) fn grep<S: crate::store::Store>(
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
                 continue;
             }
+            if literal_query_spans_lines {
+                continue;
+            }
             if let Some(finder) = literal_finder.as_ref()
                 && finder.find(content.as_bytes()).is_none()
             {
                 continue;
             }
 
-            for (idx, line) in content.lines().enumerate() {
+            let mut line_no: u64 = 1;
+            for line in content.lines() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                     scan_limit_reached = true;
                     scan_limit_reason = Some(ScanLimitReason::Time);
@@ -393,13 +398,15 @@ pub(super) fn grep<S: crate::store::Store>(
                         .is_some_and(|finder| finder.find(line.as_bytes()).is_some()),
                 };
                 if !ok {
+                    line_no = line_no.saturating_add(1);
                     continue;
                 }
 
                 let line_slice = clamp_char_boundary(line, max_line_bytes);
                 let mut line_truncated = line_slice.len() < line.len();
-                let text = if has_redaction_rules {
-                    match vfs
+                let mut text: Option<String> = None;
+                if has_redaction_rules {
+                    let redacted = match vfs
                         .redactor
                         .redact_text_owned_bounded(line_slice.to_string(), max_line_bytes)
                     {
@@ -410,17 +417,20 @@ pub(super) fn grep<S: crate::store::Store>(
                                 .unwrap_or_default()
                                 .to_string()
                         }
-                    }
-                } else {
-                    line_slice.to_string()
-                };
-                let line_no = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
+                    };
+                    text = Some(redacted);
+                }
                 let path_json_escaped_len =
                     *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
                 // Budget against JSON-encoded output size (escaped strings + object structure).
-                let entry_bytes =
-                    grep_match_json_bytes(path_json_escaped_len, line_no, &text, line_truncated)
-                        .saturating_add(usize::from(!matches.is_empty()));
+                let entry_text = text.as_deref().unwrap_or(line_slice);
+                let entry_bytes = grep_match_json_bytes(
+                    path_json_escaped_len,
+                    line_no,
+                    entry_text,
+                    line_truncated,
+                )
+                .saturating_add(usize::from(!matches.is_empty()));
                 let next_response_bytes = response_bytes.saturating_add(entry_bytes);
                 if next_response_bytes > MAX_SCAN_RESPONSE_BYTES {
                     scan_limit_reached = true;
@@ -428,12 +438,14 @@ pub(super) fn grep<S: crate::store::Store>(
                     break 'scan;
                 }
                 response_bytes = next_response_bytes;
+                let text = text.unwrap_or_else(|| line_slice.to_string());
                 matches.push(GrepMatch {
                     path: path.clone(),
                     line: line_no,
                     text,
                     line_truncated,
                 });
+                line_no = line_no.saturating_add(1);
 
                 if matches.len() >= vfs.policy.limits.max_results {
                     scan_limit_reached = true;

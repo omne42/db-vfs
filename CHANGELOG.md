@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/grep: skip impossible per-line scan work when a literal query contains `\n` (line-based grep cannot match newline-delimited literals), and trim per-match hot-path overhead by using a saturating line counter plus deferred text allocation until response-byte budget passes.
+- vfs/read: replace lossy `usize -> u64` cast in redaction overflow reporting with a checked conversion to avoid size truncation on wide-pointer targets.
 - vfs/grep: add a literal-query fast reject on loaded file content so non-matching files skip per-line scan work without changing match semantics.
 - vfs/glob+grep pagination: advance the cursor only when another page is expected, trimming redundant cursor string writes on terminal pages.
 - service/request-id: saturate UNIX-millis narrowing when generating `x-request-id` to avoid lossy timestamp wrap on extreme clock values.

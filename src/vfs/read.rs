@@ -91,7 +91,7 @@ pub(super) fn read<S: crate::store::Store>(
         .redact_text_owned_bounded(content, max_read_bytes_usize)
         .map_err(|size| Error::FileTooLarge {
             path: requested_path.clone(),
-            size_bytes: size as u64,
+            size_bytes: u64::try_from(size).unwrap_or(u64::MAX),
             max_bytes: max_read_bytes,
         })?;
 
