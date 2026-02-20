@@ -241,6 +241,8 @@ pub(super) fn grep<S: crate::store::Store>(
     let mut response_bytes: usize = GREP_RESPONSE_JSON_FIXED_OVERHEAD;
     let has_redaction_rules = vfs.redactor.has_redact_rules();
     let max_line_bytes = vfs.policy.limits.max_line_bytes;
+    let redaction_overflow_replacement = has_redaction_rules
+        .then(|| clamp_char_boundary(vfs.redactor.replacement(), max_line_bytes));
     let mut needs_sort = false;
     let mut after: Option<String> = None;
 
@@ -359,7 +361,8 @@ pub(super) fn grep<S: crate::store::Store>(
                         Ok(text) => text,
                         Err(_) => {
                             line_truncated = true;
-                            clamp_char_boundary(vfs.redactor.replacement(), max_line_bytes)
+                            redaction_overflow_replacement
+                                .unwrap_or_default()
                                 .to_string()
                         }
                     }

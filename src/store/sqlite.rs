@@ -119,7 +119,8 @@ where
         content: &str,
         now_ms: u64,
     ) -> Result<u64> {
-        let size_bytes = content.len() as u64;
+        let size_bytes = u64::try_from(content.len())
+            .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let version: u64 = 1;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
         let version_i64 = u64_to_i64(version, "version")?;
@@ -160,7 +161,8 @@ where
         now_ms: u64,
     ) -> Result<u64> {
         let tx = self.conn.unchecked_transaction().map_err(db_err)?;
-        let size_bytes = content.len() as u64;
+        let size_bytes = u64::try_from(content.len())
+            .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
         let new_version_i64 = u64_to_i64(new_version, "new_version")?;
@@ -270,7 +272,9 @@ where
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
         let (lower, upper) = make_prefix_bounds(prefix);
-        let limit_i64 = u64_to_i64(limit as u64, "limit")?;
+        let limit_u64 = u64::try_from(limit)
+            .map_err(|_| Error::Db("integer overflow converting limit".to_string()))?;
+        let limit_i64 = u64_to_i64(limit_u64, "limit")?;
         let mut out = Vec::with_capacity(limit.min(1024));
         match (after, upper.as_deref()) {
             (Some(after), Some(upper)) => {

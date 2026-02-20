@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use globset::{GlobSet, GlobSetBuilder};
+use globset::GlobMatcher;
 
 use db_vfs_core::glob_utils::{
     build_glob_from_normalized, normalize_glob_pattern_for_matching,
@@ -62,7 +62,7 @@ pub(super) fn u64_decimal_len(value: u64) -> usize {
     value.ilog10() as usize + 1
 }
 
-pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
+pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
     if pattern.len() > MAX_GLOB_PATTERN_BYTES {
         return Err(Error::InvalidPath(format!(
             "glob pattern is too large ({} bytes; max {} bytes)",
@@ -86,11 +86,7 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobSet> {
     })?;
     let glob = build_glob_from_normalized(&normalized)
         .map_err(|err| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {err}")))?;
-    let mut builder = GlobSetBuilder::new();
-    builder.add(glob);
-    builder
-        .build()
-        .map_err(|err| Error::InvalidPath(format!("invalid glob pattern {pattern:?}: {err}")))
+    Ok(glob.compile_matcher())
 }
 
 fn is_canonical_runtime_path(path: &str) -> bool {
@@ -123,7 +119,7 @@ fn strip_leading_slashes(s: &str) -> &str {
     s.trim_start_matches('/')
 }
 
-pub(super) fn glob_is_match(glob: &GlobSet, path: &str) -> bool {
+pub(super) fn glob_is_match(glob: &GlobMatcher, path: &str) -> bool {
     if is_canonical_runtime_path(path) {
         return glob.is_match(std::path::Path::new(path));
     }

@@ -19,11 +19,12 @@ impl FileRecord {
         if self.version == 0 {
             return Err(Error::Db("invalid file version: 0".to_string()));
         }
-        if self.size_bytes != self.content.len() as u64 {
+        let content_len = u64::try_from(self.content.len())
+            .map_err(|_| Error::Db("integer overflow converting content length".to_string()))?;
+        if self.size_bytes != content_len {
             return Err(Error::Db(format!(
                 "size/content mismatch: size_bytes={} content_len={}",
-                self.size_bytes,
-                self.content.len()
+                self.size_bytes, content_len
             )));
         }
         if self.updated_at_ms < self.created_at_ms {
