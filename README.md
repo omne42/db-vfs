@@ -105,5 +105,6 @@ Tune policy `limits` for your workload:
 
 ## More docs
 
+- Docs entrypoints: `docs/README.md` and `docs/docs-system-map.md`
 - Human docs (`mdBook`): `docs/` (`./scripts/docs.sh`)
 - LLM bundle: `llms.txt` and `docs/llms.txt` (`./scripts/llms.sh`)
