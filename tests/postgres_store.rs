@@ -165,3 +165,50 @@ fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() 
         .unwrap_or_else(|err| panic!("repeat delete failed for ws={ws}, path={path}: {err}"));
     assert_eq!(missing, DeleteOutcome::NotFound);
 }
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_versions_remain_monotonic_across_delete_and_recreate() {
+    let url = postgres_url();
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let first = store
+        .insert_file_new(&ws, &path, "v1", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(first, 1);
+
+    let deleted = store
+        .delete_file(&ws, &path, Some(first))
+        .unwrap_or_else(|err| panic!("delete_file failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let recreated = store
+        .insert_file_new(&ws, &path, "v2", now_ms())
+        .unwrap_or_else(|err| panic!("recreate failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(recreated, 2);
+
+    let err = store
+        .update_file_cas(&ws, &path, "stale", first, now_ms())
+        .expect_err("stale CAS should conflict");
+    assert_eq!(err.code(), "conflict");
+
+    let err = store
+        .delete_file(&ws, &path, Some(first))
+        .expect_err("stale delete should conflict");
+    assert_eq!(err.code(), "conflict");
+}

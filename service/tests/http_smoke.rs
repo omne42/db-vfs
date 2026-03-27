@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
@@ -9,6 +10,14 @@ use db_vfs_core::policy::{
 use sha2::{Digest, Sha256};
 
 const DEV_TOKEN: &str = "dev-token";
+
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}_{}", std::process::id(), nanos)
+}
 
 #[derive(serde::Deserialize)]
 struct WriteBody {
@@ -133,6 +142,38 @@ async fn setup() -> Option<TestServer> {
         client,
         handle,
     })
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_test_url() -> String {
+    let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(
+        "DB_VFS_TEST_POSTGRES_URL is required when running ignored postgres integration tests",
+    );
+    let url = raw.trim().to_string();
+    assert!(
+        !url.is_empty(),
+        "DB_VFS_TEST_POSTGRES_URL must be non-empty when running ignored postgres integration tests"
+    );
+    url
+}
+
+#[cfg(feature = "postgres")]
+async fn setup_postgres() -> Option<(String, reqwest::Client, tokio::task::JoinHandle<()>)> {
+    let app =
+        db_vfs_service::server::build_app_postgres(postgres_test_url(), policy_allow_all(), false)
+            .expect("build postgres app");
+    let (addr, handle) = match serve(app).await {
+        Ok(server) => server,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping postgres http_smoke test: local bind denied ({err})");
+            return None;
+        }
+        Err(err) => panic!("bind postgres app: {err}"),
+    };
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    wait_until_ready(&client, &base).await;
+    Some((base, client, handle))
 }
 
 fn is_generated_request_id(value: &str) -> bool {
@@ -363,4 +404,59 @@ async fn delete_ignore_missing_returns_deleted_false() {
         .expect("delete json");
 
     assert!(!resp.deleted);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+async fn write_then_read_postgres() {
+    let Some((base, client, handle)) = setup_postgres().await else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let path = format!("docs/{suffix}.txt");
+    let workspace_id = format!("ws-{suffix}");
+
+    let write = client
+        .post(format!("{base}/v1/write"))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .json(&WriteRequest {
+            workspace_id: workspace_id.clone(),
+            path: path.clone(),
+            content: "hello\n".to_string(),
+            expected_version: None,
+        })
+        .send()
+        .await
+        .expect("send postgres write")
+        .error_for_status()
+        .expect("postgres write status")
+        .json::<WriteBody>()
+        .await
+        .expect("postgres write json");
+    assert_eq!(write.path, path);
+    assert_eq!(write.version, 1);
+
+    let read = client
+        .post(format!("{base}/v1/read"))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .json(&ReadRequest {
+            workspace_id,
+            path,
+            start_line: None,
+            end_line: None,
+        })
+        .send()
+        .await
+        .expect("send postgres read")
+        .error_for_status()
+        .expect("postgres read status")
+        .json::<ReadBody>()
+        .await
+        .expect("postgres read json");
+    assert_eq!(read.content, "hello\n");
+    assert_eq!(read.version, 1);
+
+    handle.abort();
 }
