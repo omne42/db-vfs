@@ -75,6 +75,14 @@ pub struct SecretRedactor {
     deny: GlobSet,
     redact: Vec<Regex>,
     replacement: String,
+    source: SecretRulesSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecretRulesSource {
+    deny_globs: Vec<String>,
+    redact_regexes: Vec<String>,
+    replacement: String,
 }
 
 fn summarize_pattern_for_error(pattern: &str) -> String {
@@ -92,6 +100,11 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
 impl SecretRedactor {
     pub fn from_rules(rules: &SecretRules) -> Result<Self> {
         let mut deny_builder = GlobSetBuilder::new();
+        let source = SecretRulesSource {
+            deny_globs: rules.deny_globs.clone(),
+            redact_regexes: rules.redact_regexes.clone(),
+            replacement: rules.replacement.clone(),
+        };
         for pattern in &rules.deny_globs {
             let normalized = normalize_glob_pattern_for_matching(pattern);
             validate_normalized_root_relative_glob_pattern(&normalized).map_err(|err| {
@@ -162,7 +175,14 @@ impl SecretRedactor {
             deny,
             redact,
             replacement: rules.replacement.clone(),
+            source,
         })
+    }
+
+    pub fn is_compatible_with_rules(&self, rules: &SecretRules) -> bool {
+        self.source.deny_globs == rules.deny_globs
+            && self.source.redact_regexes == rules.redact_regexes
+            && self.source.replacement == rules.replacement
     }
 
     pub fn is_path_denied(&self, path: &str) -> bool {

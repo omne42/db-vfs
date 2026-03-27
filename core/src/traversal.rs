@@ -13,6 +13,12 @@ use crate::{Error, Result};
 #[derive(Debug, Clone)]
 pub struct TraversalSkipper {
     skip: Option<GlobSet>,
+    source: TraversalRulesSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraversalRulesSource {
+    skip_globs: Vec<String>,
 }
 
 fn summarize_pattern_for_error(pattern: &str) -> String {
@@ -84,7 +90,12 @@ fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
 impl TraversalSkipper {
     pub fn from_rules(rules: &TraversalRules) -> Result<Self> {
         if rules.skip_globs.is_empty() {
-            return Ok(Self { skip: None });
+            return Ok(Self {
+                skip: None,
+                source: TraversalRulesSource {
+                    skip_globs: Vec::new(),
+                },
+            });
         }
 
         let mut builder = GlobSetBuilder::new();
@@ -113,7 +124,16 @@ impl TraversalSkipper {
         let skip = builder
             .build()
             .map_err(|err| Error::InvalidPolicy(format!("invalid traversal.skip_globs: {err}")))?;
-        Ok(Self { skip: Some(skip) })
+        Ok(Self {
+            skip: Some(skip),
+            source: TraversalRulesSource {
+                skip_globs: rules.skip_globs.clone(),
+            },
+        })
+    }
+
+    pub fn is_compatible_with_rules(&self, rules: &TraversalRules) -> bool {
+        self.source.skip_globs == rules.skip_globs
     }
 
     pub fn is_path_skipped(&self, path: &str) -> bool {
