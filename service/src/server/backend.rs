@@ -93,7 +93,7 @@ pub(super) enum Backend {
 pub(super) enum BackendStore {
     Sqlite(SqliteStore<SqliteConn>),
     #[cfg(feature = "postgres")]
-    Postgres(PostgresStore<PostgresConn>),
+    Postgres(Box<PostgresStore<PostgresConn>>),
 }
 
 pub(super) enum CancelHandle {
@@ -227,7 +227,10 @@ impl BackendStore {
                 };
                 configure_postgres_statement_timeout(&mut client, pool_timeout)?;
                 let cancel = CancelHandle::Postgres(client.cancel_token());
-                Ok((Self::Postgres(PostgresStore::from_client(client)), cancel))
+                Ok((
+                    Self::Postgres(Box::new(PostgresStore::from_client(client))),
+                    cancel,
+                ))
             }
         }
     }
