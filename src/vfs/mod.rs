@@ -134,8 +134,10 @@ impl<S: Store> DbVfs<S> {
         {
             (redactor, traversal)
         } else {
-            let (policy_redactor, policy_traversal) = Self::build_matchers(policy.as_ref())
-                .expect("validated policy must build matchers");
+            let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
+                Ok(matchers) => matchers,
+                Err(err) => panic!("validated policy must build matchers: {err}"),
+            };
             (Arc::new(policy_redactor), Arc::new(policy_traversal))
         };
         Self {
