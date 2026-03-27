@@ -198,6 +198,24 @@ fn write_rejects_expected_version_overflow() {
 }
 
 #[test]
+fn delete_ignore_missing_returns_deleted_false() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let deleted = vfs
+        .delete(DeleteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/missing.txt".to_string(),
+            expected_version: None,
+            ignore_missing: true,
+        })
+        .expect("ignore_missing should succeed");
+    assert_eq!(deleted.requested_path, "docs/missing.txt");
+    assert_eq!(deleted.path, "docs/missing.txt");
+    assert!(!deleted.deleted);
+}
+
+#[test]
 fn delete_rejects_expected_version_overflow() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);

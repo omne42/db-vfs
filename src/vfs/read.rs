@@ -11,6 +11,7 @@ const CONTENT_RETRY_BACKOFF_MS: u64 = 2;
 const CONTENT_RETRY_YIELD_ATTEMPTS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReadRequest {
     pub workspace_id: String,
     pub path: String,

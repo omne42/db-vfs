@@ -13,6 +13,7 @@ const META_PAGE_SIZE: usize = 2048;
 const GLOB_RESPONSE_JSON_FIXED_OVERHEAD: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobRequest {
     pub workspace_id: String,
     pub pattern: String,

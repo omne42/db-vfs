@@ -8,6 +8,7 @@ use crate::store::DeleteOutcome;
 use super::DbVfs;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteRequest {
     pub workspace_id: String,
     pub path: String,

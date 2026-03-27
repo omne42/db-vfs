@@ -7,6 +7,7 @@ use super::DbVfs;
 use super::util::now_ms;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WriteRequest {
     pub workspace_id: String,
     pub path: String,

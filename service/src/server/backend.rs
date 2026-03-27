@@ -7,6 +7,8 @@ use db_vfs::store::postgres::PostgresStore;
 use std::sync::OnceLock;
 #[cfg(feature = "postgres")]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "postgres")]
+use std::time::Duration;
 
 type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 type SqliteConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
@@ -164,6 +166,37 @@ fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_
     db_vfs::Error::Db(format!("backend={backend} stage=pool_get error={err}"))
 }
 
+#[cfg(feature = "postgres")]
+fn postgres_statement_timeout_ms(timeout: Option<Duration>) -> u64 {
+    match timeout {
+        None => 0,
+        Some(timeout) => {
+            let timeout_ms = timeout.as_millis();
+            if timeout_ms == 0 {
+                1
+            } else {
+                timeout_ms.min(u128::from(u64::MAX)) as u64
+            }
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn configure_postgres_statement_timeout(
+    client: &mut r2d2_postgres::postgres::Client,
+    timeout: Option<Duration>,
+) -> db_vfs::Result<()> {
+    let timeout_ms = postgres_statement_timeout_ms(timeout);
+    client
+        .simple_query(&format!("SET statement_timeout = {timeout_ms}"))
+        .map_err(|err| {
+            db_vfs::Error::Db(format!(
+                "backend=postgres stage=set_statement_timeout timeout_ms={timeout_ms} error={err}"
+            ))
+        })?;
+    Ok(())
+}
+
 impl BackendStore {
     pub(super) fn open(
         backend: Backend,
@@ -184,7 +217,7 @@ impl BackendStore {
             }
             #[cfg(feature = "postgres")]
             Backend::Postgres { pool } => {
-                let client = match pool_timeout {
+                let mut client = match pool_timeout {
                     Some(timeout) => pool
                         .get_timeout(timeout)
                         .map_err(|err| map_pool_get_error("postgres", err))?,
@@ -192,6 +225,7 @@ impl BackendStore {
                         .get()
                         .map_err(|err| map_pool_get_error("postgres", err))?,
                 };
+                configure_postgres_statement_timeout(&mut client, pool_timeout)?;
                 let cancel = CancelHandle::Postgres(client.cancel_token());
                 Ok((Self::Postgres(PostgresStore::from_client(client)), cancel))
             }
@@ -276,6 +310,83 @@ impl Store for BackendStore {
             self,
             list_metas_by_prefix_page(workspace_id, prefix, after, limit)
         )
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    #[cfg(feature = "postgres")]
+    use super::configure_postgres_statement_timeout;
+    #[cfg(feature = "postgres")]
+    use super::postgres_statement_timeout_ms;
+    #[cfg(feature = "postgres")]
+    use r2d2_postgres::postgres::NoTls;
+    #[cfg(feature = "postgres")]
+    use std::time::Duration;
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_statement_timeout_is_unbounded_without_budget() {
+        assert_eq!(postgres_statement_timeout_ms(None), 0);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_statement_timeout_rounds_positive_sub_millisecond_budget_up() {
+        assert_eq!(
+            postgres_statement_timeout_ms(Some(Duration::from_nanos(1))),
+            1
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_statement_timeout_uses_budget_milliseconds() {
+        assert_eq!(
+            postgres_statement_timeout_ms(Some(Duration::from_millis(1450))),
+            1450
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    fn postgres_test_url() -> String {
+        let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(
+            "DB_VFS_TEST_POSTGRES_URL is required when running ignored postgres integration tests",
+        );
+        let url = raw.trim().to_string();
+        assert!(
+            !url.is_empty(),
+            "DB_VFS_TEST_POSTGRES_URL must be non-empty when running ignored postgres integration tests"
+        );
+        url
+    }
+
+    #[cfg(feature = "postgres")]
+    fn current_statement_timeout_ms(client: &mut r2d2_postgres::postgres::Client) -> i64 {
+        client
+            .query_one(
+                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+                &[],
+            )
+            .expect("query statement_timeout")
+            .get(0)
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+    fn configure_postgres_statement_timeout_tracks_request_budget() {
+        let url = postgres_test_url();
+        let mut client =
+            r2d2_postgres::postgres::Client::connect(&url, NoTls).expect("connect postgres");
+
+        configure_postgres_statement_timeout(&mut client, Some(Duration::from_millis(1450)))
+            .expect("set bounded statement_timeout");
+        assert_eq!(current_statement_timeout_ms(&mut client), 1450);
+
+        configure_postgres_statement_timeout(&mut client, None)
+            .expect("clear statement_timeout for unbounded scans");
+        assert_eq!(current_statement_timeout_ms(&mut client), 0);
     }
 }
 
