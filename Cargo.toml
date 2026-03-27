@@ -26,3 +26,6 @@ default = ["sqlite-bundled"]
 sqlite = ["dep:rusqlite"]
 sqlite-bundled = ["sqlite", "rusqlite/bundled"]
 postgres = ["dep:postgres"]
+
+[dev-dependencies]
+serde_json = "1"

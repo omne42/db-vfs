@@ -36,7 +36,11 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 ### `/v1/delete`
 
-Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing`
+(`bool`, optional, default `false`).
+
+When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false`
+instead of `404 not_found`.
 
 Response fields: `requested_path`, `path`, `deleted`.
 
@@ -44,13 +48,18 @@ Response fields: `requested_path`, `path`, `deleted`.
 
 Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
 
-Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`, `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and skip counters.
+Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`,
+`scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and public skip counters.
+
+`scanned_entries` excludes paths denied by `secrets.deny_globs`; detailed secret-denied counts are
+kept internal/audit-only and are not serialized in the public response.
 
 ### `/v1/grep`
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
 
-Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same shape as `glob`).
+Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
+shape as `glob`).
 
 ## Path normalization rules
 

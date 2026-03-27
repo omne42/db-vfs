@@ -29,7 +29,7 @@ pub struct GlobResponse {
     pub scanned_files: u64,
     #[serde(default)]
     pub skipped_traversal_skipped: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub skipped_secret_denied: u64,
     #[serde(default)]
     pub scan_limit_reached: bool,
@@ -146,6 +146,7 @@ pub(super) fn glob<S: crate::store::Store>(
     let mut matches = Vec::<String>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: usize = 0;
+    let mut budgeted_entries: usize = 0;
     let mut skipped_traversal_skipped: u64 = 0;
     let mut skipped_secret_denied: u64 = 0;
     let mut scan_limit_reached = false;
@@ -160,7 +161,7 @@ pub(super) fn glob<S: crate::store::Store>(
             break;
         }
 
-        let remaining_entries = max_scan_entries.saturating_sub(scanned_entries);
+        let remaining_entries = max_scan_entries.saturating_sub(budgeted_entries);
         if remaining_entries == 0 {
             scan_limit_reached = true;
             scan_limit_reason = Some(ScanLimitReason::Entries);
@@ -197,7 +198,7 @@ pub(super) fn glob<S: crate::store::Store>(
         for meta in metas {
             let path = meta.path;
 
-            scanned_entries = scanned_entries.saturating_add(1);
+            budgeted_entries = budgeted_entries.saturating_add(1);
             if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                 scan_limit_reached = true;
                 scan_limit_reason = Some(ScanLimitReason::Time);
@@ -212,6 +213,7 @@ pub(super) fn glob<S: crate::store::Store>(
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
                 continue;
             }
+            scanned_entries = scanned_entries.saturating_add(1);
             if scanned_files >= max_scan_files_u64 {
                 scan_limit_reached = true;
                 scan_limit_reason = Some(ScanLimitReason::Files);
@@ -239,7 +241,7 @@ pub(super) fn glob<S: crate::store::Store>(
             }
         }
 
-        if has_more && scanned_entries >= max_scan_entries {
+        if has_more && budgeted_entries >= max_scan_entries {
             scan_limit_reached = true;
             scan_limit_reason = Some(ScanLimitReason::Entries);
             break;
@@ -367,6 +369,24 @@ mod tests {
             err.to_string().contains("non-monotonic"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn glob_response_hides_secret_denied_count_from_serialized_output() {
+        let value = serde_json::to_value(GlobResponse {
+            matches: vec!["docs/a.txt".to_string()],
+            truncated: false,
+            scanned_files: 1,
+            skipped_traversal_skipped: 0,
+            skipped_secret_denied: 3,
+            scan_limit_reached: false,
+            scan_limit_reason: None,
+            elapsed_ms: 1,
+            scanned_entries: 1,
+        })
+        .expect("serialize glob response");
+
+        assert!(value.get("skipped_secret_denied").is_none());
     }
 
     struct NonMonotonicWithinPageStore {

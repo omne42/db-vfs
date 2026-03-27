@@ -94,15 +94,18 @@ All endpoints are JSON `POST` and require:
 | `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
 | `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
 | `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
-| `/v1/delete` | `workspace_id`, `path`, `expected_version?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
-| `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, scan counters | `not_permitted`, `timeout` |
-| `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, scan counters | `invalid_regex`, `not_permitted`, `timeout` |
+| `/v1/delete` | `workspace_id`, `path`, `expected_version?`, `ignore_missing?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
+| `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, public scan counters | `not_permitted`, `timeout` |
+| `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, public scan counters | `invalid_regex`, `not_permitted`, `timeout` |
 
 Error body:
 
 ```json
 {"code":"<stable_code>","message":"<human message>"}
 ```
+
+`ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
+`200 {"deleted":false,...}`.
 
 ## Security Baseline
 
@@ -301,6 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration, including strict request schemas and `delete.ignore_missing`.
 
 ### Fixed
+
+- vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
 
 - service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
 - service/handlers: treat queue wait budget expiry as `408 timeout` and use the documented `not_permitted` error code for workspace allowlist rejections.
@@ -593,6 +598,9 @@ Examples:
 | `delete` | yes | `v` mismatches | `conflict` |
 | `delete` | no | any | `not_found` |
 
+If `delete.ignore_missing = true`, the missing-target branch becomes `200 { deleted: false }`
+instead of `not_found`.
+
 ## Path normalization
 
 Canonicalization is deterministic:
@@ -665,11 +673,14 @@ Start from [`policy.example.toml`](policy.example.toml).
 
 | Section | Key | Default |
 | --- | --- | --- |
-| `permissions` | `read/glob/grep` | `true` |
+| `permissions` | `read/glob/grep` | `false` |
 | `permissions` | `write/patch/delete` | `false` |
 | `permissions` | `allow_full_scan` | `false` |
 | `audit` | `required` | `true` |
-| `limits` | `max_walk_ms` | `Some(2000)` |
+| `limits` | `max_walk_ms` | `None` |
+
+`policy.example.toml` is an opt-in example for a real service deployment, not a dump of literal
+`VfsPolicy::default()` values.
 
 ## `allowed_workspaces` matching
 
@@ -765,7 +776,11 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 ### `/v1/delete`
 
-Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing`
+(`bool`, optional, default `false`).
+
+When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false`
+instead of `404 not_found`.
 
 Response fields: `requested_path`, `path`, `deleted`.
 
@@ -773,13 +788,18 @@ Response fields: `requested_path`, `path`, `deleted`.
 
 Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
 
-Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`, `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and skip counters.
+Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`,
+`scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and public skip counters.
+
+`scanned_entries` excludes paths denied by `secrets.deny_globs`; detailed secret-denied counts are
+kept internal/audit-only and are not serialized in the public response.
 
 ### `/v1/grep`
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
 
-Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same shape as `glob`).
+Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
+shape as `glob`).
 
 ## Path normalization rules
 

@@ -8,11 +8,14 @@ Start from [`policy.example.toml`](policy.example.toml).
 
 | Section | Key | Default |
 | --- | --- | --- |
-| `permissions` | `read/glob/grep` | `true` |
+| `permissions` | `read/glob/grep` | `false` |
 | `permissions` | `write/patch/delete` | `false` |
 | `permissions` | `allow_full_scan` | `false` |
 | `audit` | `required` | `true` |
-| `limits` | `max_walk_ms` | `Some(2000)` |
+| `limits` | `max_walk_ms` | `None` |
+
+`policy.example.toml` is an opt-in example for a real service deployment, not a dump of literal
+`VfsPolicy::default()` values.
 
 ## `allowed_workspaces` matching
 

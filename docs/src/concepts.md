@@ -34,6 +34,9 @@ Examples:
 | `delete` | yes | `v` mismatches | `conflict` |
 | `delete` | no | any | `not_found` |
 
+If `delete.ignore_missing = true`, the missing-target branch becomes `200 { deleted: false }`
+instead of `not_found`.
+
 ## Path normalization
 
 Canonicalization is deterministic:

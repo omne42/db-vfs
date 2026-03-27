@@ -216,6 +216,65 @@ fn delete_ignore_missing_returns_deleted_false() {
 }
 
 #[test]
+fn glob_scan_diagnostics_exclude_secret_denied_entries() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+    let now = now_ms();
+
+    vfs.store_mut()
+        .insert_file_new("ws", "docs/a.txt", "hello\n", now)
+        .expect("seed visible path");
+    vfs.store_mut()
+        .insert_file_new("ws", "docs/.env", "SECRET=1\n", now)
+        .expect("seed denied path");
+
+    let resp = vfs
+        .glob(GlobRequest {
+            workspace_id: "ws".to_string(),
+            pattern: "docs/**".to_string(),
+            path_prefix: Some("docs/".to_string()),
+        })
+        .expect("glob");
+
+    assert_eq!(resp.matches, vec!["docs/a.txt".to_string()]);
+    assert_eq!(resp.scanned_entries, 1);
+
+    let json = serde_json::to_value(&resp).expect("serialize glob response");
+    assert!(json.get("skipped_secret_denied").is_none());
+}
+
+#[test]
+fn grep_scan_diagnostics_exclude_secret_denied_entries() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+    let now = now_ms();
+
+    vfs.store_mut()
+        .insert_file_new("ws", "docs/a.txt", "needle\n", now)
+        .expect("seed visible path");
+    vfs.store_mut()
+        .insert_file_new("ws", "docs/.env", "needle\n", now)
+        .expect("seed denied path");
+
+    let resp = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "needle".to_string(),
+            regex: false,
+            glob: None,
+            path_prefix: Some("docs/".to_string()),
+        })
+        .expect("grep");
+
+    assert_eq!(resp.matches.len(), 1);
+    assert_eq!(resp.matches[0].path, "docs/a.txt");
+    assert_eq!(resp.scanned_entries, 1);
+
+    let json = serde_json::to_value(&resp).expect("serialize grep response");
+    assert!(json.get("skipped_secret_denied").is_none());
+}
+
+#[test]
 fn delete_rejects_expected_version_overflow() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);
@@ -445,7 +504,7 @@ fn deny_globs_hide_descendants_under_dir_star() {
         .unwrap();
     assert!(listed.matches.is_empty());
     assert_eq!(listed.scanned_files, 0);
-    assert!(listed.scanned_entries > 0);
+    assert_eq!(listed.scanned_entries, 0);
 }
 
 #[test]

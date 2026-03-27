@@ -299,6 +299,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
