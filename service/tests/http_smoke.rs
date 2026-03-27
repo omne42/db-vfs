@@ -421,7 +421,7 @@ async fn write_then_read_postgres() {
 
     let suffix = unique_suffix();
     let path = format!("docs/{suffix}.txt");
-    let workspace_id = format!("ws-{suffix}");
+    let workspace_id = "ws".to_string();
 
     let write = client
         .post(format!("{base}/v1/write"))

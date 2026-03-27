@@ -78,14 +78,16 @@ impl RateLimiter {
     }
 
     pub(super) async fn allow(&self, ip: Option<IpAddr>) -> bool {
+        self.allow_at(ip, Instant::now()).await
+    }
+
+    async fn allow_at(&self, ip: Option<IpAddr>, now: Instant) -> bool {
         if !self.cfg.enabled {
             return true;
         }
         let Some(ip) = ip else {
             return true;
         };
-
-        let now = Instant::now();
         let idx = self.shard_index(&ip);
         let mut state = self.shards[idx].lock().await;
 
@@ -281,6 +283,19 @@ mod tests {
     use db_vfs_core::policy::VfsPolicy;
     use std::collections::HashMap;
 
+    fn stale_bucket_times() -> (Instant, Instant) {
+        let stale = Instant::now();
+        let now = stale
+            .checked_add(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
+            .expect("stale bucket test timestamp overflow");
+        (stale, now)
+    }
+
+    fn prune_due_before(now: Instant) -> Instant {
+        now.checked_sub(PRUNE_INTERVAL.saturating_add(Duration::from_millis(1)))
+            .expect("prune interval should fit within stale bucket test window")
+    }
+
     fn ips_for_shard(limiter: &RateLimiter, target: usize, count: usize) -> Vec<IpAddr> {
         let mut out = Vec::with_capacity(count);
         for idx in 1u16..=u16::MAX {
@@ -307,10 +322,7 @@ mod tests {
 
     #[test]
     fn prune_stale_buckets_reclaims_threshold_capacity() {
-        let now = Instant::now();
-        let stale = now
-            .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
-            .unwrap_or(now);
+        let (stale, now) = stale_bucket_times();
 
         let mut buckets = HashMap::with_capacity(MAX_BUCKETS_BEFORE_PRUNE);
         for idx in 0u8..8 {
@@ -339,10 +351,7 @@ mod tests {
 
     #[test]
     fn prune_stale_buckets_reclaims_small_empty_maps() {
-        let now = Instant::now();
-        let stale = now
-            .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
-            .unwrap_or(now);
+        let (stale, now) = stale_bucket_times();
 
         let mut buckets = HashMap::with_capacity(512);
         for idx in 0u8..4 {
@@ -451,14 +460,11 @@ mod tests {
         };
         let limiter = RateLimiter::new(&policy);
 
-        let now = Instant::now();
+        let (stale, now) = stale_bucket_times();
         let target_shard = 0usize;
 
         {
             let mut state = limiter.shards[target_shard].lock().await;
-            let stale = now
-                .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
-                .unwrap_or(now);
             for idx in 0u16..=MAX_BUCKETS_BEFORE_PRUNE as u16 {
                 let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, (idx >> 8) as u8, idx as u8));
                 state.buckets.insert(
@@ -473,13 +479,11 @@ mod tests {
             limiter
                 .tracked_ips
                 .store(state.buckets.len(), Ordering::Release);
-            state.last_prune = now
-                .checked_sub(PRUNE_INTERVAL.saturating_add(Duration::from_millis(1)))
-                .unwrap_or(now);
+            state.last_prune = prune_due_before(now);
         }
 
         let fresh_ip = ip_for_shard(&limiter, target_shard);
-        assert!(limiter.allow(Some(fresh_ip)).await);
+        assert!(limiter.allow_at(Some(fresh_ip), now).await);
 
         assert_eq!(limiter.total_bucket_count().await, 1);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
@@ -497,15 +501,12 @@ mod tests {
             ..VfsPolicy::default()
         };
         let limiter = RateLimiter::new(&policy);
-        let now = Instant::now();
+        let (stale, now) = stale_bucket_times();
         let target_shard = 0usize;
         let ips = ips_for_shard(&limiter, target_shard, 5);
 
         {
             let mut state = limiter.shards[target_shard].lock().await;
-            let stale = now
-                .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
-                .unwrap_or(now);
             for ip in &ips[..4] {
                 state.buckets.insert(
                     *ip,
@@ -519,12 +520,10 @@ mod tests {
             limiter
                 .tracked_ips
                 .store(state.buckets.len(), Ordering::Release);
-            state.last_prune = now
-                .checked_sub(PRUNE_INTERVAL.saturating_add(Duration::from_millis(1)))
-                .unwrap_or(now);
+            state.last_prune = prune_due_before(now);
         }
 
-        assert!(limiter.allow(Some(ips[4])).await);
+        assert!(limiter.allow_at(Some(ips[4]), now).await);
         assert_eq!(limiter.total_bucket_count().await, 1);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
     }
@@ -541,16 +540,13 @@ mod tests {
             ..VfsPolicy::default()
         };
         let limiter = RateLimiter::new(&policy);
-        let now = Instant::now();
+        let (stale, now) = stale_bucket_times();
 
         let target_shard = 0usize;
         let stale_shard = 1usize.min(limiter.shards.len().saturating_sub(1));
         let stale_ips = ips_for_shard(&limiter, stale_shard, 4);
         {
             let mut state = limiter.shards[stale_shard].lock().await;
-            let stale = now
-                .checked_sub(BUCKET_TTL.saturating_add(Duration::from_secs(1)))
-                .unwrap_or(now);
             for ip in stale_ips {
                 state.buckets.insert(
                     ip,
@@ -561,14 +557,12 @@ mod tests {
                     },
                 );
             }
-            state.last_prune = now
-                .checked_sub(PRUNE_INTERVAL.saturating_add(Duration::from_millis(1)))
-                .unwrap_or(now);
+            state.last_prune = prune_due_before(now);
         }
         limiter.tracked_ips.store(4, Ordering::Release);
 
         let fresh_ip = ip_for_shard(&limiter, target_shard);
-        assert!(limiter.allow(Some(fresh_ip)).await);
+        assert!(limiter.allow_at(Some(fresh_ip), now).await);
         assert_eq!(limiter.total_bucket_count().await, 1);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
     }
