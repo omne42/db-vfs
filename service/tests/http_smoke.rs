@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::time::Duration;
+#[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 const DEV_TOKEN: &str = "dev-token";
 
+#[cfg(feature = "postgres")]
 fn unique_suffix() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -159,9 +161,12 @@ fn postgres_test_url() -> String {
 
 #[cfg(feature = "postgres")]
 async fn setup_postgres() -> Option<(String, reqwest::Client, tokio::task::JoinHandle<()>)> {
-    let app =
+    let app = tokio::task::spawn_blocking(|| {
         db_vfs_service::server::build_app_postgres(postgres_test_url(), policy_allow_all(), false)
-            .expect("build postgres app");
+    })
+    .await
+    .expect("join postgres app builder")
+    .expect("build postgres app");
     let (addr, handle) = match serve(app).await {
         Ok(server) => server,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
