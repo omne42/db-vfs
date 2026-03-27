@@ -86,6 +86,11 @@ Tune policy `limits` for your workload:
 - concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - timeout/rate: `max_io_ms`, `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`
 
+Budget semantics:
+
+- `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
+- `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
+
 ## Observability / Audit
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.

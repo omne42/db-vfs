@@ -46,6 +46,12 @@ Critical bounded fields include:
 - service runtime: `max_io_ms`, concurrency and DB pool limits
 - rate limit: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Budget semantics:
+
+- `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
+- `glob` and `grep` use `max_walk_ms` as their runtime budget.
+- `max_walk_ms = None` keeps scan execution unbounded; it does not implicitly fall back to `max_io_ms`.
+
 ## Audit behavior matrix
 
 | `audit.jsonl_path` | `audit.required` | Startup behavior |
