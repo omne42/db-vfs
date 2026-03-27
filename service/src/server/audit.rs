@@ -238,7 +238,7 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
         .truncate(false)
         .open(&lock_path)?;
     lock_file.try_lock_exclusive().map_err(|err| {
-        if err.kind() == std::io::ErrorKind::WouldBlock {
+        if is_lock_already_held(&err) {
             anyhow::anyhow!("audit lock is already held: {}", lock_path.display())
         } else {
             anyhow::Error::from(err)
@@ -250,6 +250,21 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
         anyhow::bail!("audit.jsonl_path must be a regular file: {path:?}");
     }
     Ok((lock_file, file))
+}
+
+fn is_lock_already_held(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            return matches!(err.raw_os_error(), Some(32 | 33));
+        }
+    }
+
+    false
 }
 
 fn lock_path_for(log_path: &Path) -> PathBuf {

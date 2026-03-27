@@ -249,9 +249,15 @@ mod tests {
             "permit should still be held by timed-out worker"
         );
 
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        let eventual =
-            tokio::time::timeout(Duration::from_millis(50), semaphore.acquire_owned()).await;
+        let eventual = tokio::time::timeout(Duration::from_secs(1), async move {
+            loop {
+                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
+                    return permit;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
         assert!(
             eventual.is_ok(),
             "permit should be released after worker exits"
