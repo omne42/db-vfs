@@ -1,5 +1,6 @@
 #![cfg(feature = "postgres")]
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +9,7 @@ use db_vfs::store::Store;
 use db_vfs::store::postgres::PostgresStore;
 
 static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+static POSTGRES_SCHEMA_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -35,6 +37,19 @@ fn postgres_url() -> String {
     url
 }
 
+fn ensure_postgres_schema(url: &str) {
+    let init = POSTGRES_SCHEMA_INIT.get_or_init(|| {
+        let mut client = postgres::Client::connect(url, postgres::NoTls)
+            .map_err(|err| format!("connect postgres client: {err}"))?;
+        db_vfs::migrations::migrate_postgres(&mut client)
+            .map_err(|err| format!("migrate postgres schema: {err}"))?;
+        Ok(())
+    });
+    if let Err(err) = init {
+        panic!("failed to initialize shared postgres test schema: {err}");
+    }
+}
+
 struct CleanupGuard {
     url: String,
     workspace_id: String,
@@ -43,7 +58,7 @@ struct CleanupGuard {
 
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
-        if let Ok(mut store) = PostgresStore::connect(&self.url) {
+        if let Ok(mut store) = PostgresStore::connect_no_migrate(&self.url) {
             let _ = store.delete_file(&self.workspace_id, &self.path, None);
         }
     }
@@ -53,7 +68,8 @@ impl Drop for CleanupGuard {
 #[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_store_roundtrip() {
     let url = postgres_url();
-    let mut store = PostgresStore::connect(&url).expect("connect postgres store");
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
     let unique = format!(
         "{}_{}_{}",
@@ -105,7 +121,8 @@ fn postgres_store_roundtrip() {
 #[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() {
     let url = postgres_url();
-    let mut store = PostgresStore::connect(&url).expect("connect postgres store");
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
     let unique = format!(
         "{}_{}_{}",
