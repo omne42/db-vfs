@@ -35,10 +35,6 @@ Not supported:
 
 Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
 
-The same rule applies to `token_env_var`: the service hashes the exact environment-variable
-contents. Leading/trailing spaces or newlines are part of the token unless you avoid them when
-setting the variable.
-
 ```bash
 printf '%s' 'dev-token-change-me' | sha256sum
 # then use: token = "sha256:<hex>"
@@ -69,10 +65,3 @@ Budget semantics:
 | set + open fails | `false` | startup continues, audit disabled |
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
-
-When `audit.required = true`, runtime audit delivery is also strict:
-
-- request paths backpressure on the audit queue instead of dropping events when the worker is slow;
-- lock acquisition failure on the audit file fails startup immediately;
-- if the required audit worker stops after startup, the service treats that as fatal instead of
-  silently continuing without audit coverage.

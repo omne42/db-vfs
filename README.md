@@ -76,10 +76,9 @@ Error body:
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
-- Env-backed tokens are matched byte-for-byte; avoid accidental trailing whitespace/newlines when exporting them.
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
 - Use TLS/HTTPS end-to-end for bearer token transport.
-- Enable audit log with `audit.required = true` so queue saturation backpressures instead of silently dropping audit events.
+- Enable audit log with `audit.required = true`.
 
 ## Performance Limits
 
@@ -100,7 +99,6 @@ Budget semantics:
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
-- SQLite `:memory:` runs through a single pooled connection so migrations and requests share one in-memory DB.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
 ## Troubleshooting matrix

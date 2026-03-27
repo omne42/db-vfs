@@ -1,6 +1,5 @@
 use db_vfs::store::sqlite::SqliteStore;
 use db_vfs::store::{DeleteOutcome, FileMeta, Store};
-use std::time::Duration;
 
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
@@ -8,6 +7,8 @@ use db_vfs::store::postgres::PostgresStore;
 use std::sync::OnceLock;
 #[cfg(feature = "postgres")]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "postgres")]
+use std::time::Duration;
 
 type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 type SqliteConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
@@ -165,15 +166,6 @@ fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_
     db_vfs::Error::Db(format!("backend={backend} stage=pool_get error={err}"))
 }
 
-fn sqlite_busy_timeout(timeout: Option<Duration>) -> Duration {
-    const SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
-    match timeout {
-        Some(timeout) if timeout.is_zero() => Duration::from_millis(1),
-        Some(timeout) => timeout,
-        None => Duration::from_millis(SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS),
-    }
-}
-
 #[cfg(feature = "postgres")]
 fn postgres_statement_timeout_ms(timeout: Option<Duration>) -> u64 {
     match timeout {
@@ -220,12 +212,6 @@ impl BackendStore {
                         .get()
                         .map_err(|err| map_pool_get_error("sqlite", err))?,
                 };
-                conn.busy_timeout(sqlite_busy_timeout(pool_timeout))
-                    .map_err(|err| {
-                        db_vfs::Error::Db(format!(
-                            "backend=sqlite stage=set_busy_timeout error={err}"
-                        ))
-                    })?;
                 let cancel = CancelHandle::Sqlite(conn.get_interrupt_handle());
                 Ok((Self::Sqlite(SqliteStore::from_connection(conn)), cancel))
             }
@@ -447,22 +433,6 @@ mod tests {
             "pool timeout was not honored quickly"
         );
         assert_eq!(err.code(), "db");
-    }
-
-    #[test]
-    fn sqlite_busy_timeout_tracks_request_budget() {
-        assert_eq!(
-            sqlite_busy_timeout(Some(Duration::from_millis(1450))),
-            Duration::from_millis(1450)
-        );
-        assert_eq!(
-            sqlite_busy_timeout(Some(Duration::ZERO)),
-            Duration::from_millis(1)
-        );
-        assert_eq!(
-            sqlite_busy_timeout(None),
-            Duration::from_millis(i32::MAX as u64)
-        );
     }
 
     #[cfg(feature = "postgres")]

@@ -4,8 +4,8 @@
 
 | Backend | Key config | Default / behavior |
 | --- | --- | --- |
-| SQLite | `limits.max_io_ms` | used for pool wait and per-request busy timeout |
-| SQLite | `limits.max_db_connections` | r2d2 pool size; forced to `1` for `:memory:` |
+| SQLite | `limits.max_io_ms` | used for busy timeout (capped) |
+| SQLite | `limits.max_db_connections` | r2d2 pool size |
 | Postgres | `limits.max_io_ms` | sets statement timeout |
 | Postgres | `limits.max_db_connections` | r2d2 pool size |
 
@@ -32,10 +32,6 @@ SQLite:
 ```bash
 cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.local.toml
 ```
-
-For `--sqlite :memory:`, the service intentionally uses a single pooled connection so migrations,
-schema, and request traffic all see the same in-memory database. Treat this mode as local/dev/test
-only.
 
 Postgres:
 
