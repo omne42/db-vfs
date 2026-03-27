@@ -21,13 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
+- service/api: reject unknown request fields with `invalid_json_schema` instead of silently accepting undeclared JSON members.
 - vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
 - core/path-match: reduce transient allocations in runtime path normalization for redaction/traversal matching.
 - docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
-- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration.
+- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration, including strict request schemas and `delete.ignore_missing`.
 
 ### Fixed
 
+- service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
+- service/handlers: treat queue wait budget expiry as `408 timeout` and use the documented `not_permitted` error code for workspace allowlist rejections.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
@@ -68,7 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
 - core/redaction+traversal+glob-match: reject control/NUL and parent-segment runtime paths during matcher normalization to close invalid-path bypass edges.
 - vfs/scan counters: avoid lossy `usize -> u64` casts in scan/read/patch accounting paths on wide-pointer targets.
-- service/scan-timeout: restore `max_walk_ms = None` semantics to keep scan operations unbounded instead of implicitly falling back to `max_io_ms`.
 - vfs/glob-match: tighten fast-path canonical-path checks so non-canonical runtime paths continue through normalization and preserve match behavior.
 - store/pagination: restore compatibility for legacy `Store` implementations by adding default cursor-page fallback when only prefix listing is implemented.
 - store/pagination: optimize legacy fallback cursor scanning by avoiding redundant filtering work and adapting growth strategy based on cursor position.
