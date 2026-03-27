@@ -259,9 +259,7 @@ fn is_lock_already_held(err: &std::io::Error) -> bool {
 
     #[cfg(windows)]
     {
-        if err.kind() == std::io::ErrorKind::PermissionDenied {
-            return matches!(err.raw_os_error(), Some(32 | 33));
-        }
+        return matches!(err.raw_os_error(), Some(32 | 33));
     }
 
     false
