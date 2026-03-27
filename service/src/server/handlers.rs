@@ -197,7 +197,13 @@ async fn acquire_permit_with_budget(
 
         let permit = tokio::time::timeout_at(deadline, semaphore.acquire_owned())
             .await
-            .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?
+            .map_err(|_| {
+                super::err(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "timeout",
+                    "request timed out before execution",
+                )
+            })?
             .map_err(|_| super::err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -523,7 +529,7 @@ where
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, req.workspace_id()) {
         let (status, Json(body)) = super::err(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            super::CODE_NOT_PERMITTED,
             "workspace is not allowed for this token",
         );
         if let Some(audit) = state.inner.audit.as_ref() {
@@ -786,6 +792,24 @@ mod tests {
             .await
             .expect("overflowing deadline budget should not panic");
         assert_eq!(remaining, None);
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_queue_wait_budget_expiry_returns_timeout() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let held_permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+
+        let (status, body) = acquire_permit_with_budget(semaphore, Some(Duration::from_millis(10)))
+            .await
+            .expect_err("queue wait should consume request budget");
+        drop(held_permit);
+
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.0.code, "timeout");
     }
 
     #[test]

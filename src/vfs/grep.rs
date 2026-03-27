@@ -13,6 +13,7 @@ use super::util::{
 use super::{DbVfs, ScanLimitReason};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepRequest {
     pub workspace_id: String,
     pub query: String,

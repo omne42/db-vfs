@@ -274,14 +274,7 @@ pub fn build_app_postgres(
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
 
-    let statement_timeout_ms = policy.limits.max_io_ms;
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
-    let options_extra = format!("-c statement_timeout={statement_timeout_ms}");
-    let options = match config.get_options() {
-        Some(existing) => format!("{existing} {options_extra}"),
-        None => options_extra,
-    };
-    config.options(&options);
     config.connect_timeout(Duration::from_millis(policy.limits.max_io_ms));
 
     {

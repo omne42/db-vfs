@@ -27,6 +27,11 @@ struct ErrorBody {
     code: String,
 }
 
+#[derive(serde::Deserialize)]
+struct DeleteBody {
+    deleted: bool,
+}
+
 struct TestServer {
     _db: tempfile::NamedTempFile,
     base: String,
@@ -288,4 +293,74 @@ async fn missing_content_type_returns_json_error_body() {
     assert!(resp.headers().contains_key("x-request-id"));
     let body = resp.json::<ErrorBody>().await.expect("error json");
     assert_eq!(body.code, "unsupported_media_type");
+}
+
+#[tokio::test]
+async fn unknown_request_fields_are_rejected_as_invalid_json_schema() {
+    let Some(server) = setup().await else {
+        return;
+    };
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/write", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(r#"{"workspace_id":"ws","path":"docs/a.txt","content":"hello","unexpected":true}"#)
+        .send()
+        .await
+        .expect("send request with unknown field");
+
+    assert_eq!(resp.status(), 400);
+    let body = resp.json::<ErrorBody>().await.expect("error json");
+    assert_eq!(body.code, "invalid_json_schema");
+}
+
+#[tokio::test]
+async fn workspace_allowlist_rejections_return_not_permitted_code() {
+    let Some(server) = setup().await else {
+        return;
+    };
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/write", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .json(&WriteRequest {
+            workspace_id: "other".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "hello\n".to_string(),
+            expected_version: None,
+        })
+        .send()
+        .await
+        .expect("send forbidden workspace request");
+
+    assert_eq!(resp.status(), 403);
+    let body = resp.json::<ErrorBody>().await.expect("error json");
+    assert_eq!(body.code, "not_permitted");
+}
+
+#[tokio::test]
+async fn delete_ignore_missing_returns_deleted_false() {
+    let Some(server) = setup().await else {
+        return;
+    };
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/delete", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(r#"{"workspace_id":"ws","path":"docs/missing.txt","ignore_missing":true}"#)
+        .send()
+        .await
+        .expect("send delete ignore_missing request")
+        .error_for_status()
+        .expect("delete status")
+        .json::<DeleteBody>()
+        .await
+        .expect("delete json");
+
+    assert!(!resp.deleted);
 }
