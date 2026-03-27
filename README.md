@@ -74,6 +74,10 @@ Error body:
 
 Line-range `read` enforces `max_read_bytes` on the returned slice, not on the whole backing file.
 
+`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
+a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
+lifetime by accident.
+
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.

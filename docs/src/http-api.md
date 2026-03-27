@@ -26,6 +26,9 @@ Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`,
 
 Request fields: `workspace_id`, `path`, `content`, `expected_version` (`u64|null`).
 
+`expected_version` is scoped to a monotonically increasing per-path version stream. Deleting and
+recreating the same `(workspace_id, path)` does not reset the version counter.
+
 Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`.
 
 ### `/v1/patch`
@@ -41,6 +44,9 @@ Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore
 
 When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false`
 instead of `404 not_found`.
+
+With `expected_version`, stale delete tokens from an earlier file lifetime return `409 conflict`
+after recreate; they do not silently match a new file that reused the same path.
 
 Response fields: `requested_path`, `path`, `deleted`.
 

@@ -25,6 +25,10 @@ Retry decision still depends on operation semantics (`conflict`, idempotency, et
 - migrations are expected to be idempotent for existing environments;
 - startup order: open connection -> run migrations -> serve traffic.
 
+Version storage keeps a per-path generation row so CAS versions remain monotonic across
+delete/recreate. This prevents stale `expected_version` values from accidentally matching a new
+file lifetime after the same path is recreated.
+
 ## Quick verification
 
 SQLite:
