@@ -8,7 +8,7 @@
 
 - `read`、`write`、`patch`、`delete`、`glob`、`grep` 的 VFS 语义
 - `db-vfs-core::policy::VfsPolicy` 及其校验
-- 路径合法性、traversal、secrets redaction、scan budgets
+- 路径合法性、traversal、secrets redaction、scan budgets（`max_io_ms` 用于非 scan 请求，`glob`/`grep` 由 `max_walk_ms` 约束）
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
 - 面向运维和集成者的 API / policy / security 文档

@@ -7,6 +7,7 @@
 - `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
 - `read/write/patch/delete` **MUST** pass secret deny checks for target path.
 - `glob/grep` **MUST** be scoped by `path_prefix` unless a safe literal prefix is derivable.
+- HTTP request payloads **MUST** match the documented JSON schema exactly; unknown fields are rejected.
 
 ## Safe literal prefix
 
@@ -21,7 +22,7 @@ Examples:
 
 ## Operation semantics matrix
 
-| Operation | Target exists | expected_version | Result |
+| Operation | Target exists | expected_version / flags | Result |
 | --- | --- | --- | --- |
 | `write` | no | `null` | create (version=1) |
 | `write` | yes | `null` | `conflict` |
@@ -32,7 +33,8 @@ Examples:
 | `delete` | yes | `null` | deleted |
 | `delete` | yes | `v` matches | deleted |
 | `delete` | yes | `v` mismatches | `conflict` |
-| `delete` | no | any | `not_found` |
+| `delete` | no | any, `ignore_missing = false` | `not_found` |
+| `delete` | no | any, `ignore_missing = true` | `200 { deleted: false }` |
 
 ## Path normalization
 
@@ -50,6 +52,6 @@ Canonicalization is deterministic:
 | `unauthorized` | 401 | no | fix token/header |
 | `not_permitted` / `secret_path_denied` | 403 | no | fix policy/path |
 | `conflict` | 409 | conditional | re-read latest version and retry |
-| `timeout` | 408 | yes | backoff + retry |
+| `timeout` | 408 | yes | backoff + retry; budget may expire while queued or during execution |
 | `busy` / `rate_limited` | 503 / 429 | yes | backoff + retry with limits |
 | `invalid_*` / `patch` | 400 | no | fix request payload |

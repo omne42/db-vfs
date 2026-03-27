@@ -21,13 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
+- service/api: reject unknown request fields with `invalid_json_schema`, clarify `delete.ignore_missing`, and keep workspace allowlist denials on the documented `not_permitted` contract.
 - vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
 - core/path-match: reduce transient allocations in runtime path normalization for redaction/traversal matching.
 - docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
-- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration.
+- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration, including strict request schemas and scan-budget semantics.
 
 ### Fixed
 
+- service/postgres: apply `statement_timeout` per request budget so scan operations honor `max_walk_ms` / `None` instead of a fixed `max_io_ms` cap.
+- service/handlers: return `408 timeout` when queue wait exhausts the request budget before execution starts.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.

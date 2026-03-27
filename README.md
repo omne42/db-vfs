@@ -53,13 +53,14 @@ All endpoints are JSON `POST` and require:
 
 - `content-type: application/json`
 - `authorization: Bearer <token>` (unless `--unsafe-no-auth`)
+- request bodies follow a strict schema; unknown fields are rejected with `invalid_json_schema`
 
 | Endpoint | Request fields | Key response fields | Typical errors |
 | --- | --- | --- | --- |
 | `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
 | `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
 | `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
-| `/v1/delete` | `workspace_id`, `path`, `expected_version?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
+| `/v1/delete` | `workspace_id`, `path`, `expected_version?`, `ignore_missing?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
 | `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, scan counters | `not_permitted`, `timeout` |
 | `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, scan counters | `invalid_regex`, `not_permitted`, `timeout` |
 
@@ -68,6 +69,8 @@ Error body:
 ```json
 {"code":"<stable_code>","message":"<human message>"}
 ```
+
+Unknown request fields and type mismatches are reported as `invalid_json_schema`.
 
 ## Security Baseline
 
@@ -86,6 +89,12 @@ Tune policy `limits` for your workload:
 - concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - timeout/rate: `max_io_ms`, `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`
 
+Budget semantics:
+
+- `max_io_ms` bounds non-scan request execution (`read` / `write` / `patch` / `delete`).
+- `glob` / `grep` runtime budgets follow `max_walk_ms`.
+- `max_walk_ms = None` keeps scan execution unbounded by the scan budget.
+
 ## Observability / Audit
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
@@ -98,9 +107,9 @@ Tune policy `limits` for your workload:
 | HTTP | Common causes | First checks |
 | --- | --- | --- |
 | `401` | missing/invalid token | `Authorization`, token hash/env var |
-| `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
+| `403` | workspace/policy denied (`not_permitted`, `secret_path_denied`) | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
-| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, DB latency, queueing |
+| `408` | request budget exceeded before or during execution (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, queueing |
 | `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
 
 ## More docs

@@ -6,6 +6,7 @@ All endpoints are `POST` JSON.
 
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
+- Request payloads use strict JSON schemas; unknown fields are rejected.
 
 ## Endpoint contracts
 
@@ -36,9 +37,11 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 ### `/v1/delete`
 
-Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing` (`bool`, default `false`).
 
 Response fields: `requested_path`, `path`, `deleted`.
+
+When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false` instead of `not_found`.
 
 ### `/v1/glob`
 
@@ -72,10 +75,12 @@ Common codes:
 - `unauthorized`, `not_permitted`, `secret_path_denied`
 - `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`
 
+`invalid_json_schema` covers both type/shape mismatches and unknown request fields.
+
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (including queue wait exhausting the request budget; operation may still complete once execution started), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.

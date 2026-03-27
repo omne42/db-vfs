@@ -46,6 +46,13 @@ Critical bounded fields include:
 - service runtime: `max_io_ms`, concurrency and DB pool limits
 - rate limit: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Budget interpretation:
+
+- `max_io_ms` applies to non-scan requests (`read`, `write`, `patch`, `delete`).
+- `glob` / `grep` execution budgets follow `max_walk_ms`.
+- `max_walk_ms = None` means scan execution is not capped by the scan budget.
+- Queue wait that consumes the request budget returns `408 timeout` before execution starts.
+
 ## Audit behavior matrix
 
 | `audit.jsonl_path` | `audit.required` | Startup behavior |

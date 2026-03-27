@@ -88,13 +88,14 @@ All endpoints are JSON `POST` and require:
 
 - `content-type: application/json`
 - `authorization: Bearer <token>` (unless `--unsafe-no-auth`)
+- request bodies follow a strict schema; unknown fields are rejected with `invalid_json_schema`
 
 | Endpoint | Request fields | Key response fields | Typical errors |
 | --- | --- | --- | --- |
 | `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
 | `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
 | `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
-| `/v1/delete` | `workspace_id`, `path`, `expected_version?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
+| `/v1/delete` | `workspace_id`, `path`, `expected_version?`, `ignore_missing?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
 | `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, scan counters | `not_permitted`, `timeout` |
 | `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, scan counters | `invalid_regex`, `not_permitted`, `timeout` |
 
@@ -103,6 +104,8 @@ Error body:
 ```json
 {"code":"<stable_code>","message":"<human message>"}
 ```
+
+Unknown request fields and type mismatches are reported as `invalid_json_schema`.
 
 ## Security Baseline
 
@@ -121,6 +124,12 @@ Tune policy `limits` for your workload:
 - concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - timeout/rate: `max_io_ms`, `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`
 
+Budget semantics:
+
+- `max_io_ms` bounds non-scan request execution (`read` / `write` / `patch` / `delete`).
+- `glob` / `grep` runtime budgets follow `max_walk_ms`.
+- `max_walk_ms = None` keeps scan execution unbounded by the scan budget.
+
 ## Observability / Audit
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
@@ -133,13 +142,14 @@ Tune policy `limits` for your workload:
 | HTTP | Common causes | First checks |
 | --- | --- | --- |
 | `401` | missing/invalid token | `Authorization`, token hash/env var |
-| `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
+| `403` | workspace/policy denied (`not_permitted`, `secret_path_denied`) | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
-| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, DB latency, queueing |
+| `408` | request budget exceeded before or during execution (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, queueing |
 | `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
 
 ## More docs
 
+- Docs entrypoints: `docs/README.md` and `docs/docs-system-map.md`
 - Human docs (`mdBook`): `docs/` (`./scripts/docs.sh`)
 - LLM bundle: `llms.txt` and `docs/llms.txt` (`./scripts/llms.sh`)
 
@@ -284,16 +294,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
+- service/api: reject unknown request fields with `invalid_json_schema`, clarify `delete.ignore_missing`, and keep workspace allowlist denials on the documented `not_permitted` contract.
 - vfs/api: `read`/`write`/`patch`/`delete` responses now include `requested_path` for normalized input traceability.
 - core/path-match: reduce transient allocations in runtime path normalization for redaction/traversal matching.
 - docs/policy example: align defaults and guidance with safer production posture and explicit scope/limit semantics.
-- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration.
+- docs/api: expand HTTP contract, observability, troubleshooting, and deployment guidance for operations and integration, including strict request schemas and scan-budget semantics.
 
 ### Fixed
 
+- service/postgres: apply `statement_timeout` per request budget so scan operations honor `max_walk_ms` / `None` instead of a fixed `max_io_ms` cap.
+- service/handlers: return `408 timeout` when queue wait exhausts the request budget before execution starts.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
@@ -557,6 +571,7 @@ section_id: "docs-src-concepts-md"
 - `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
 - `read/write/patch/delete` **MUST** pass secret deny checks for target path.
 - `glob/grep` **MUST** be scoped by `path_prefix` unless a safe literal prefix is derivable.
+- HTTP request payloads **MUST** match the documented JSON schema exactly; unknown fields are rejected.
 
 ## Safe literal prefix
 
@@ -571,7 +586,7 @@ Examples:
 
 ## Operation semantics matrix
 
-| Operation | Target exists | expected_version | Result |
+| Operation | Target exists | expected_version / flags | Result |
 | --- | --- | --- | --- |
 | `write` | no | `null` | create (version=1) |
 | `write` | yes | `null` | `conflict` |
@@ -582,7 +597,8 @@ Examples:
 | `delete` | yes | `null` | deleted |
 | `delete` | yes | `v` matches | deleted |
 | `delete` | yes | `v` mismatches | `conflict` |
-| `delete` | no | any | `not_found` |
+| `delete` | no | any, `ignore_missing = false` | `not_found` |
+| `delete` | no | any, `ignore_missing = true` | `200 { deleted: false }` |
 
 ## Path normalization
 
@@ -600,7 +616,7 @@ Canonicalization is deterministic:
 | `unauthorized` | 401 | no | fix token/header |
 | `not_permitted` / `secret_path_denied` | 403 | no | fix policy/path |
 | `conflict` | 409 | conditional | re-read latest version and retry |
-| `timeout` | 408 | yes | backoff + retry |
+| `timeout` | 408 | yes | backoff + retry; budget may expire while queued or during execution |
 | `busy` / `rate_limited` | 503 / 429 | yes | backoff + retry with limits |
 | `invalid_*` / `patch` | 400 | no | fix request payload |
 
@@ -694,6 +710,13 @@ Critical bounded fields include:
 - service runtime: `max_io_ms`, concurrency and DB pool limits
 - rate limit: `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`, `max_rate_limit_ips`
 
+Budget interpretation:
+
+- `max_io_ms` applies to non-scan requests (`read`, `write`, `patch`, `delete`).
+- `glob` / `grep` execution budgets follow `max_walk_ms`.
+- `max_walk_ms = None` means scan execution is not capped by the scan budget.
+- Queue wait that consumes the request budget returns `408 timeout` before execution starts.
+
 ## Audit behavior matrix
 
 | `audit.jsonl_path` | `audit.required` | Startup behavior |
@@ -720,6 +743,7 @@ All endpoints are `POST` JSON.
 
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
+- Request payloads use strict JSON schemas; unknown fields are rejected.
 
 ## Endpoint contracts
 
@@ -750,9 +774,11 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 ### `/v1/delete`
 
-Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`).
+Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing` (`bool`, default `false`).
 
 Response fields: `requested_path`, `path`, `deleted`.
+
+When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false` instead of `not_found`.
 
 ### `/v1/glob`
 
@@ -786,11 +812,13 @@ Common codes:
 - `unauthorized`, `not_permitted`, `secret_path_denied`
 - `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`
 
+`invalid_json_schema` covers both type/shape mismatches and unknown request fields.
+
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (including queue wait exhausting the request budget; operation may still complete once execution started), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.
 
