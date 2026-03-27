@@ -107,6 +107,8 @@ Error body:
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
+Line-range `read` enforces `max_read_bytes` on the returned slice, not on the whole backing file.
+
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
@@ -128,11 +130,13 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
+- SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget; scan requests with `max_walk_ms = None` do not inherit `max_io_ms` as an implicit backend wait cap.
 
 ## Observability / Audit
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
+- With `audit.required = true`, audit runs fail-closed after startup: requests block on audit backpressure, and worker loss aborts the process instead of silently dropping events.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -143,7 +147,7 @@ Budget semantics:
 | `401` | missing/invalid token | `Authorization`, token hash/env var |
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
-| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, DB latency, queueing |
+| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, pool/lock wait |
 | `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
 
 ## More docs
@@ -720,6 +724,7 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; it does not implicitly fall back to `max_io_ms`.
+- SQLite `busy_timeout` and Postgres `statement_timeout` are reset per request to the active request budget.
 
 ## Audit behavior matrix
 
@@ -731,6 +736,10 @@ Budget semantics:
 | set + open fails | `false` | startup continues, audit disabled |
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
+
+When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: requests block
+on audit backpressure, and losing the audit worker turns into process failure instead of silent
+event loss.
 
 
 ---
@@ -758,8 +767,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | namespace |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line` |
-| `end_line` | u64|null | no | must pair with `start_line` |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice |
+| `end_line` | u64|null | no | must pair with `start_line`; large backing files are allowed if the selected slice fits |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -826,7 +835,7 @@ Common codes:
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; includes request-budgeted pool/lock wait), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.
 
@@ -843,17 +852,17 @@ section_id: "docs-src-storage-md"
 
 | Backend | Key config | Default / behavior |
 | --- | --- | --- |
-| SQLite | `limits.max_io_ms` | used for busy timeout (capped) |
+| SQLite | `limits.max_io_ms`, `limits.max_walk_ms` | each checked-out connection resets `busy_timeout` to the active request budget |
 | SQLite | `limits.max_db_connections` | r2d2 pool size |
-| Postgres | `limits.max_io_ms` | sets statement timeout |
+| Postgres | `limits.max_io_ms`, `limits.max_walk_ms` | `statement_timeout` follows the active request budget |
 | Postgres | `limits.max_db_connections` | r2d2 pool size |
 
 ## Timeout behavior
 
 | Backend | Timeout mechanism | On timeout |
 | --- | --- | --- |
-| SQLite | service wall-clock + interrupt handle | best-effort interrupt, may finish shortly in background |
-| Postgres | service wall-clock + statement timeout | query canceled by DB timeout rules |
+| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background |
+| Postgres | per-request `statement_timeout` + service wall-clock | query canceled and surfaced as `timeout` |
 
 Retry decision still depends on operation semantics (`conflict`, idempotency, etc).
 
@@ -985,7 +994,8 @@ Recommended `RUST_LOG`:
 - keep audit file permissions restrictive (`600` or equivalent owner-only access);
 - configure external log rotation;
 - monitor disk usage;
-- understand startup behavior difference between `audit.required=true/false`.
+- understand both startup and runtime behavior difference between `audit.required=true/false`;
+- with `audit.required=true`, treat audit backpressure or worker loss as availability-impacting by design.
 
 
 ---
@@ -1030,8 +1040,8 @@ Use this template for each failure:
 ## `408 timeout`
 
 - Symptom: `timeout` under load or large requests.
-- Likely cause: `limits.max_io_ms` too low or backend contention.
-- Immediate checks: server logs with `request_id`, DB health, pool saturation.
+- Likely cause: request budget too low for payload/scan scope, pool checkout wait, or DB lock contention.
+- Immediate checks: server logs with `request_id`, DB health, pool saturation, lock wait patterns.
 - Fix: tune limits and query scope; reduce request payload/scan scope.
 - Retry: yes, exponential backoff (3-5 attempts max).
 - Success criteria: sustained requests complete within budget.

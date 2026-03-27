@@ -72,6 +72,8 @@ Error body:
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
+Line-range `read` enforces `max_read_bytes` on the returned slice, not on the whole backing file.
+
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
@@ -93,11 +95,13 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
+- SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget; scan requests with `max_walk_ms = None` do not inherit `max_io_ms` as an implicit backend wait cap.
 
 ## Observability / Audit
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
+- With `audit.required = true`, audit runs fail-closed after startup: requests block on audit backpressure, and worker loss aborts the process instead of silently dropping events.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -108,7 +112,7 @@ Budget semantics:
 | `401` | missing/invalid token | `Authorization`, token hash/env var |
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
-| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, DB latency, queueing |
+| `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, pool/lock wait |
 | `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
 
 ## More docs

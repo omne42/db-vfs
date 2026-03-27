@@ -17,8 +17,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | namespace |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line` |
-| `end_line` | u64|null | no | must pair with `start_line` |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice |
+| `end_line` | u64|null | no | must pair with `start_line`; large backing files are allowed if the selected slice fits |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -85,6 +85,6 @@ Common codes:
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; includes request-budgeted pool/lock wait), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.

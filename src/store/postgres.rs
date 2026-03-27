@@ -12,7 +12,7 @@ pub type PostgresStore<C = Box<postgres::Client>> = PostgresStoreWithClient<C>;
 
 impl PostgresStoreWithClient<Box<postgres::Client>> {
     pub fn new(mut client: postgres::Client) -> Result<Self> {
-        crate::migrations::migrate_postgres(&mut client).map_err(db_err)?;
+        crate::migrations::migrate_postgres(&mut client).map_err(map_postgres_err)?;
         Ok(Self {
             client: Box::new(client),
         })
@@ -25,12 +25,12 @@ impl PostgresStoreWithClient<Box<postgres::Client>> {
     }
 
     pub fn connect(url: &str) -> Result<Self> {
-        let client = postgres::Client::connect(url, postgres::NoTls).map_err(db_err)?;
+        let client = postgres::Client::connect(url, postgres::NoTls).map_err(map_postgres_err)?;
         Self::new(client)
     }
 
     pub fn connect_no_migrate(url: &str) -> Result<Self> {
-        let client = postgres::Client::connect(url, postgres::NoTls).map_err(db_err)?;
+        let client = postgres::Client::connect(url, postgres::NoTls).map_err(map_postgres_err)?;
         Self::new_no_migrate(client)
     }
 }
@@ -54,7 +54,7 @@ where
                  WHERE workspace_id = $1 AND path = $2",
                 &[&workspace_id, &path],
             )
-            .map_err(db_err)?;
+            .map_err(map_postgres_err)?;
 
         Ok(match row {
             Some(row) => Some(
@@ -85,7 +85,7 @@ where
                  WHERE workspace_id = $1 AND path = $2 AND version = $3",
                 &[&workspace_id, &path, &version],
             )
-            .map_err(db_err)?;
+            .map_err(map_postgres_err)?;
 
         Ok(row.map(|row| row.get::<_, String>(0)))
     }
@@ -125,7 +125,7 @@ where
                 if is_unique_violation(&err) {
                     return Err(Error::Conflict("file exists".to_string()));
                 }
-                Err(db_err(err))
+                Err(map_postgres_err(err))
             }
         }
     }
@@ -138,7 +138,7 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<u64> {
-        let mut tx = self.client.transaction().map_err(db_err)?;
+        let mut tx = self.client.transaction().map_err(map_postgres_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
@@ -162,10 +162,10 @@ where
                     &expected_version_i64,
                 ],
             )
-            .map_err(db_err)?;
+            .map_err(map_postgres_err)?;
 
         if updated == 1 {
-            tx.commit().map_err(db_err)?;
+            tx.commit().map_err(map_postgres_err)?;
             return Ok(new_version);
         }
 
@@ -174,8 +174,8 @@ where
                 "SELECT version FROM files WHERE workspace_id = $1 AND path = $2",
                 &[&workspace_id, &path],
             )
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
+            .map_err(map_postgres_err)?;
+        tx.commit().map_err(map_postgres_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -209,7 +209,7 @@ where
                              EXISTS(SELECT 1 FROM existing) AS existed",
                         &[&workspace_id, &path, &version_i64],
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_postgres_err)?;
                 let deleted: bool = row.get("deleted");
                 let existed: bool = row.get("existed");
 
@@ -228,7 +228,7 @@ where
                         "DELETE FROM files WHERE workspace_id = $1 AND path = $2",
                         &[&workspace_id, &path],
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_postgres_err)?;
                 if deleted > 0 {
                     Ok(DeleteOutcome::Deleted)
                 } else {
@@ -273,7 +273,7 @@ where
                      LIMIT $5",
                     &[&workspace_id, &lower, &upper, &after, &limit_i64],
                 )
-                .map_err(db_err)?,
+                .map_err(map_postgres_err)?,
             (Some(after), None) => self
                 .client
                 .query(
@@ -284,7 +284,7 @@ where
                      LIMIT $4",
                     &[&workspace_id, &lower, &after, &limit_i64],
                 )
-                .map_err(db_err)?,
+                .map_err(map_postgres_err)?,
             (None, Some(upper)) => self
                 .client
                 .query(
@@ -295,7 +295,7 @@ where
                      LIMIT $4",
                     &[&workspace_id, &lower, &upper, &limit_i64],
                 )
-                .map_err(db_err)?,
+                .map_err(map_postgres_err)?,
             (None, None) => self
                 .client
                 .query(
@@ -306,7 +306,7 @@ where
                      LIMIT $3",
                     &[&workspace_id, &lower, &limit_i64],
                 )
-                .map_err(db_err)?,
+                .map_err(map_postgres_err)?,
         };
 
         let mut out = Vec::with_capacity(rows.len());
@@ -333,6 +333,17 @@ fn decode_meta_row(row: &postgres::Row) -> Result<(String, u64, u64, u64)> {
         i64_to_u64(row.get::<_, i64>(2), "version")?,
         i64_to_u64(row.get::<_, i64>(3), "updated_at_ms")?,
     ))
+}
+
+fn map_postgres_err(err: postgres::Error) -> Error {
+    match err.code() {
+        Some(&postgres::error::SqlState::QUERY_CANCELED)
+        | Some(&postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+        | Some(&postgres::error::SqlState::TOO_MANY_CONNECTIONS) => {
+            Error::Timeout(format!("postgres contention timed out: {err}"))
+        }
+        _ => db_err(err),
+    }
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {

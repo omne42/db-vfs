@@ -16,15 +16,17 @@ pub type SqliteStore<C = Box<rusqlite::Connection>> = SqliteStoreWithConn<C>;
 
 impl SqliteStoreWithConn<Box<rusqlite::Connection>> {
     pub fn new(conn: rusqlite::Connection) -> Result<Self> {
-        conn.busy_timeout(Duration::from_secs(5)).map_err(db_err)?;
-        crate::migrations::migrate_sqlite(&conn).map_err(db_err)?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(map_sqlite_err)?;
+        crate::migrations::migrate_sqlite(&conn).map_err(map_sqlite_err)?;
         Ok(Self {
             conn: Box::new(conn),
         })
     }
 
     pub fn new_no_migrate(conn: rusqlite::Connection) -> Result<Self> {
-        conn.busy_timeout(Duration::from_secs(5)).map_err(db_err)?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(map_sqlite_err)?;
         Ok(Self {
             conn: Box::new(conn),
         })
@@ -64,7 +66,7 @@ where
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2",
             )
-            .map_err(db_err)?;
+            .map_err(map_sqlite_err)?;
 
         let row = stmt
             .query_row(rusqlite::params![workspace_id, path], |row| {
@@ -75,7 +77,7 @@ where
                 ))
             })
             .optional()
-            .map_err(db_err)?;
+            .map_err(map_sqlite_err)?;
 
         row.map(|(size_bytes, version, updated_at_ms)| {
             FileMeta {
@@ -103,13 +105,13 @@ where
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
             )
-            .map_err(db_err)?;
+            .map_err(map_sqlite_err)?;
 
         stmt.query_row(rusqlite::params![workspace_id, path, version], |row| {
             row.get::<_, String>(0)
         })
         .optional()
-        .map_err(db_err)
+        .map_err(map_sqlite_err)
     }
 
     fn insert_file_new(
@@ -160,7 +162,7 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<u64> {
-        let tx = self.conn.unchecked_transaction().map_err(db_err)?;
+        let tx = self.conn.unchecked_transaction().map_err(map_sqlite_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
@@ -184,10 +186,10 @@ where
                     expected_version_i64,
                 ],
             )
-            .map_err(db_err)?;
+            .map_err(map_sqlite_err)?;
 
         if updated == 1 {
-            tx.commit().map_err(db_err)?;
+            tx.commit().map_err(map_sqlite_err)?;
             return Ok(new_version);
         }
 
@@ -198,8 +200,8 @@ where
                 |row| row.get::<_, i64>(0),
             )
             .optional()
-            .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
+            .map_err(map_sqlite_err)?;
+        tx.commit().map_err(map_sqlite_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -218,7 +220,7 @@ where
                 let tx = self
                     .conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 let current_version = tx
                     .query_row(
                         "SELECT version
@@ -228,7 +230,7 @@ where
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
 
                 let Some(current_version) = current_version else {
                     return Ok(DeleteOutcome::NotFound);
@@ -243,13 +245,13 @@ where
                          WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
                         rusqlite::params![workspace_id, path, version],
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 if deleted != 1 {
                     return Err(Error::Db(format!(
                         "delete_file: expected to delete exactly one row, deleted={deleted}"
                     )));
                 }
-                tx.commit().map_err(db_err)?;
+                tx.commit().map_err(map_sqlite_err)?;
                 Ok(DeleteOutcome::Deleted)
             }
             None => {
@@ -259,7 +261,7 @@ where
                         "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2",
                         rusqlite::params![workspace_id, path],
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 if deleted > 0 {
                     Ok(DeleteOutcome::Deleted)
                 } else {
@@ -305,15 +307,15 @@ where
                          ORDER BY path
                          LIMIT ?5",
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 let rows = stmt
                     .query_map(
                         rusqlite::params![workspace_id, &lower, upper, after, limit_i64],
                         decode_meta_row,
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 for row in rows {
-                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(map_sqlite_err)?;
                     out.push(
                         FileMeta {
                             path,
@@ -335,15 +337,15 @@ where
                          ORDER BY path
                          LIMIT ?4",
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 let rows = stmt
                     .query_map(
                         rusqlite::params![workspace_id, &lower, after, limit_i64],
                         decode_meta_row,
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 for row in rows {
-                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(map_sqlite_err)?;
                     out.push(
                         FileMeta {
                             path,
@@ -365,15 +367,15 @@ where
                          ORDER BY path
                          LIMIT ?4",
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 let rows = stmt
                     .query_map(
                         rusqlite::params![workspace_id, &lower, upper, limit_i64],
                         decode_meta_row,
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 for row in rows {
-                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(map_sqlite_err)?;
                     out.push(
                         FileMeta {
                             path,
@@ -395,15 +397,15 @@ where
                          ORDER BY path
                          LIMIT ?3",
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 let rows = stmt
                     .query_map(
                         rusqlite::params![workspace_id, &lower, limit_i64],
                         decode_meta_row,
                     )
-                    .map_err(db_err)?;
+                    .map_err(map_sqlite_err)?;
                 for row in rows {
-                    let (path, size_bytes, version, updated_at_ms) = row.map_err(db_err)?;
+                    let (path, size_bytes, version, updated_at_ms) = row.map_err(map_sqlite_err)?;
                     out.push(
                         FileMeta {
                             path,
@@ -427,6 +429,15 @@ fn decode_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, u64, u6
         i64_to_u64_sql(row.get::<_, i64>(2)?, "version", 2)?,
         i64_to_u64_sql(row.get::<_, i64>(3)?, "updated_at_ms", 3)?,
     ))
+}
+
+fn map_sqlite_err(err: rusqlite::Error) -> Error {
+    match err.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            Error::Timeout(format!("sqlite contention timed out: {err}"))
+        }
+        _ => db_err(err),
+    }
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
@@ -530,5 +541,26 @@ mod tests {
             .expect("page2");
         let page2_paths = page2.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(page2_paths, vec!["docs/c.txt"]);
+    }
+
+    #[test]
+    fn sqlite_busy_and_locked_errors_map_to_timeout() {
+        let busy = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::DatabaseBusy,
+                extended_code: rusqlite::ffi::SQLITE_BUSY,
+            },
+            None,
+        );
+        let locked = rusqlite::Error::SqliteFailure(
+            SqliteError {
+                code: ErrorCode::DatabaseLocked,
+                extended_code: rusqlite::ffi::SQLITE_LOCKED,
+            },
+            None,
+        );
+
+        assert_eq!(map_sqlite_err(busy).code(), "timeout");
+        assert_eq!(map_sqlite_err(locked).code(), "timeout");
     }
 }

@@ -55,7 +55,7 @@ pub(super) fn read<S: crate::store::Store>(
     let (mut content, version) = match (request.start_line, request.end_line) {
         (None, None) => {
             let (meta, content) =
-                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta)?;
+                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, true)?;
             (content, meta.version)
         }
         (Some(start_line), Some(end_line)) => {
@@ -67,7 +67,7 @@ pub(super) fn read<S: crate::store::Store>(
             }
 
             let (meta, content) =
-                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta)?;
+                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, false)?;
             let extracted = extract_line_range(
                 &content,
                 start_line,
@@ -121,6 +121,7 @@ fn load_content_with_retry<S: crate::store::Store>(
     workspace_id: &str,
     path: &str,
     mut meta: crate::store::FileMeta,
+    enforce_max_bytes: bool,
 ) -> Result<(crate::store::FileMeta, String)> {
     let max_bytes = vfs.policy.limits.max_read_bytes;
     let mut attempts: usize = 0;
@@ -146,7 +147,7 @@ fn load_content_with_retry<S: crate::store::Store>(
         }
         attempts += 1;
 
-        if meta.size_bytes > max_bytes {
+        if enforce_max_bytes && meta.size_bytes > max_bytes {
             // Re-check metadata once before failing hard. This avoids false
             // `file_too_large` errors when a newer/smaller version won the race
             // between the caller's initial meta read and content fetch.
@@ -167,7 +168,7 @@ fn load_content_with_retry<S: crate::store::Store>(
         match vfs.store.get_content(workspace_id, path, meta.version)? {
             Some(content) => {
                 let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
-                if content_size_bytes > max_bytes {
+                if enforce_max_bytes && content_size_bytes > max_bytes {
                     return Err(Error::FileTooLarge {
                         path: path.to_string(),
                         size_bytes: content_size_bytes,
@@ -202,19 +203,10 @@ fn extract_line_range(
     content: &str,
     start_line: u64,
     end_line: u64,
-    max_scan_bytes: u64,
-    file_size_bytes: u64,
+    max_read_bytes: u64,
+    _file_size_bytes: u64,
     path: &str,
 ) -> Result<String> {
-    let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
-    if content_size_bytes > max_scan_bytes {
-        return Err(Error::FileTooLarge {
-            path: path.to_string(),
-            size_bytes: file_size_bytes.max(content_size_bytes),
-            max_bytes: max_scan_bytes,
-        });
-    }
-
     let bytes = content.as_bytes();
     let mut pos: usize = 0;
     let mut current_line: u64 = 0;
@@ -254,6 +246,14 @@ fn extract_line_range(
     };
 
     let slice = &content[start_pos..end_pos];
+    let slice_size_bytes = u64::try_from(slice.len()).unwrap_or(u64::MAX);
+    if slice_size_bytes > max_read_bytes {
+        return Err(Error::FileTooLarge {
+            path: path.to_string(),
+            size_bytes: slice_size_bytes,
+            max_bytes: max_read_bytes,
+        });
+    }
     Ok(slice.to_string())
 }
 
@@ -694,5 +694,64 @@ mod tests {
     fn extract_line_range_rejects_out_of_bounds() {
         let err = extract_line_range("a\n", 2, 2, 1024, 2, "a.txt").expect_err("out of bounds");
         assert_eq!(err.code(), "invalid_path");
+    }
+
+    #[test]
+    fn ranged_read_allows_large_file_when_selected_slice_is_small() {
+        let content = "line-1\nline-2\nline-3\n".repeat(64);
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 8;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(2),
+            })
+            .expect("ranged read");
+        assert_eq!(resp.content, "line-2\n");
+        assert_eq!(resp.bytes_read, 7);
+    }
+
+    #[test]
+    fn ranged_read_still_rejects_selected_slice_that_exceeds_limit() {
+        let content = "12345\nabcdef\n";
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 4;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(1),
+                end_line: Some(1),
+            })
+            .expect_err("slice should be too large");
+        assert_eq!(err.code(), "file_too_large");
     }
 }
