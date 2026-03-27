@@ -1186,3 +1186,4 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
+
