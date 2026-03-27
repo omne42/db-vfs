@@ -11,6 +11,7 @@
 - 路径合法性、traversal、secrets redaction、scan budgets
   - `max_io_ms` 只约束非 scan 请求与有界 DB 等待。
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；`None` 表示该预算不设上限。
+  - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
 - 面向运维和集成者的 API / policy / security 文档

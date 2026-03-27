@@ -42,7 +42,7 @@ pub struct GrepResponse {
     pub skipped_too_large_files: u64,
     #[serde(default)]
     pub skipped_traversal_skipped: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub skipped_secret_denied: u64,
     #[serde(default)]
     pub skipped_glob_mismatch: u64,
@@ -274,6 +274,7 @@ pub(super) fn grep<S: crate::store::Store>(
     let mut skipped_missing_content: u64 = 0;
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: usize = 0;
+    let mut budgeted_entries: usize = 0;
     let mut scan_limit_reached = false;
     let mut scan_limit_reason: Option<ScanLimitReason> = None;
     let mut response_bytes: usize = GREP_RESPONSE_JSON_FIXED_OVERHEAD;
@@ -290,7 +291,7 @@ pub(super) fn grep<S: crate::store::Store>(
             break;
         }
 
-        let remaining_entries = max_scan_entries.saturating_sub(scanned_entries);
+        let remaining_entries = max_scan_entries.saturating_sub(budgeted_entries);
         if remaining_entries == 0 {
             scan_limit_reached = true;
             scan_limit_reason = Some(ScanLimitReason::Entries);
@@ -330,7 +331,7 @@ pub(super) fn grep<S: crate::store::Store>(
             let meta_size_bytes = meta.size_bytes;
             let mut path_json_escaped_len: Option<usize> = None;
 
-            scanned_entries = scanned_entries.saturating_add(1);
+            budgeted_entries = budgeted_entries.saturating_add(1);
 
             if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                 scan_limit_reached = true;
@@ -347,6 +348,7 @@ pub(super) fn grep<S: crate::store::Store>(
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
                 continue;
             }
+            scanned_entries = scanned_entries.saturating_add(1);
 
             if let Some(glob) = &file_glob
                 && !glob_is_match(glob, &path)
@@ -463,7 +465,7 @@ pub(super) fn grep<S: crate::store::Store>(
             }
         }
 
-        if has_more && scanned_entries >= max_scan_entries {
+        if has_more && budgeted_entries >= max_scan_entries {
             scan_limit_reached = true;
             scan_limit_reason = Some(ScanLimitReason::Entries);
             break;
@@ -582,6 +584,32 @@ mod tests {
             })
             .expect_err("should fail");
         assert_eq!(err.code(), "invalid_regex");
+    }
+
+    #[test]
+    fn grep_response_hides_secret_denied_count_from_serialized_output() {
+        let value = serde_json::to_value(GrepResponse {
+            matches: vec![GrepMatch {
+                path: "docs/a.txt".to_string(),
+                line: 1,
+                text: "hello".to_string(),
+                line_truncated: false,
+            }],
+            truncated: false,
+            skipped_too_large_files: 0,
+            skipped_traversal_skipped: 0,
+            skipped_secret_denied: 2,
+            skipped_glob_mismatch: 0,
+            skipped_missing_content: 0,
+            scanned_files: 1,
+            scan_limit_reached: false,
+            scan_limit_reason: None,
+            elapsed_ms: 1,
+            scanned_entries: 1,
+        })
+        .expect("serialize grep response");
+
+        assert!(value.get("skipped_secret_denied").is_none());
     }
 
     struct SingleFileStore {
