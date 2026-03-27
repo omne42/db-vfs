@@ -39,6 +39,34 @@ impl<S: Store> DbVfs<S> {
         Ok((redactor, traversal))
     }
 
+    fn matcher_mismatch_error(kind: &str) -> Error {
+        Error::InvalidPolicy(format!(
+            "provided {kind} does not match the supplied policy; build matchers from the same policy"
+        ))
+    }
+
+    fn ensure_redactor_matches_policy(
+        policy: &ValidatedVfsPolicy,
+        redactor: &SecretRedactor,
+    ) -> Result<()> {
+        if redactor.is_compatible_with_rules(&policy.secrets) {
+            Ok(())
+        } else {
+            Err(Self::matcher_mismatch_error("SecretRedactor"))
+        }
+    }
+
+    fn ensure_traversal_matches_policy(
+        policy: &ValidatedVfsPolicy,
+        traversal: &TraversalSkipper,
+    ) -> Result<()> {
+        if traversal.is_compatible_with_rules(&policy.traversal) {
+            Ok(())
+        } else {
+            Err(Self::matcher_mismatch_error("TraversalSkipper"))
+        }
+    }
+
     pub fn new(store: S, policy: VfsPolicy) -> Result<Self> {
         let policy = ValidatedVfsPolicy::new(policy)?;
         let (redactor, traversal) = Self::build_matchers(&policy)?;
@@ -66,6 +94,7 @@ impl<S: Store> DbVfs<S> {
         redactor: SecretRedactor,
     ) -> Result<Self> {
         let policy = ValidatedVfsPolicy::new(policy)?;
+        Self::ensure_redactor_matches_policy(&policy, &redactor)?;
         let traversal = TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self {
             policy: Arc::new(policy),
@@ -82,6 +111,8 @@ impl<S: Store> DbVfs<S> {
         traversal: TraversalSkipper,
     ) -> Result<Self> {
         let policy = ValidatedVfsPolicy::new(policy)?;
+        Self::ensure_redactor_matches_policy(&policy, &redactor)?;
+        Self::ensure_traversal_matches_policy(&policy, &traversal)?;
         Ok(Self {
             policy: Arc::new(policy),
             redactor: Arc::new(redactor),
@@ -96,10 +127,21 @@ impl<S: Store> DbVfs<S> {
         redactor: impl Into<Arc<SecretRedactor>>,
         traversal: impl Into<Arc<TraversalSkipper>>,
     ) -> Self {
+        let redactor = redactor.into();
+        let traversal = traversal.into();
+        let (redactor, traversal) = if redactor.is_compatible_with_rules(&policy.secrets)
+            && traversal.is_compatible_with_rules(&policy.traversal)
+        {
+            (redactor, traversal)
+        } else {
+            let (policy_redactor, policy_traversal) = Self::build_matchers(policy.as_ref())
+                .expect("validated policy must build matchers");
+            (Arc::new(policy_redactor), Arc::new(policy_traversal))
+        };
         Self {
             policy,
-            redactor: redactor.into(),
-            traversal: traversal.into(),
+            redactor,
+            traversal,
             store,
         }
     }

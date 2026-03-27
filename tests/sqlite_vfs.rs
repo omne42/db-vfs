@@ -1,5 +1,6 @@
 #![cfg(feature = "sqlite")]
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use db_vfs::store::sqlite::SqliteStore;
@@ -8,8 +9,11 @@ use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
 use db_vfs_core::policy::{
-    AuditPolicy, AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
+    AuditPolicy, AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, ValidatedVfsPolicy,
+    VfsPolicy,
 };
+use db_vfs_core::redaction::SecretRedactor;
+use db_vfs_core::traversal::TraversalSkipper;
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -599,4 +603,93 @@ fn traversal_skip_globs_do_not_affect_direct_read() {
         })
         .unwrap();
     assert_eq!(read.content, "skip\n");
+}
+
+#[test]
+fn new_with_redactor_rejects_mismatched_secret_rules() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    let mut policy = policy_all_perms();
+    policy.secrets.deny_globs = vec![".env".to_string()];
+
+    let redactor = SecretRedactor::from_rules(&SecretRules {
+        deny_globs: Vec::new(),
+        ..SecretRules::default()
+    })
+    .expect("mismatched redactor");
+
+    let err = match DbVfs::new_with_redactor(store, policy, redactor) {
+        Ok(_) => panic!("mismatched redactor should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code(), "invalid_policy");
+}
+
+#[test]
+fn new_with_matchers_rejects_mismatched_traversal_rules() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
+    let mut policy = policy_all_perms();
+    policy.traversal.skip_globs = vec!["node_modules/**".to_string()];
+
+    let redactor = SecretRedactor::from_rules(&policy.secrets).expect("matching redactor");
+    let traversal =
+        TraversalSkipper::from_rules(&TraversalRules::default()).expect("mismatched traversal");
+
+    let err = match DbVfs::new_with_matchers(store, policy, redactor, traversal) {
+        Ok(_) => panic!("mismatched traversal should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code(), "invalid_policy");
+}
+
+#[test]
+fn new_with_matchers_validated_falls_back_to_policy_matchers() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+    store
+        .insert_file_new("ws", ".env", "SECRET=1\n", now)
+        .expect("seed denied path");
+    store
+        .insert_file_new("ws", "node_modules/skip.txt", "skip\n", now)
+        .expect("seed skipped path");
+    store
+        .insert_file_new("ws", "docs/keep.txt", "keep\n", now)
+        .expect("seed visible path");
+
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.secrets.deny_globs = vec![".env".to_string()];
+    policy.traversal.skip_globs = vec!["node_modules/**".to_string()];
+    let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
+
+    let redactor = Arc::new(
+        SecretRedactor::from_rules(&SecretRules {
+            deny_globs: Vec::new(),
+            ..SecretRules::default()
+        })
+        .expect("mismatched redactor"),
+    );
+    let traversal = Arc::new(
+        TraversalSkipper::from_rules(&TraversalRules::default()).expect("mismatched traversal"),
+    );
+
+    let mut vfs = DbVfs::new_with_matchers_validated(store, policy, redactor, traversal);
+
+    let err = vfs
+        .read(ReadRequest {
+            workspace_id: "ws".to_string(),
+            path: ".env".to_string(),
+            start_line: None,
+            end_line: None,
+        })
+        .expect_err("policy redactor should still deny secret path");
+    assert_eq!(err.code(), "secret_path_denied");
+
+    let resp = vfs
+        .glob(GlobRequest {
+            workspace_id: "ws".to_string(),
+            pattern: "**/*.txt".to_string(),
+            path_prefix: Some("".to_string()),
+        })
+        .expect("glob");
+    assert_eq!(resp.matches, vec!["docs/keep.txt".to_string()]);
 }
