@@ -23,7 +23,7 @@ Examples:
 
 | Operation | Target exists | expected_version | Result |
 | --- | --- | --- | --- |
-| `write` | no | `null` | create (version=1) |
+| `write` | no | `null` | create (first lifetime starts at `1`; recreate continues the monotonic per-path version stream) |
 | `write` | yes | `null` | `conflict` |
 | `write` | yes | `v` matches | update (version+1) |
 | `write` | yes | `v` mismatches | `conflict` |
@@ -33,6 +33,9 @@ Examples:
 | `delete` | yes | `v` matches | deleted |
 | `delete` | yes | `v` mismatches | `conflict` |
 | `delete` | no | any | `not_found` |
+
+`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Reusing the
+same path does not reset CAS back to `1`.
 
 If `delete.ignore_missing = true`, the missing-target branch becomes `200 { deleted: false }`
 instead of `not_found`.
