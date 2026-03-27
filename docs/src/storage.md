@@ -4,17 +4,17 @@
 
 | Backend | Key config | Default / behavior |
 | --- | --- | --- |
-| SQLite | `limits.max_io_ms` | used for busy timeout (capped) |
+| SQLite | `limits.max_io_ms`, `limits.max_walk_ms` | each checked-out connection resets `busy_timeout` to the active request budget |
 | SQLite | `limits.max_db_connections` | r2d2 pool size |
-| Postgres | `limits.max_io_ms` | sets statement timeout |
+| Postgres | `limits.max_io_ms`, `limits.max_walk_ms` | `statement_timeout` follows the active request budget |
 | Postgres | `limits.max_db_connections` | r2d2 pool size |
 
 ## Timeout behavior
 
 | Backend | Timeout mechanism | On timeout |
 | --- | --- | --- |
-| SQLite | service wall-clock + interrupt handle | best-effort interrupt, may finish shortly in background |
-| Postgres | service wall-clock + statement timeout | query canceled by DB timeout rules |
+| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background |
+| Postgres | per-request `statement_timeout` + service wall-clock | query canceled and surfaced as `timeout` |
 
 Retry decision still depends on operation semantics (`conflict`, idempotency, etc).
 

@@ -78,6 +78,7 @@ const CODE_FILE_TOO_LARGE: &str = "file_too_large";
 const CODE_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const CODE_TIMEOUT: &str = "timeout";
 const RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
+const SQLITE_DEFAULT_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
 
 fn status_for_error_code(code: &str) -> StatusCode {
     match code {
@@ -242,17 +243,14 @@ fn sqlite_uses_in_memory_pool(db_path: &std::path::Path) -> bool {
     db_path == std::path::Path::new(":memory:")
 }
 
-fn sqlite_connection_manager(
-    db_path: &std::path::Path,
-    busy_timeout: Duration,
-) -> r2d2_sqlite::SqliteConnectionManager {
+fn sqlite_connection_manager(db_path: &std::path::Path) -> r2d2_sqlite::SqliteConnectionManager {
     let manager = if sqlite_uses_in_memory_pool(db_path) {
         r2d2_sqlite::SqliteConnectionManager::memory()
     } else {
         r2d2_sqlite::SqliteConnectionManager::file(db_path)
     };
     manager.with_init(move |conn| {
-        conn.busy_timeout(busy_timeout)?;
+        conn.busy_timeout(Duration::from_millis(SQLITE_DEFAULT_BUSY_TIMEOUT_MS))?;
         Ok(())
     })
 }
@@ -271,12 +269,7 @@ pub fn build_app_sqlite(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
-
-    const SQLITE_BUSY_TIMEOUT_CAP_MS: u64 = 5_000;
-    let busy_timeout =
-        Duration::from_millis(policy.limits.max_io_ms.min(SQLITE_BUSY_TIMEOUT_CAP_MS));
-
-    let manager = sqlite_connection_manager(&db_path, busy_timeout);
+    let manager = sqlite_connection_manager(&db_path);
     let max_pool_size = sqlite_pool_max_size(&db_path, policy.limits.max_db_connections);
     if max_pool_size != policy.limits.max_db_connections {
         tracing::warn!(
@@ -386,6 +379,16 @@ mod tests {
     }
 
     #[test]
+    fn map_err_timeout_is_request_timeout_and_not_redacted() {
+        let (status, Json(body)) = map_err(db_vfs_core::Error::Timeout(
+            "backend wait expired".to_string(),
+        ));
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.code, "timeout");
+        assert_eq!(body.message, "timeout: backend wait expired");
+    }
+
+    #[test]
     fn max_body_bytes_is_capped_to_hard_limit() {
         let mut policy = VfsPolicy::default();
         policy.limits.max_read_bytes = u64::MAX;
@@ -416,8 +419,7 @@ mod tests {
 
     #[test]
     fn sqlite_memory_pool_reuses_the_single_migrated_connection() {
-        let manager =
-            sqlite_connection_manager(std::path::Path::new(":memory:"), Duration::from_millis(100));
+        let manager = sqlite_connection_manager(std::path::Path::new(":memory:"));
         let pool = r2d2::Pool::builder()
             .max_size(1)
             .build(manager)
@@ -444,5 +446,13 @@ mod tests {
             )
             .expect("read seeded row");
         assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn sqlite_default_busy_timeout_is_effectively_unbounded() {
+        assert_eq!(
+            Duration::from_millis(SQLITE_DEFAULT_BUSY_TIMEOUT_MS),
+            Duration::from_millis(i32::MAX as u64)
+        );
     }
 }

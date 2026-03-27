@@ -54,6 +54,7 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; it does not implicitly fall back to `max_io_ms`.
+- SQLite `busy_timeout` and Postgres `statement_timeout` are reset per request to the active request budget.
 
 ## Audit behavior matrix
 
@@ -65,3 +66,7 @@ Budget semantics:
 | set + open fails | `false` | startup continues, audit disabled |
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
+
+When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: requests block
+on audit backpressure, and losing the audit worker turns into process failure instead of silent
+event loss.

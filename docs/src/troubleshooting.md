@@ -34,8 +34,8 @@ Use this template for each failure:
 ## `408 timeout`
 
 - Symptom: `timeout` under load or large requests.
-- Likely cause: `limits.max_io_ms` too low or backend contention.
-- Immediate checks: server logs with `request_id`, DB health, pool saturation.
+- Likely cause: request budget too low for payload/scan scope, pool checkout wait, or DB lock contention.
+- Immediate checks: server logs with `request_id`, DB health, pool saturation, lock wait patterns.
 - Fix: tune limits and query scope; reduce request payload/scan scope.
 - Retry: yes, exponential backoff (3-5 attempts max).
 - Success criteria: sustained requests complete within budget.

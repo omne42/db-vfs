@@ -47,4 +47,5 @@ Recommended `RUST_LOG`:
 - keep audit file permissions restrictive (`600` or equivalent owner-only access);
 - configure external log rotation;
 - monitor disk usage;
-- understand startup behavior difference between `audit.required=true/false`.
+- understand both startup and runtime behavior difference between `audit.required=true/false`;
+- with `audit.required=true`, treat audit backpressure or worker loss as availability-impacting by design.
