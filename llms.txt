@@ -111,9 +111,10 @@ Error body:
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
+- Env-backed tokens are matched byte-for-byte; avoid accidental trailing whitespace/newlines when exporting them.
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
 - Use TLS/HTTPS end-to-end for bearer token transport.
-- Enable audit log with `audit.required = true`.
+- Enable audit log with `audit.required = true` so queue saturation backpressures instead of silently dropping audit events.
 
 ## Performance Limits
 
@@ -134,6 +135,7 @@ Budget semantics:
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
+- SQLite `:memory:` runs through a single pooled connection so migrations and requests share one in-memory DB.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
 ## Troubleshooting matrix
@@ -306,6 +308,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
+- service/auth+audit+sqlite: stop trimming env-backed auth tokens, make `audit.required` backpressure/fail loudly instead of silently dropping runtime events, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 
 - service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
 - service/handlers: treat queue wait budget expiry as `408 timeout` and use the documented `not_permitted` error code for workspace allowlist rejections.
@@ -700,6 +703,10 @@ Not supported:
 
 Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
 
+The same rule applies to `token_env_var`: the service hashes the exact environment-variable
+contents. Leading/trailing spaces or newlines are part of the token unless you avoid them when
+setting the variable.
+
 ```bash
 printf '%s' 'dev-token-change-me' | sha256sum
 # then use: token = "sha256:<hex>"
@@ -730,6 +737,13 @@ Budget semantics:
 | set + open fails | `false` | startup continues, audit disabled |
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
+
+When `audit.required = true`, runtime audit delivery is also strict:
+
+- request paths backpressure on the audit queue instead of dropping events when the worker is slow;
+- lock acquisition failure on the audit file fails startup immediately;
+- if the required audit worker stops after startup, the service treats that as fatal instead of
+  silently continuing without audit coverage.
 
 
 ---
@@ -842,8 +856,8 @@ section_id: "docs-src-storage-md"
 
 | Backend | Key config | Default / behavior |
 | --- | --- | --- |
-| SQLite | `limits.max_io_ms` | used for busy timeout (capped) |
-| SQLite | `limits.max_db_connections` | r2d2 pool size |
+| SQLite | `limits.max_io_ms` | used for pool wait and per-request busy timeout |
+| SQLite | `limits.max_db_connections` | r2d2 pool size; forced to `1` for `:memory:` |
 | Postgres | `limits.max_io_ms` | sets statement timeout |
 | Postgres | `limits.max_db_connections` | r2d2 pool size |
 
@@ -870,6 +884,10 @@ SQLite:
 ```bash
 cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.local.toml
 ```
+
+For `--sqlite :memory:`, the service intentionally uses a single pooled connection so migrations,
+schema, and request traffic all see the same in-memory database. Treat this mode as local/dev/test
+only.
 
 Postgres:
 
@@ -984,7 +1002,9 @@ Recommended `RUST_LOG`:
 - keep audit file permissions restrictive (`600` or equivalent owner-only access);
 - configure external log rotation;
 - monitor disk usage;
-- understand startup behavior difference between `audit.required=true/false`.
+- understand startup behavior difference between `audit.required=true/false`;
+- with `audit.required = true`, queue saturation backpressures requests instead of dropping events,
+  and a dead audit worker is treated as a fatal condition.
 
 
 ---
@@ -1185,4 +1205,3 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
-

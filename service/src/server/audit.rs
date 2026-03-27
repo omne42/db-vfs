@@ -21,6 +21,7 @@ static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
 pub(super) struct AuditLogger {
     sender: mpsc::SyncSender<AuditEvent>,
     disconnected_warned: Arc<AtomicBool>,
+    required: bool,
 }
 
 pub(super) fn op_from_path(path: &str) -> Option<&'static str> {
@@ -137,6 +138,7 @@ pub(super) struct AuditEvent {
 impl AuditLogger {
     pub(super) fn new(
         path: impl AsRef<Path>,
+        required: bool,
         flush_every_events: usize,
         flush_max_interval: Duration,
     ) -> anyhow::Result<Self> {
@@ -159,6 +161,7 @@ impl AuditLogger {
                     receiver,
                     path,
                     lock_file,
+                    required,
                     flush_every_events,
                     flush_max_interval,
                 )
@@ -168,10 +171,18 @@ impl AuditLogger {
         Ok(Self {
             sender,
             disconnected_warned: Arc::new(AtomicBool::new(false)),
+            required,
         })
     }
 
     pub(super) fn log(&self, event: AuditEvent) {
+        if self.required {
+            if self.sender.send(event).is_err() {
+                panic!("audit.required=true but the audit worker stopped");
+            }
+            return;
+        }
+
         match self.sender.try_send(event) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
@@ -226,7 +237,13 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
+    lock_file.try_lock_exclusive().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::anyhow!("audit lock is already held: {}", lock_path.display())
+        } else {
+            anyhow::Error::from(err)
+        }
+    })?;
 
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     if !file.metadata()?.is_file() {
@@ -251,6 +268,7 @@ fn audit_worker(
     receiver: mpsc::Receiver<AuditEvent>,
     path: PathBuf,
     _lock_file: std::fs::File,
+    required: bool,
     flush_every_events: usize,
     flush_max_interval: Duration,
 ) {
@@ -268,6 +286,15 @@ fn audit_worker(
 
                 if let Err(err) = serde_json::to_writer(&mut out, &event) {
                     write_failures = write_failures.saturating_add(1);
+                    if required {
+                        tracing::error!(
+                            err = %err,
+                            audit_path = ?path,
+                            write_failures,
+                            "required audit worker cannot serialize events; stopping worker"
+                        );
+                        break;
+                    }
                     if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
                             err = %err,
@@ -280,6 +307,15 @@ fn audit_worker(
                 }
                 if let Err(err) = out.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
+                    if required {
+                        tracing::error!(
+                            err = %err,
+                            audit_path = ?path,
+                            write_failures,
+                            "required audit worker cannot write events; stopping worker"
+                        );
+                        break;
+                    }
                     if write_failures == 1 || write_failures.is_multiple_of(1000) {
                         tracing::warn!(
                             err = %err,
@@ -304,6 +340,15 @@ fn audit_worker(
         if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
             if let Err(err) = out.flush() {
                 write_failures = write_failures.saturating_add(1);
+                if required {
+                    tracing::error!(
+                        err = %err,
+                        audit_path = ?path,
+                        write_failures,
+                        "required audit worker cannot flush events; stopping worker"
+                    );
+                    break;
+                }
                 if write_failures == 1 || write_failures.is_multiple_of(1000) {
                     tracing::warn!(
                         err = %err,
@@ -334,6 +379,9 @@ fn audit_worker(
 mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+    use std::{panic, sync::Arc};
+
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn lock_path_for_appends_lock_suffix() {
@@ -374,6 +422,7 @@ mod tests {
                 receiver,
                 worker_path,
                 lock_file,
+                false,
                 1,
                 Duration::from_millis(1),
             )
@@ -384,5 +433,36 @@ mod tests {
         let line = raw.lines().next().expect("audit line");
         let parsed: serde_json::Value = serde_json::from_str(line).expect("parse json");
         assert_eq!(parsed["ts_ms"].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn open_audit_file_fails_fast_when_lock_is_already_held() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let (_first_lock, _first_file) = super::open_audit_file(&path).expect("first open");
+        let err = super::open_audit_file(&path).expect_err("second open should fail");
+        assert!(err.to_string().contains("audit lock is already held"));
+    }
+
+    #[test]
+    fn required_audit_logger_panics_when_worker_is_gone() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(receiver);
+        let logger = super::AuditLogger {
+            sender,
+            disconnected_warned: Arc::new(AtomicBool::new(false)),
+            required: true,
+        };
+
+        let result = panic::catch_unwind(|| {
+            logger.log(super::minimal_event(
+                "req-1".to_string(),
+                None,
+                "read",
+                200,
+                None,
+            ))
+        });
+        assert!(result.is_err());
     }
 }

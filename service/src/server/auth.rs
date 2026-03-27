@@ -87,14 +87,13 @@ pub(super) fn build_auth_mode(
             let value = std::env::var(env).map_err(|_| {
                 anyhow::anyhow!("auth token env var {env:?} is not set or not valid UTF-8")
             })?;
-            let value = value.trim();
             if value.is_empty() {
                 anyhow::bail!("auth token env var {env:?} must be non-empty");
             }
             if value.starts_with("sha256:") {
-                parse_token_sha256(value)?
+                parse_token_sha256(&value)?
             } else {
-                hash_plaintext_token_sha256(value, &format!("auth token env var {env:?}"))?
+                hash_plaintext_token_sha256(&value, &format!("auth token env var {env:?}"))?
             }
         } else {
             anyhow::bail!("auth token entry {idx} is missing token / token_env_var");
@@ -378,5 +377,34 @@ mod tests {
             .err()
             .expect("duplicate token hashes should be rejected");
         assert!(err.to_string().contains("duplicates a previous token hash"));
+    }
+
+    #[test]
+    fn build_auth_mode_preserves_env_backed_token_whitespace() {
+        let var = format!("DB_VFS_TEST_TOKEN_{}", std::process::id());
+        let token = " dev-token-with-spaces \n";
+        let digest = format!("sha256:{}", hex::encode(hash_token_sha256(token)));
+
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: None,
+            token_env_var: Some(var.clone()),
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::set_var(&var, token) };
+        let mode = build_auth_mode(&policy, false).expect("build auth mode");
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::remove_var(&var) };
+
+        let AuthMode::Enforced { rules } = mode else {
+            panic!("expected enforced auth mode");
+        };
+        assert_eq!(rules.len(), 1);
+        assert!(constant_time_eq_32(
+            &rules[0].token_sha256,
+            &parse_token_sha256(&digest).unwrap()
+        ));
     }
 }

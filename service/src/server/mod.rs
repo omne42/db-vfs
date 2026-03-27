@@ -162,7 +162,12 @@ fn build_state(
             Duration::from_millis,
         );
 
-        match audit::AuditLogger::new(path, flush_every_events, flush_max_interval) {
+        match audit::AuditLogger::new(
+            path,
+            policy.audit.required,
+            flush_every_events,
+            flush_max_interval,
+        ) {
             Ok(logger) => Some(logger),
             Err(err) if policy.audit.required => return Err(err),
             Err(err) => {
@@ -233,6 +238,33 @@ fn build_router(state: AppState, body_limit: usize) -> Router {
         .with_state(state)
 }
 
+fn sqlite_uses_in_memory_pool(db_path: &std::path::Path) -> bool {
+    db_path == std::path::Path::new(":memory:")
+}
+
+fn sqlite_connection_manager(
+    db_path: &std::path::Path,
+    busy_timeout: Duration,
+) -> r2d2_sqlite::SqliteConnectionManager {
+    let manager = if sqlite_uses_in_memory_pool(db_path) {
+        r2d2_sqlite::SqliteConnectionManager::memory()
+    } else {
+        r2d2_sqlite::SqliteConnectionManager::file(db_path)
+    };
+    manager.with_init(move |conn| {
+        conn.busy_timeout(busy_timeout)?;
+        Ok(())
+    })
+}
+
+fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
+    if sqlite_uses_in_memory_pool(db_path) {
+        1
+    } else {
+        configured
+    }
+}
+
 pub fn build_app_sqlite(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
@@ -244,21 +276,24 @@ pub fn build_app_sqlite(
     let busy_timeout =
         Duration::from_millis(policy.limits.max_io_ms.min(SQLITE_BUSY_TIMEOUT_CAP_MS));
 
-    {
-        let conn = rusqlite::Connection::open(&db_path)?;
-        conn.busy_timeout(busy_timeout)?;
-        db_vfs::migrations::migrate_sqlite(&conn).map_err(anyhow::Error::msg)?;
+    let manager = sqlite_connection_manager(&db_path, busy_timeout);
+    let max_pool_size = sqlite_pool_max_size(&db_path, policy.limits.max_db_connections);
+    if max_pool_size != policy.limits.max_db_connections {
+        tracing::warn!(
+            configured_max_db_connections = policy.limits.max_db_connections,
+            effective_max_db_connections = max_pool_size,
+            "sqlite :memory: forces a single pooled connection so schema and data stay consistent"
+        );
     }
-
-    let manager = r2d2_sqlite::SqliteConnectionManager::file(&db_path).with_init(move |conn| {
-        conn.busy_timeout(busy_timeout)?;
-        Ok(())
-    });
     let pool = r2d2::Pool::builder()
-        .max_size(policy.limits.max_db_connections)
+        .max_size(max_pool_size)
         .connection_timeout(Duration::from_millis(policy.limits.max_io_ms))
         .build(manager)
         .map_err(anyhow::Error::msg)?;
+    {
+        let conn = pool.get().map_err(anyhow::Error::msg)?;
+        db_vfs::migrations::migrate_sqlite(&conn).map_err(anyhow::Error::msg)?;
+    }
 
     let (state, body_limit) =
         build_state(backend::Backend::Sqlite { pool }, policy, unsafe_no_auth)?;
@@ -361,5 +396,53 @@ mod tests {
             max_body_bytes(&policy),
             (256 * 1024 * 1024 + 64 * 1024) as usize
         );
+    }
+
+    #[test]
+    fn sqlite_memory_path_uses_single_connection_pool() {
+        assert!(sqlite_uses_in_memory_pool(std::path::Path::new(":memory:")));
+        assert!(!sqlite_uses_in_memory_pool(std::path::Path::new(
+            "db.sqlite"
+        )));
+        assert_eq!(
+            sqlite_pool_max_size(std::path::Path::new(":memory:"), 16),
+            1
+        );
+        assert_eq!(
+            sqlite_pool_max_size(std::path::Path::new("db.sqlite"), 16),
+            16
+        );
+    }
+
+    #[test]
+    fn sqlite_memory_pool_reuses_the_single_migrated_connection() {
+        let manager =
+            sqlite_connection_manager(std::path::Path::new(":memory:"), Duration::from_millis(100));
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+
+        {
+            let conn = pool.get().expect("first connection");
+            db_vfs::migrations::migrate_sqlite(&conn).expect("migrate sqlite");
+            conn.execute(
+                "INSERT INTO files (
+                    workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                rusqlite::params!["ws", "docs/a.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
+            )
+            .expect("seed row");
+        }
+
+        let conn = pool.get().expect("second connection");
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM files WHERE workspace_id = ?1 AND path = ?2",
+                rusqlite::params!["ws", "docs/a.txt"],
+                |row| row.get(0),
+            )
+            .expect("read seeded row");
+        assert_eq!(content, "hello");
     }
 }
