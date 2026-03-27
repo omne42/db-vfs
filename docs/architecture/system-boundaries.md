@@ -22,7 +22,7 @@
   - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML 识别与解析。
   - 当前这里没有接入 YAML。
 - `service/src/server/auth.rs`
-  - 自己做 bearer token 的 `sha256:<hex>` 解析、原始字节匹配和 workspace allowlist 约束。
+  - 自己做 bearer token 的 `sha256:<hex>` 解析、摘要匹配和 workspace allowlist 约束。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 
