@@ -259,10 +259,12 @@ fn is_lock_already_held(err: &std::io::Error) -> bool {
 
     #[cfg(windows)]
     {
-        return matches!(err.raw_os_error(), Some(32 | 33));
+        matches!(err.raw_os_error(), Some(32 | 33))
     }
-
-    false
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn lock_path_for(log_path: &Path) -> PathBuf {
@@ -461,6 +463,8 @@ mod tests {
         );
         #[cfg(not(windows))]
         assert!(err.to_string().contains("audit lock is already held"));
+        #[cfg(windows)]
+        let _ = err;
     }
 
     #[test]
