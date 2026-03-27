@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
 - service/auth+audit+sqlite: stop trimming env-backed auth tokens, make `audit.required` backpressure/fail loudly instead of silently dropping runtime events, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 - store/sqlite+postgres: make versioned delete distinguish `conflict` from `not_found` without a post-delete race window, and add regression coverage for the three-way outcome.
