@@ -2,8 +2,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use db_vfs::store::Store;
 use db_vfs::store::sqlite::SqliteStore;
+use db_vfs::store::{DeleteOutcome, Store};
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
@@ -289,6 +289,39 @@ fn delete_rejects_expected_version_overflow() {
         })
         .expect_err("should reject expected_version overflow");
     assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn store_delete_with_expected_version_distinguishes_conflict_and_not_found() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+
+    let version = store
+        .insert_file_new("ws", "docs/a.txt", "hello\n", now)
+        .expect("seed write");
+    assert_eq!(version, 1);
+
+    let err = store
+        .delete_file("ws", "docs/a.txt", Some(version + 1))
+        .expect_err("mismatched version should conflict");
+    assert_eq!(err.code(), "conflict");
+    assert!(
+        store
+            .get_meta("ws", "docs/a.txt")
+            .expect("read meta")
+            .is_some(),
+        "row should remain after conflict"
+    );
+
+    let deleted = store
+        .delete_file("ws", "docs/a.txt", Some(version))
+        .expect("delete matching version");
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let missing = store
+        .delete_file("ws", "docs/a.txt", Some(version))
+        .expect("repeat delete should report missing");
+    assert_eq!(missing, DeleteOutcome::NotFound);
 }
 
 #[test]
