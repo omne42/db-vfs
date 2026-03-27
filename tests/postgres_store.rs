@@ -100,3 +100,51 @@ fn postgres_store_roundtrip() {
         "meta still exists after delete for ws={ws}, path={path}"
     );
 }
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() {
+    let url = postgres_url();
+    let mut store = PostgresStore::connect(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let version = store
+        .insert_file_new(&ws, &path, "hello", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(version, 1);
+
+    let err = store
+        .delete_file(&ws, &path, Some(version + 1))
+        .expect_err("mismatched version should conflict");
+    assert_eq!(err.code(), "conflict");
+    assert!(
+        store
+            .get_meta(&ws, &path)
+            .unwrap_or_else(|err| panic!("get_meta failed for ws={ws}, path={path}: {err}"))
+            .is_some(),
+        "row should remain after conflict for ws={ws}, path={path}"
+    );
+
+    let deleted = store
+        .delete_file(&ws, &path, Some(version))
+        .unwrap_or_else(|err| panic!("delete_file failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let missing = store
+        .delete_file(&ws, &path, Some(version))
+        .unwrap_or_else(|err| panic!("repeat delete failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(missing, DeleteOutcome::NotFound);
+}

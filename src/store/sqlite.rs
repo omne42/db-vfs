@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::ops::DerefMut;
 use std::path::Path;
 use std::time::Duration;
 
@@ -54,7 +54,7 @@ impl<C> SqliteStoreWithConn<C> {
 
 impl<C> Store for SqliteStoreWithConn<C>
 where
-    C: Deref<Target = rusqlite::Connection>,
+    C: DerefMut<Target = rusqlite::Connection>,
 {
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let mut stmt = self
@@ -212,48 +212,61 @@ where
         path: &str,
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome> {
-        let deleted = match expected_version {
+        match expected_version {
             Some(version) => {
                 let version = u64_to_i64(version, "version")?;
-                self.conn
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db_err)?;
+                let current_version = tx
+                    .query_row(
+                        "SELECT version
+                         FROM files
+                         WHERE workspace_id = ?1 AND path = ?2",
+                        rusqlite::params![workspace_id, path],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(db_err)?;
+
+                let Some(current_version) = current_version else {
+                    return Ok(DeleteOutcome::NotFound);
+                };
+                if current_version != version {
+                    return Err(Error::Conflict("version mismatch".to_string()));
+                }
+
+                let deleted = tx
                     .execute(
-                        "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
+                        "DELETE FROM files
+                         WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
                         rusqlite::params![workspace_id, path, version],
                     )
-                    .map_err(db_err)?
+                    .map_err(db_err)?;
+                if deleted != 1 {
+                    return Err(Error::Db(format!(
+                        "delete_file: expected to delete exactly one row, deleted={deleted}"
+                    )));
+                }
+                tx.commit().map_err(db_err)?;
+                Ok(DeleteOutcome::Deleted)
             }
-            None => self
-                .conn
-                .execute(
-                    "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2",
-                    rusqlite::params![workspace_id, path],
-                )
-                .map_err(db_err)?,
-        };
-
-        if deleted > 0 {
-            return Ok(DeleteOutcome::Deleted);
+            None => {
+                let deleted = self
+                    .conn
+                    .execute(
+                        "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2",
+                        rusqlite::params![workspace_id, path],
+                    )
+                    .map_err(db_err)?;
+                if deleted > 0 {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
+            }
         }
-
-        if expected_version.is_none() {
-            return Ok(DeleteOutcome::NotFound);
-        }
-
-        let exists = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM files WHERE workspace_id = ?1 AND path = ?2",
-                rusqlite::params![workspace_id, path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(db_err)?;
-
-        if exists.is_none() {
-            return Ok(DeleteOutcome::NotFound);
-        }
-
-        Err(Error::Conflict("version mismatch".to_string()))
     }
 
     fn list_metas_by_prefix(

@@ -188,45 +188,54 @@ where
         path: &str,
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome> {
-        let deleted = match expected_version {
+        match expected_version {
             Some(version) => {
                 let version_i64 = u64_to_i64(version, "version")?;
-                self.client
-                    .execute(
-                        "DELETE FROM files WHERE workspace_id = $1 AND path = $2 AND version = $3",
+                let row = self
+                    .client
+                    .query_one(
+                        "WITH existing AS (
+                             SELECT 1
+                             FROM files
+                             WHERE workspace_id = $1 AND path = $2
+                         ),
+                         deleted AS (
+                             DELETE FROM files
+                             WHERE workspace_id = $1 AND path = $2 AND version = $3
+                             RETURNING 1
+                         )
+                         SELECT
+                             EXISTS(SELECT 1 FROM deleted) AS deleted,
+                             EXISTS(SELECT 1 FROM existing) AS existed",
                         &[&workspace_id, &path, &version_i64],
                     )
-                    .map_err(db_err)?
+                    .map_err(db_err)?;
+                let deleted: bool = row.get("deleted");
+                let existed: bool = row.get("existed");
+
+                if deleted {
+                    return Ok(DeleteOutcome::Deleted);
+                }
+                if existed {
+                    return Err(Error::Conflict("version mismatch".to_string()));
+                }
+                Ok(DeleteOutcome::NotFound)
             }
-            None => self
-                .client
-                .execute(
-                    "DELETE FROM files WHERE workspace_id = $1 AND path = $2",
-                    &[&workspace_id, &path],
-                )
-                .map_err(db_err)?,
-        };
-
-        if deleted > 0 {
-            return Ok(DeleteOutcome::Deleted);
+            None => {
+                let deleted = self
+                    .client
+                    .execute(
+                        "DELETE FROM files WHERE workspace_id = $1 AND path = $2",
+                        &[&workspace_id, &path],
+                    )
+                    .map_err(db_err)?;
+                if deleted > 0 {
+                    Ok(DeleteOutcome::Deleted)
+                } else {
+                    Ok(DeleteOutcome::NotFound)
+                }
+            }
         }
-
-        if expected_version.is_none() {
-            return Ok(DeleteOutcome::NotFound);
-        }
-
-        let exists = self
-            .client
-            .query_opt(
-                "SELECT 1 FROM files WHERE workspace_id = $1 AND path = $2",
-                &[&workspace_id, &path],
-            )
-            .map_err(db_err)?;
-        if exists.is_none() {
-            return Ok(DeleteOutcome::NotFound);
-        }
-
-        Err(Error::Conflict("version mismatch".to_string()))
     }
 
     fn list_metas_by_prefix(
