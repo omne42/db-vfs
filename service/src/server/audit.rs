@@ -453,7 +453,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
         let (_first_lock, _first_file) = super::open_audit_file(&path).expect("first open");
+        let started = std::time::Instant::now();
         let err = super::open_audit_file(&path).expect_err("second open should fail");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "second open should fail without blocking on the audit lock"
+        );
+        #[cfg(not(windows))]
         assert!(err.to_string().contains("audit lock is already held"));
     }
 
