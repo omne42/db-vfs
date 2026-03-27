@@ -121,14 +121,26 @@ where
         content: &str,
         now_ms: u64,
     ) -> Result<u64> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(map_sqlite_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
-        let version: u64 = 1;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
-        let version_i64 = u64_to_i64(version, "version")?;
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
 
-        let res = self.conn.execute(
+        let (current_version, last_version) =
+            load_current_versions_sqlite(&tx, workspace_id, path).map_err(map_sqlite_err)?;
+        if current_version.is_some() {
+            return Err(Error::Conflict("file exists".to_string()));
+        }
+
+        let version = super::next_version(i64_to_u64(last_version.unwrap_or(0), "last_version")?)?;
+        let version_i64 = u64_to_i64(version, "version")?;
+        persist_generation_sqlite(&tx, workspace_id, path, version_i64).map_err(map_sqlite_err)?;
+
+        tx.execute(
             "INSERT INTO files(
                 workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
@@ -141,17 +153,11 @@ where
                 now_ms_i64,
                 now_ms_i64,
             ],
-        );
+        )
+        .map_err(map_sqlite_err)?;
 
-        match res {
-            Ok(_) => Ok(version),
-            Err(err) => {
-                if is_unique_constraint_violation(&err) {
-                    return Err(Error::Conflict("file exists".to_string()));
-                }
-                Err(db_err(err))
-            }
-        }
+        tx.commit().map_err(map_sqlite_err)?;
+        Ok(version)
     }
 
     fn update_file_cas(
@@ -162,7 +168,10 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<u64> {
-        let tx = self.conn.unchecked_transaction().map_err(map_sqlite_err)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(map_sqlite_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
@@ -189,6 +198,8 @@ where
             .map_err(map_sqlite_err)?;
 
         if updated == 1 {
+            persist_generation_sqlite(&tx, workspace_id, path, new_version_i64)
+                .map_err(map_sqlite_err)?;
             tx.commit().map_err(map_sqlite_err)?;
             return Ok(new_version);
         }
@@ -201,7 +212,6 @@ where
             )
             .optional()
             .map_err(map_sqlite_err)?;
-        tx.commit().map_err(map_sqlite_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -251,22 +261,45 @@ where
                         "delete_file: expected to delete exactly one row, deleted={deleted}"
                     )));
                 }
+                persist_generation_sqlite(&tx, workspace_id, path, version)
+                    .map_err(map_sqlite_err)?;
                 tx.commit().map_err(map_sqlite_err)?;
                 Ok(DeleteOutcome::Deleted)
             }
             None => {
-                let deleted = self
+                let tx = self
                     .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(map_sqlite_err)?;
+                let current_version = tx
+                    .query_row(
+                        "SELECT version
+                         FROM files
+                         WHERE workspace_id = ?1 AND path = ?2",
+                        rusqlite::params![workspace_id, path],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(map_sqlite_err)?;
+                let Some(current_version) = current_version else {
+                    return Ok(DeleteOutcome::NotFound);
+                };
+
+                let deleted = tx
                     .execute(
                         "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2",
                         rusqlite::params![workspace_id, path],
                     )
                     .map_err(map_sqlite_err)?;
-                if deleted > 0 {
-                    Ok(DeleteOutcome::Deleted)
-                } else {
-                    Ok(DeleteOutcome::NotFound)
+                if deleted != 1 {
+                    return Err(Error::Db(format!(
+                        "delete_file: expected to delete exactly one row, deleted={deleted}"
+                    )));
                 }
+                persist_generation_sqlite(&tx, workspace_id, path, current_version)
+                    .map_err(map_sqlite_err)?;
+                tx.commit().map_err(map_sqlite_err)?;
+                Ok(DeleteOutcome::Deleted)
             }
         }
     }
@@ -431,6 +464,37 @@ fn decode_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, u64, u6
     ))
 }
 
+fn load_current_versions_sqlite(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+) -> rusqlite::Result<(Option<i64>, Option<i64>)> {
+    tx.query_row(
+        "SELECT
+             (SELECT version FROM files WHERE workspace_id = ?1 AND path = ?2),
+             (SELECT last_version FROM file_generations WHERE workspace_id = ?1 AND path = ?2)",
+        rusqlite::params![workspace_id, path],
+        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+    )
+}
+
+fn persist_generation_sqlite(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+    version: i64,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO file_generations(workspace_id, path, last_version)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace_id, path) DO UPDATE SET
+             last_version = excluded.last_version
+         WHERE excluded.last_version > file_generations.last_version",
+        rusqlite::params![workspace_id, path, version],
+    )?;
+    Ok(())
+}
+
 fn map_sqlite_err(err: rusqlite::Error) -> Error {
     match err.sqlite_error_code() {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
@@ -461,6 +525,7 @@ fn i64_to_u64_sql(value: i64, field: &'static str, column_idx: usize) -> rusqlit
     })
 }
 
+#[cfg(test)]
 fn is_unique_constraint_violation(err: &rusqlite::Error) -> bool {
     use rusqlite::Error::SqliteFailure;
     match err {

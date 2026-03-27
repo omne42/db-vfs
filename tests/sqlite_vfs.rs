@@ -329,6 +329,81 @@ fn store_delete_with_expected_version_distinguishes_conflict_and_not_found() {
 }
 
 #[test]
+fn store_versions_remain_monotonic_across_delete_and_recreate() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+
+    let first = store
+        .insert_file_new("ws", "docs/a.txt", "v1\n", now)
+        .expect("insert initial version");
+    assert_eq!(first, 1);
+
+    let deleted = store
+        .delete_file("ws", "docs/a.txt", Some(first))
+        .expect("delete initial version");
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let recreated = store
+        .insert_file_new("ws", "docs/a.txt", "v2\n", now.saturating_add(1))
+        .expect("recreate file");
+    assert_eq!(recreated, 2);
+
+    let err = store
+        .update_file_cas("ws", "docs/a.txt", "stale\n", first, now.saturating_add(2))
+        .expect_err("stale CAS should not update recreated file");
+    assert_eq!(err.code(), "conflict");
+
+    let err = store
+        .delete_file("ws", "docs/a.txt", Some(first))
+        .expect_err("stale delete should not delete recreated file");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn vfs_write_rejects_stale_expected_version_after_delete_and_recreate() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let first = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "v1\n".to_string(),
+            expected_version: None,
+        })
+        .expect("write initial version");
+    assert_eq!(first.version, 1);
+
+    vfs.delete(DeleteRequest {
+        workspace_id: "ws".to_string(),
+        path: "docs/a.txt".to_string(),
+        expected_version: Some(first.version),
+        ignore_missing: false,
+    })
+    .expect("delete initial version");
+
+    let recreated = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "v2\n".to_string(),
+            expected_version: None,
+        })
+        .expect("recreate version");
+    assert_eq!(recreated.version, 2);
+
+    let err = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "stale\n".to_string(),
+            expected_version: Some(first.version),
+        })
+        .expect_err("stale expected_version should conflict");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
 fn patch_rejects_expected_version_overflow() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);

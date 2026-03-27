@@ -97,14 +97,32 @@ where
         content: &str,
         now_ms: u64,
     ) -> Result<u64> {
+        let mut tx = self.client.transaction().map_err(map_postgres_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
-        let version: u64 = 1;
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
-        let version_i64 = u64_to_i64(version, "version")?;
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
 
-        let res = self.client.execute(
+        let last_version = lock_generation_row_postgres(&mut tx, workspace_id, path)?;
+        let current_version = tx
+            .query_opt(
+                "SELECT version
+                 FROM files
+                 WHERE workspace_id = $1 AND path = $2
+                 FOR UPDATE",
+                &[&workspace_id, &path],
+            )
+            .map_err(map_postgres_err)?
+            .map(|row| row.get::<_, i64>(0));
+        if current_version.is_some() {
+            return Err(Error::Conflict("file exists".to_string()));
+        }
+
+        let version = super::next_version(i64_to_u64(last_version, "last_version")?)?;
+        let version_i64 = u64_to_i64(version, "version")?;
+        persist_generation_postgres(&mut tx, workspace_id, path, version_i64)?;
+
+        tx.execute(
             "INSERT INTO files(
                 workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)",
@@ -117,17 +135,11 @@ where
                 &now_ms_i64,
                 &now_ms_i64,
             ],
-        );
+        )
+        .map_err(map_postgres_err)?;
 
-        match res {
-            Ok(_) => Ok(version),
-            Err(err) => {
-                if is_unique_violation(&err) {
-                    return Err(Error::Conflict("file exists".to_string()));
-                }
-                Err(map_postgres_err(err))
-            }
-        }
+        tx.commit().map_err(map_postgres_err)?;
+        Ok(version)
     }
 
     fn update_file_cas(
@@ -139,6 +151,7 @@ where
         now_ms: u64,
     ) -> Result<u64> {
         let mut tx = self.client.transaction().map_err(map_postgres_err)?;
+        lock_generation_row_postgres(&mut tx, workspace_id, path)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
@@ -165,6 +178,7 @@ where
             .map_err(map_postgres_err)?;
 
         if updated == 1 {
+            persist_generation_postgres(&mut tx, workspace_id, path, new_version_i64)?;
             tx.commit().map_err(map_postgres_err)?;
             return Ok(new_version);
         }
@@ -175,7 +189,6 @@ where
                 &[&workspace_id, &path],
             )
             .map_err(map_postgres_err)?;
-        tx.commit().map_err(map_postgres_err)?;
         if exists.is_none() {
             return Err(Error::NotFound("file not found".to_string()));
         }
@@ -191,49 +204,70 @@ where
         match expected_version {
             Some(version) => {
                 let version_i64 = u64_to_i64(version, "version")?;
-                let row = self
-                    .client
-                    .query_one(
-                        "WITH existing AS (
-                             SELECT 1
-                             FROM files
-                             WHERE workspace_id = $1 AND path = $2
-                         ),
-                         deleted AS (
-                             DELETE FROM files
-                             WHERE workspace_id = $1 AND path = $2 AND version = $3
-                             RETURNING 1
-                         )
-                         SELECT
-                             EXISTS(SELECT 1 FROM deleted) AS deleted,
-                             EXISTS(SELECT 1 FROM existing) AS existed",
+                let mut tx = self.client.transaction().map_err(map_postgres_err)?;
+                lock_generation_row_postgres(&mut tx, workspace_id, path)?;
+                let current_version = tx
+                    .query_opt(
+                        "SELECT version
+                         FROM files
+                         WHERE workspace_id = $1 AND path = $2
+                         FOR UPDATE",
+                        &[&workspace_id, &path],
+                    )
+                    .map_err(map_postgres_err)?
+                    .map(|row| row.get::<_, i64>(0));
+                let Some(current_version) = current_version else {
+                    return Ok(DeleteOutcome::NotFound);
+                };
+                if current_version != version_i64 {
+                    return Err(Error::Conflict("version mismatch".to_string()));
+                }
+                let deleted = tx
+                    .execute(
+                        "DELETE FROM files
+                         WHERE workspace_id = $1 AND path = $2 AND version = $3",
                         &[&workspace_id, &path, &version_i64],
                     )
                     .map_err(map_postgres_err)?;
-                let deleted: bool = row.get("deleted");
-                let existed: bool = row.get("existed");
-
-                if deleted {
-                    return Ok(DeleteOutcome::Deleted);
+                if deleted != 1 {
+                    return Err(Error::Db(format!(
+                        "delete_file: expected to delete exactly one row, deleted={deleted}"
+                    )));
                 }
-                if existed {
-                    return Err(Error::Conflict("version mismatch".to_string()));
-                }
-                Ok(DeleteOutcome::NotFound)
+                persist_generation_postgres(&mut tx, workspace_id, path, version_i64)?;
+                tx.commit().map_err(map_postgres_err)?;
+                Ok(DeleteOutcome::Deleted)
             }
             None => {
-                let deleted = self
-                    .client
+                let mut tx = self.client.transaction().map_err(map_postgres_err)?;
+                lock_generation_row_postgres(&mut tx, workspace_id, path)?;
+                let current_version = tx
+                    .query_opt(
+                        "SELECT version
+                         FROM files
+                         WHERE workspace_id = $1 AND path = $2
+                         FOR UPDATE",
+                        &[&workspace_id, &path],
+                    )
+                    .map_err(map_postgres_err)?
+                    .map(|row| row.get::<_, i64>(0));
+                let Some(current_version) = current_version else {
+                    return Ok(DeleteOutcome::NotFound);
+                };
+                let deleted = tx
                     .execute(
                         "DELETE FROM files WHERE workspace_id = $1 AND path = $2",
                         &[&workspace_id, &path],
                     )
                     .map_err(map_postgres_err)?;
-                if deleted > 0 {
-                    Ok(DeleteOutcome::Deleted)
-                } else {
-                    Ok(DeleteOutcome::NotFound)
+                if deleted != 1 {
+                    return Err(Error::Db(format!(
+                        "delete_file: expected to delete exactly one row, deleted={deleted}"
+                    )));
                 }
+                persist_generation_postgres(&mut tx, workspace_id, path, current_version)?;
+                tx.commit().map_err(map_postgres_err)?;
+                Ok(DeleteOutcome::Deleted)
             }
         }
     }
@@ -335,6 +369,48 @@ fn decode_meta_row(row: &postgres::Row) -> Result<(String, u64, u64, u64)> {
     ))
 }
 
+fn lock_generation_row_postgres(
+    tx: &mut postgres::Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO file_generations(workspace_id, path, last_version)
+         VALUES ($1, $2, 0)
+         ON CONFLICT (workspace_id, path) DO NOTHING",
+        &[&workspace_id, &path],
+    )
+    .map_err(map_postgres_err)?;
+    let row = tx
+        .query_one(
+            "SELECT last_version
+             FROM file_generations
+             WHERE workspace_id = $1 AND path = $2
+             FOR UPDATE",
+            &[&workspace_id, &path],
+        )
+        .map_err(map_postgres_err)?;
+    Ok(row.get::<_, i64>(0))
+}
+
+fn persist_generation_postgres(
+    tx: &mut postgres::Transaction<'_>,
+    workspace_id: &str,
+    path: &str,
+    version: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO file_generations(workspace_id, path, last_version)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id, path) DO UPDATE SET
+             last_version = EXCLUDED.last_version
+         WHERE EXCLUDED.last_version > file_generations.last_version",
+        &[&workspace_id, &path, &version],
+    )
+    .map_err(map_postgres_err)?;
+    Ok(())
+}
+
 fn map_postgres_err(err: postgres::Error) -> Error {
     match err.code() {
         Some(&postgres::error::SqlState::QUERY_CANCELED)
@@ -352,11 +428,4 @@ fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
 
 fn i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::Db(format!("invalid negative {field} value: {value}")))
-}
-
-fn is_unique_violation(err: &postgres::Error) -> bool {
-    if let Some(db) = err.as_db_error() {
-        return db.code() == &postgres::error::SqlState::UNIQUE_VIOLATION;
-    }
-    false
 }
