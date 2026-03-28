@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use db_vfs_core::policy::VfsPolicy;
@@ -125,7 +125,7 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
     if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
     }
-    if token.len() > MAX_BEARER_TOKEN_BYTES {
+    if !is_valid_bearer_token(token) {
         return None;
     }
     Some(token)
@@ -148,14 +148,38 @@ fn hash_token_sha256(token: &str) -> [u8; 32] {
     digest.into()
 }
 
-fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<[u8; 32]> {
-    if token.len() > MAX_BEARER_TOKEN_BYTES {
+fn is_valid_bearer_token(token: &str) -> bool {
+    if token.is_empty() || token.len() > MAX_BEARER_TOKEN_BYTES {
+        return false;
+    }
+
+    let mut seen_body = false;
+    let mut seen_padding = false;
+    for byte in token.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'+' | b'/'
+                if !seen_padding =>
+            {
+                seen_body = true
+            }
+            b'=' if seen_body => seen_padding = true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn validate_plaintext_bearer_token(token: &str, source: &str) -> anyhow::Result<()> {
+    if !is_valid_bearer_token(token) {
         anyhow::bail!(
-            "{source} is too large ({} bytes; max {} bytes)",
-            token.len(),
-            MAX_BEARER_TOKEN_BYTES
+            "{source} must be a valid HTTP Bearer token (token68 syntax, no whitespace or disallowed punctuation)"
         );
     }
+    Ok(())
+}
+
+fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<[u8; 32]> {
+    validate_plaintext_bearer_token(token, source)?;
     Ok(hash_token_sha256(token))
 }
 
@@ -190,22 +214,27 @@ fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
     matched
 }
 
-fn log_unauthorized(state: &super::AppState, req: &Request, peer_ip: Option<std::net::IpAddr>) {
-    if let Some(audit) = state.inner.audit.as_ref()
-        && let Some(op) = super::audit::op_from_path(req.uri().path())
-        && let Some(request_id) = req
-            .extensions()
-            .get::<super::layers::RequestId>()
-            .map(|v| v.0.clone())
-    {
-        audit.log(super::audit::minimal_event(
-            request_id,
-            peer_ip,
-            op,
-            StatusCode::UNAUTHORIZED.as_u16(),
-            Some("unauthorized"),
-        ));
+async fn log_unauthorized(
+    audit: Option<&super::audit::AuditLogger>,
+    request_id: Option<String>,
+    peer_ip: Option<std::net::IpAddr>,
+    op: Option<&'static str>,
+) -> Result<(), Response> {
+    if let (Some(audit), Some(request_id), Some(op)) = (audit, request_id, op) {
+        super::log_audit_event(
+            audit,
+            super::audit::minimal_event(
+                request_id,
+                peer_ip,
+                op,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                Some("unauthorized"),
+            ),
+        )
+        .await
+        .map_err(IntoResponse::into_response)?;
     }
+    Ok(())
 }
 
 pub(super) async fn auth_middleware(
@@ -217,6 +246,12 @@ pub(super) async fn auth_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
+    let audit = state.inner.audit.as_ref();
+    let request_id = req
+        .extensions()
+        .get::<super::layers::RequestId>()
+        .map(|v| v.0.clone());
+    let op = super::audit::op_from_path(req.uri().path());
 
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
@@ -224,7 +259,9 @@ pub(super) async fn auth_middleware(
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
-                log_unauthorized(&state, &req, peer_ip);
+                if let Err(resp) = log_unauthorized(audit, request_id.clone(), peer_ip, op).await {
+                    return resp;
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -233,7 +270,9 @@ pub(super) async fn auth_middleware(
             };
 
             let Some(rule) = match_token(rules, token) else {
-                log_unauthorized(&state, &req, peer_ip);
+                if let Err(resp) = log_unauthorized(audit, request_id, peer_ip, op).await {
+                    return resp;
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -279,9 +318,18 @@ mod tests {
         headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer"));
         assert_eq!(parse_bearer_token(&headers), None);
 
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer ="));
+        assert_eq!(parse_bearer_token(&headers), None);
+
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer a b"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer bad:token"),
         );
         assert_eq!(parse_bearer_token(&headers), None);
 
@@ -343,7 +391,18 @@ mod tests {
             "auth token env var \"DB_VFS_TOKEN\"",
         )
         .expect_err("oversized plaintext token must be rejected");
-        assert!(err.to_string().contains("max 4096 bytes"));
+        assert!(err.to_string().contains("valid HTTP Bearer token"));
+    }
+
+    #[test]
+    fn hash_plaintext_token_rejects_invalid_bearer_syntax() {
+        let err = hash_plaintext_token_sha256("dev token", "auth token env var \"DB_VFS_TOKEN\"")
+            .expect_err("whitespace-bearing plaintext token must be rejected");
+        assert!(err.to_string().contains("valid HTTP Bearer token"));
+
+        let err = hash_plaintext_token_sha256("bad:token", "auth token env var \"DB_VFS_TOKEN\"")
+            .expect_err("colon-bearing plaintext token must be rejected");
+        assert!(err.to_string().contains("valid HTTP Bearer token"));
     }
 
     #[test]
@@ -380,9 +439,31 @@ mod tests {
     }
 
     #[test]
-    fn build_auth_mode_preserves_env_backed_token_whitespace() {
+    fn build_auth_mode_rejects_env_backed_token_whitespace() {
         let var = format!("DB_VFS_TEST_TOKEN_{}", std::process::id());
         let token = " dev-token-with-spaces \n";
+
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: None,
+            token_env_var: Some(var.clone()),
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::set_var(&var, token) };
+        let err = build_auth_mode(&policy, false)
+            .err()
+            .expect("whitespace-bearing env token should be rejected");
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::remove_var(&var) };
+        assert!(err.to_string().contains("valid HTTP Bearer token"));
+    }
+
+    #[test]
+    fn build_auth_mode_hashes_env_backed_plaintext_token() {
+        let var = format!("DB_VFS_TEST_TOKEN_OK_{}", std::process::id());
+        let token = "dev-token";
         let digest = format!("sha256:{}", hex::encode(hash_token_sha256(token)));
 
         let mut policy = VfsPolicy::default();
