@@ -121,6 +121,34 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
+    /// Builds a VFS from a validated policy plus caller-supplied matchers.
+    ///
+    /// This is the strict constructor: mismatched matchers are rejected
+    /// instead of being silently rebuilt from policy state.
+    pub fn try_new_with_matchers_validated(
+        store: S,
+        policy: Arc<ValidatedVfsPolicy>,
+        redactor: impl Into<Arc<SecretRedactor>>,
+        traversal: impl Into<Arc<TraversalSkipper>>,
+    ) -> Result<Self> {
+        let redactor = redactor.into();
+        let traversal = traversal.into();
+        Self::ensure_redactor_matches_policy(policy.as_ref(), redactor.as_ref())?;
+        Self::ensure_traversal_matches_policy(policy.as_ref(), traversal.as_ref())?;
+        Ok(Self {
+            policy,
+            redactor,
+            traversal,
+            store,
+        })
+    }
+
+    /// Compatibility constructor for pre-built matchers.
+    ///
+    /// If the supplied matchers do not match the policy, this rebuilds the
+    /// policy-derived matchers and ignores the incompatible inputs. Prefer
+    /// [`DbVfs::try_new_with_matchers_validated`] when mismatch should fail
+    /// hard instead of silently falling back.
     pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
@@ -199,5 +227,104 @@ impl<S> DbVfs<S> {
         } else {
             Err(Error::NotPermitted(format!("{op} is disabled by policy")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::store::{DeleteOutcome, FileMeta, Store};
+
+    #[derive(Debug)]
+    struct DummyStore;
+
+    impl Store for DummyStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    fn validated_policy() -> Arc<ValidatedVfsPolicy> {
+        Arc::new(ValidatedVfsPolicy::new(VfsPolicy::default()).expect("validated policy"))
+    }
+
+    #[test]
+    fn strict_validated_constructor_rejects_mismatched_matchers() {
+        let policy = validated_policy();
+        let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
+            replacement: "DIFFERENT".to_string(),
+            ..policy.secrets.clone()
+        })
+        .expect("mismatched redactor");
+        let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
+
+        let err = DbVfs::try_new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
+            .expect_err("mismatch should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn compatibility_validated_constructor_rebuilds_mismatched_matchers() {
+        let policy = validated_policy();
+        let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
+            replacement: "DIFFERENT".to_string(),
+            ..policy.secrets.clone()
+        })
+        .expect("mismatched redactor");
+        let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
+
+        let vfs =
+            DbVfs::new_with_matchers_validated(DummyStore, policy.clone(), mismatched, traversal);
+        assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
+        assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
     }
 }

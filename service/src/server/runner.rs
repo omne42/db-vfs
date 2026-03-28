@@ -179,7 +179,8 @@ where
             if let Some(cancel) = cancel_for_worker.as_ref() {
                 cancel.set_handle(cancel_handle);
             }
-            let mut vfs = DbVfs::new_with_matchers_validated(store, policy, redactor, traversal);
+            let mut vfs =
+                DbVfs::try_new_with_matchers_validated(store, policy, redactor, traversal)?;
             op(&mut vfs)
         },
     )

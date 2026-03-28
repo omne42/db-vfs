@@ -106,6 +106,13 @@ pub trait Store {
         limit: usize,
     ) -> Result<Vec<FileMeta>>;
 
+    /// Cursor-based variant of [`Store::list_metas_by_prefix`].
+    ///
+    /// Production stores should override this instead of relying on the
+    /// compatibility fallback below. The default implementation preserves
+    /// correctness for legacy stores, but it may re-scan the prefix from the
+    /// beginning multiple times and therefore does not preserve large-prefix
+    /// performance or scan-budget predictability.
     fn list_metas_by_prefix_page(
         &mut self,
         workspace_id: &str,
