@@ -10,10 +10,12 @@
 - `db-vfs-core::policy::VfsPolicy` 及其校验
 - 路径合法性、traversal、secrets redaction、scan budgets
   - `max_io_ms` 只约束非 scan 请求与对应的 DB 等待预算。
-  - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；scan 侧 SQLite/Postgres 等待也跟随这个预算。
-  - `max_walk_ms = None` 表示 scan 预算不设上限；不会隐式回退成 `max_io_ms`。
+  - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算。
+  - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` 跟随 scan runtime 预算。
+  - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
+  - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
 - 面向运维和集成者的 API / policy / security 文档

@@ -17,8 +17,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | namespace |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice |
-| `end_line` | u64|null | no | must pair with `start_line`; large backing files are allowed if the selected slice fits |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice after redaction |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -67,6 +67,9 @@ Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).
 
+`matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
+multi-line secret redaction preserves original line boundaries before per-line results are emitted.
+
 ## Path normalization rules
 
 - must be root-relative;
@@ -91,6 +94,6 @@ Common codes:
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; includes request-budgeted pool/lock wait), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; includes request-budgeted queue, pool, or lock wait), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.
