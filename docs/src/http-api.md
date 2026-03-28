@@ -64,6 +64,10 @@ kept internal/audit-only and are not serialized in the public response.
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
 
+When `regex = true`, the pattern is evaluated against each logical line independently. Patterns
+that can consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex
+matching is not part of this endpoint contract.
+
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
 use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
 use db_vfs_core::{Error, Result};
+use regex_syntax::hir::{Class, Hir, HirKind};
 
 use super::util::{
     compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
@@ -188,6 +189,55 @@ fn validate_grep_query(query: &str, regex: bool) -> Result<()> {
     Ok(())
 }
 
+fn class_can_match_line_terminator(class: &Class) -> bool {
+    match class {
+        Class::Unicode(class) => {
+            class
+                .ranges()
+                .iter()
+                .any(|range| range.start() <= '\n' && '\n' <= range.end())
+                || class
+                    .ranges()
+                    .iter()
+                    .any(|range| range.start() <= '\r' && '\r' <= range.end())
+        }
+        Class::Bytes(class) => {
+            class
+                .ranges()
+                .iter()
+                .any(|range| range.start() <= b'\n' && b'\n' <= range.end())
+                || class
+                    .ranges()
+                    .iter()
+                    .any(|range| range.start() <= b'\r' && b'\r' <= range.end())
+        }
+    }
+}
+
+fn hir_can_match_line_terminator(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => false,
+        HirKind::Literal(literal) => literal.0.iter().any(|byte| matches!(byte, b'\n' | b'\r')),
+        HirKind::Class(class) => class_can_match_line_terminator(class),
+        HirKind::Repetition(repetition) => hir_can_match_line_terminator(&repetition.sub),
+        HirKind::Capture(capture) => hir_can_match_line_terminator(&capture.sub),
+        HirKind::Concat(subs) | HirKind::Alternation(subs) => {
+            subs.iter().any(hir_can_match_line_terminator)
+        }
+    }
+}
+
+fn ensure_line_oriented_regex(query: &str) -> Result<()> {
+    let hir = regex_syntax::parse(query)
+        .map_err(|err| Error::InvalidRegex(format!("invalid grep regex {query:?}: {err}")))?;
+    if hir_can_match_line_terminator(&hir) {
+        return Err(Error::InvalidRegex(
+            "grep regex is evaluated per line and must not match line terminators".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn grep<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: GrepRequest,
@@ -239,6 +289,7 @@ pub(super) fn grep<S: crate::store::Store>(
     }
 
     let regex = if request.regex {
+        ensure_line_oriented_regex(&request.query)?;
         Some(
             regex::RegexBuilder::new(&request.query)
                 .size_limit(MAX_GREP_REGEX_COMPILED_SIZE_BYTES)
@@ -572,6 +623,36 @@ mod tests {
     }
 
     #[test]
+    fn grep_rejects_regexes_that_can_match_line_terminators() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+
+        let mut vfs = DbVfs::new(DummyStore, policy).expect("vfs");
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "foo\\nbar".to_string(),
+                regex: true,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("newline literal regex should fail");
+        assert_eq!(err.code(), "invalid_regex");
+        assert!(err.to_string().contains("per line"));
+
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "(?s)foo.*bar".to_string(),
+                regex: true,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("dotall regex should fail");
+        assert_eq!(err.code(), "invalid_regex");
+    }
+
+    #[test]
     fn grep_response_hides_secret_denied_count_from_serialized_output() {
         let value = serde_json::to_value(GrepResponse {
             matches: vec![GrepMatch {
@@ -736,6 +817,39 @@ mod tests {
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].line, 1);
         assert_eq!(resp.matches[0].text, "REDACTED");
+    }
+
+    #[test]
+    fn grep_regex_matches_are_evaluated_per_line() {
+        let content = "foo\nbar\nbaz\n";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "^bar$".to_string(),
+                regex: true,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 2);
+        assert_eq!(resp.matches[0].text, "bar");
     }
 
     #[test]
