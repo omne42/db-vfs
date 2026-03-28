@@ -16,6 +16,7 @@ use db_vfs::vfs::{
 };
 
 use super::audit::AuditEvent;
+const CODE_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -177,6 +178,32 @@ fn audit_event_base(
         skipped_glob_mismatch: None,
         skipped_missing_content: None,
     }
+}
+
+fn audit_failure_response(err: super::audit::AuditFailure) -> (StatusCode, Json<super::ErrorBody>) {
+    tracing::error!(err = %err, "required audit logging failed");
+    super::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        CODE_AUDIT_UNAVAILABLE,
+        format!(
+            "required audit logging failed; operation status is unknown and may still have completed: {err}"
+        ),
+    )
+}
+
+async fn log_audit_event(
+    audit: &super::audit::AuditLogger,
+    event: AuditEvent,
+) -> Result<(), (StatusCode, Json<super::ErrorBody>)> {
+    let audit = audit.clone();
+    tokio::task::spawn_blocking(move || audit.try_log(event))
+        .await
+        .map_err(|err| {
+            audit_failure_response(super::audit::AuditFailure::new(format!(
+                "audit wait task failed: {err}"
+            )))
+        })?
+        .map_err(audit_failure_response)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -540,7 +567,7 @@ where
                 };
                 let event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                audit.log(event);
+                log_audit_event(audit, event).await?;
             }
             return Err((status, Json(body)));
         }
@@ -552,7 +579,7 @@ where
             let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
             audit_err(&state, &mut event, &body);
-            audit.log(event);
+            log_audit_event(audit, event).await?;
         }
         return Err((status, Json(body)));
     }
@@ -566,7 +593,7 @@ where
             let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
             audit_err(&state, &mut event, &body);
-            audit.log(event);
+            log_audit_event(audit, event).await?;
         }
         return Err((status, Json(body)));
     }
@@ -578,7 +605,7 @@ where
                 let mut event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
-                audit.log(event);
+                log_audit_event(audit, event).await?;
             }
             return Err((status, Json(body)));
         }
@@ -593,7 +620,7 @@ where
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event = audit_req.into_event(request_id, peer, op, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
-                audit.log(event);
+                log_audit_event(audit, event).await?;
             }
             Ok(Json(resp))
         }
@@ -602,7 +629,7 @@ where
                 let mut event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
-                audit.log(event);
+                log_audit_event(audit, event).await?;
             }
             Err((status, Json(body)))
         }
@@ -773,8 +800,8 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_permit_with_budget, audit_preview, redact_glob_pattern, redact_path,
-        redact_path_pair,
+        acquire_permit_with_budget, audit_failure_response, audit_preview, redact_glob_pattern,
+        redact_path, redact_path_pair,
     };
     use axum::http::StatusCode;
     use db_vfs_core::policy::SecretRules;
@@ -858,5 +885,15 @@ mod tests {
         let tiny = audit_preview("abcdef", 2);
         assert_eq!(tiny, "ab");
         assert!(tiny.len() <= 2);
+    }
+
+    #[test]
+    fn audit_failure_response_is_service_unavailable() {
+        let (status, body) = audit_failure_response(super::super::audit::AuditFailure::new(
+            "the audit worker stopped",
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0.code, "audit_unavailable");
+        assert!(body.0.message.contains("operation status is unknown"));
     }
 }

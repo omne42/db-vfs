@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::net::IpAddr;
@@ -23,6 +24,31 @@ pub(super) struct AuditLogger {
     disconnected_warned: Arc<AtomicBool>,
     required: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AuditFailure {
+    detail: String,
+}
+
+impl AuditFailure {
+    pub(super) fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+
+    fn worker_stopped() -> Self {
+        Self::new("the audit worker stopped")
+    }
+}
+
+impl fmt::Display for AuditFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for AuditFailure {}
 
 struct QueuedAuditEvent {
     event: AuditEvent,
@@ -180,7 +206,7 @@ impl AuditLogger {
         })
     }
 
-    pub(super) fn log(&self, event: AuditEvent) {
+    pub(super) fn try_log(&self, event: AuditEvent) -> Result<(), AuditFailure> {
         if self.required {
             let (ack_tx, ack_rx) = mpsc::sync_channel(1);
             if self
@@ -191,14 +217,14 @@ impl AuditLogger {
                 })
                 .is_err()
             {
-                panic!("audit.required=true but the audit worker stopped");
+                return Err(AuditFailure::worker_stopped());
             }
             match ack_rx.recv() {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => panic!("audit.required=true but {err}"),
-                Err(_) => panic!("audit.required=true but the audit worker stopped"),
+                Ok(Err(err)) => return Err(AuditFailure::new(err)),
+                Err(_) => return Err(AuditFailure::worker_stopped()),
             }
-            return;
+            return Ok(());
         }
 
         match self.sender.try_send(QueuedAuditEvent { event, ack: None }) {
@@ -222,6 +248,16 @@ impl AuditLogger {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn log(&self, event: AuditEvent) {
+        if let Err(err) = self.try_log(event) {
+            tracing::error!(
+                err = %err,
+                "required audit logging failed in a synchronous caller"
+            );
         }
     }
 }
@@ -480,9 +516,9 @@ fn format_unrecoverable_write_failure(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Duration;
-    use std::{panic, sync::Arc};
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -604,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn required_audit_logger_panics_when_worker_is_gone() {
+    fn required_audit_logger_returns_error_when_worker_is_gone() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         drop(receiver);
         let logger = super::AuditLogger {
@@ -613,16 +649,16 @@ mod tests {
             required: true,
         };
 
-        let result = panic::catch_unwind(|| {
-            logger.log(super::minimal_event(
+        let err = logger
+            .try_log(super::minimal_event(
                 "req-1".to_string(),
                 None,
                 "read",
                 200,
                 None,
             ))
-        });
-        assert!(result.is_err());
+            .expect_err("required audit should surface worker failure");
+        assert_eq!(err.to_string(), "the audit worker stopped");
     }
 
     #[test]
