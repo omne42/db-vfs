@@ -22,10 +22,15 @@
     与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
+  - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
+    不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
-    append+flush 成功才返回；worker 丢失或写失败会转成可见故障，而不是静默丢日志。
+    append+flush 成功才返回；worker 丢失或写失败会转成稳定 `503 audit_unavailable`
+    故障，而不是静默丢日志或 panic/连接级失败。
+  - crate 兼容构造器 `DbVfs::new_with_matchers_validated` 不允许因为 policy-derived
+    matcher 无法重建而 panic；这类状态必须转成可控的 `invalid_policy` 错误。
 - 面向运维和集成者的 API / policy / security 文档
 
 ## 当前仍在本仓本地实现的通用能力
@@ -34,7 +39,7 @@
   - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML 识别与解析。
   - 当前这里没有接入 YAML。
 - `service/src/server/auth.rs`
-  - 自己做 bearer token 的 `sha256:<hex>` 解析、摘要匹配和 workspace allowlist 约束。
+  - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验、摘要匹配和 workspace allowlist 约束。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 
