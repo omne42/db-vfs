@@ -15,14 +15,15 @@ static TIMEOUT_COMPLETED_LONG_COUNT: AtomicU64 = AtomicU64::new(0);
 const TIMEOUT_COMPLETED_LONG_MS: u64 = 30_000;
 
 pub(super) fn io_timeout(policy: &VfsPolicy) -> Duration {
-    Duration::from_millis(policy.limits.max_io_ms.saturating_add(250))
+    Duration::from_millis(policy.limits.max_io_ms)
 }
 
 pub(super) fn scan_timeout(policy: &VfsPolicy) -> Option<Duration> {
-    policy
-        .limits
-        .max_walk_ms
-        .map(|ms| Duration::from_millis(ms.saturating_add(250)))
+    policy.limits.max_walk_ms.map(Duration::from_millis)
+}
+
+pub(super) fn db_pool_timeout(policy: &VfsPolicy) -> Duration {
+    io_timeout(policy)
 }
 
 struct CancelState {
@@ -162,6 +163,7 @@ where
     let policy = state.inner.policy.clone();
     let redactor = state.inner.redactor.clone();
     let traversal = state.inner.traversal.clone();
+    let pool_timeout = Some(db_pool_timeout(policy.as_ref()));
 
     let cancel = timeout.map(|_| Arc::new(CancelState::new()));
     let cancel_for_timeout = cancel.clone();
@@ -172,7 +174,8 @@ where
         permit,
         cancel_for_timeout,
         move || -> db_vfs::Result<T> {
-            let (store, cancel_handle) = super::backend::BackendStore::open(backend, timeout)?;
+            let (store, cancel_handle) =
+                super::backend::BackendStore::open(backend, pool_timeout, timeout)?;
             if let Some(cancel) = cancel_for_worker.as_ref() {
                 cancel.set_handle(cancel_handle);
             }
@@ -201,7 +204,15 @@ mod tests {
         let mut policy = VfsPolicy::default();
         policy.limits.max_io_ms = 700;
         policy.limits.max_walk_ms = Some(1200);
-        assert_eq!(scan_timeout(&policy), Some(Duration::from_millis(1450)));
+        assert_eq!(scan_timeout(&policy), Some(Duration::from_millis(1200)));
+    }
+
+    #[test]
+    fn db_pool_timeout_stays_bounded_by_io_limit() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = 700;
+        policy.limits.max_walk_ms = None;
+        assert_eq!(db_pool_timeout(&policy), Duration::from_millis(700));
     }
 
     #[tokio::test]

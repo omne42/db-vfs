@@ -205,6 +205,7 @@ impl BackendStore {
     pub(super) fn open(
         backend: Backend,
         pool_timeout: Option<std::time::Duration>,
+        operation_timeout: Option<std::time::Duration>,
     ) -> db_vfs::Result<(Self, CancelHandle)> {
         match backend {
             Backend::Sqlite { pool } => {
@@ -216,7 +217,7 @@ impl BackendStore {
                         .get()
                         .map_err(|err| map_pool_get_error("sqlite", err))?,
                 };
-                conn.busy_timeout(sqlite_busy_timeout(pool_timeout))
+                conn.busy_timeout(sqlite_busy_timeout(operation_timeout))
                     .map_err(|err| {
                         db_vfs::Error::Db(format!(
                             "backend=sqlite stage=set_busy_timeout error={err}"
@@ -235,7 +236,7 @@ impl BackendStore {
                         .get()
                         .map_err(|err| map_pool_get_error("postgres", err))?,
                 };
-                configure_postgres_statement_timeout(&mut client, pool_timeout)?;
+                configure_postgres_statement_timeout(&mut client, operation_timeout)?;
                 let cancel = CancelHandle::Postgres(client.cancel_token());
                 Ok((
                     Self::Postgres(Box::new(PostgresStore::from_client(client))),
@@ -415,7 +416,7 @@ mod tests {
             .build(manager)
             .expect("sqlite pool");
         let (store, cancel) =
-            BackendStore::open(Backend::Sqlite { pool }, None).expect("open backend");
+            BackendStore::open(Backend::Sqlite { pool }, None, None).expect("open backend");
 
         assert!(matches!(store, BackendStore::Sqlite(_)));
         assert!(matches!(cancel, CancelHandle::Sqlite(_)));
@@ -434,6 +435,7 @@ mod tests {
         let err = match BackendStore::open(
             Backend::Sqlite { pool: pool.clone() },
             Some(std::time::Duration::from_millis(10)),
+            None,
         ) {
             Ok(_) => panic!("open should time out"),
             Err(err) => err,
