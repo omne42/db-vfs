@@ -22,6 +22,8 @@
     与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
+  - `max_concurrency_io` / `max_concurrency_scan` 的 permit 必须在 JSON body buffering / decode
+    之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`

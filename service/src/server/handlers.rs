@@ -5,10 +5,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::async_trait;
+use axum::extract::Request;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Extension, FromRequestParts, State};
+use axum::extract::{ConnectInfo, Extension, FromRequest, FromRequestParts, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use serde::de::DeserializeOwned;
 
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
@@ -365,6 +367,34 @@ async fn acquire_permit_with_budget(
     Ok((permit, budget))
 }
 
+async fn parse_json_payload<Req, S>(request: Request, state: &S) -> Result<Req, JsonRejection>
+where
+    Req: DeserializeOwned,
+    S: Send + Sync,
+{
+    Ok(Json::<Req>::from_request(request, state).await?.0)
+}
+
+async fn acquire_permit_then_parse_json<Req, S>(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    budget: Option<Duration>,
+    request: Request,
+    state: &S,
+) -> Result<
+    (tokio::sync::OwnedSemaphorePermit, Option<Duration>, Req),
+    (StatusCode, Json<super::ErrorBody>),
+>
+where
+    Req: DeserializeOwned,
+    S: Send + Sync,
+{
+    let (permit, remaining) = acquire_permit_with_budget(semaphore, budget).await?;
+    let req = parse_json_payload::<Req, S>(request, state)
+        .await
+        .map_err(map_json_rejection)?;
+    Ok((permit, remaining, req))
+}
+
 trait HasWorkspaceId {
     fn workspace_id(&self) -> &str;
 }
@@ -606,14 +636,14 @@ fn scan_limits(state: &super::AppState) -> VfsLimits {
 
 async fn handle_vfs_request<Req, Resp, BuildAuditReq, Run>(
     ctx: RequestContext,
-    payload: Result<Json<Req>, JsonRejection>,
+    request: Request,
     limits: VfsLimits,
     build_audit_req: BuildAuditReq,
     run: Run,
     hooks: AuditHooks<Resp>,
 ) -> Result<Json<Resp>, (StatusCode, Json<super::ErrorBody>)>
 where
-    Req: HasWorkspaceId + Send + 'static,
+    Req: DeserializeOwned + HasWorkspaceId + Send + 'static,
     Resp: Send + 'static,
     BuildAuditReq: FnOnce(&Req) -> AuditRequest,
     Run: FnOnce(&mut DbVfs<super::backend::BackendStore>, Req) -> db_vfs::Result<Resp>
@@ -633,29 +663,32 @@ where
         err: audit_err,
     } = hooks;
 
-    let (req, audit_req) = match payload {
-        Ok(Json(req)) => {
-            let audit_req = build_audit_req(&req);
-            (req, audit_req)
-        }
-        Err(err) => {
-            let (status, Json(body)) = map_json_rejection(err);
-            if let Some(audit) = state.inner.audit.as_ref() {
-                let audit_req = AuditRequest {
-                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                    requested_path: None,
-                    path_prefix: None,
-                    glob_pattern: None,
-                    grep_regex: None,
-                    grep_query_len: None,
-                };
-                let event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                super::log_audit_event(audit, event).await?;
+    let (permit, remaining, req) =
+        match acquire_permit_then_parse_json::<Req, _>(semaphore, budget, request, &state).await {
+            Ok(value) => value,
+            Err((status, Json(body))) => {
+                if let Some(audit) = state.inner.audit.as_ref() {
+                    let audit_req = AuditRequest {
+                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                        requested_path: None,
+                        path_prefix: None,
+                        glob_pattern: None,
+                        grep_regex: None,
+                        grep_query_len: None,
+                    };
+                    let event = audit_req.into_event(
+                        request_id,
+                        peer,
+                        op,
+                        status,
+                        Some(body.code.to_string()),
+                    );
+                    super::log_audit_event(audit, event).await?;
+                }
+                return Err((status, Json(body)));
             }
-            return Err((status, Json(body)));
-        }
-    };
+        };
+    let audit_req = build_audit_req(&req);
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
@@ -681,19 +714,6 @@ where
         }
         return Err((status, Json(body)));
     }
-
-    let (permit, remaining) = match acquire_permit_with_budget(semaphore, budget).await {
-        Ok(v) => v,
-        Err((status, Json(body))) => {
-            if let Some(audit) = state.inner.audit.as_ref() {
-                let mut event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                audit_err(&state, &mut event, &body);
-                super::log_audit_event(audit, event).await?;
-            }
-            return Err((status, Json(body)));
-        }
-    };
 
     let state_for_run = state.clone();
     let result =
@@ -725,13 +745,13 @@ pub(super) async fn read(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<ReadRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<ReadResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = io_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "read");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
         DbVfs::read,
@@ -748,13 +768,13 @@ pub(super) async fn write(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<WriteRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<WriteResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = io_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "write");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
         DbVfs::write,
@@ -771,13 +791,13 @@ pub(super) async fn patch(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<PatchRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<PatchResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = io_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "patch");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
         DbVfs::apply_unified_patch,
@@ -794,13 +814,13 @@ pub(super) async fn delete(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<DeleteRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = io_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "delete");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| build_path_audit_req(req.workspace_id(), &req.path),
         DbVfs::delete,
@@ -817,13 +837,13 @@ pub(super) async fn glob(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<GlobRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<GlobResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = scan_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "glob");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| AuditRequest {
             workspace_id: audit_preview(req.workspace_id(), 256),
@@ -850,13 +870,13 @@ pub(super) async fn grep(
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
-    payload: Result<Json<GrepRequest>, JsonRejection>,
+    request: Request,
 ) -> Result<Json<GrepResponse>, (StatusCode, Json<super::ErrorBody>)> {
     let limits = scan_limits(&state);
     let ctx = request_ctx(peer, state, request_id, auth, "grep");
     handle_vfs_request(
         ctx,
-        payload,
+        request,
         limits,
         |req| AuditRequest {
             workspace_id: audit_preview(req.workspace_id(), 256),
@@ -884,10 +904,13 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_permit_with_budget, audit_preview, glob_redaction_probes, redact_glob_pattern,
-        redact_path, redact_path_pair,
+        acquire_permit_then_parse_json, acquire_permit_with_budget, audit_preview,
+        glob_redaction_probes, redact_glob_pattern, redact_path, redact_path_pair,
     };
+    use axum::body::Body;
+    use axum::http::Request;
     use axum::http::StatusCode;
+    use db_vfs::vfs::WriteRequest;
     use db_vfs_core::policy::SecretRules;
     use db_vfs_core::redaction::SecretRedactor;
     use std::sync::Arc;
@@ -975,6 +998,53 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0.code, "busy");
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_then_parse_json_returns_busy_before_invalid_json() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let held_permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .expect("request");
+
+        let (status, body) =
+            acquire_permit_then_parse_json::<WriteRequest, _>(semaphore, None, request, &())
+                .await
+                .expect_err("saturated semaphore should short-circuit before JSON parsing");
+        drop(held_permit);
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0.code, "busy");
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_then_parse_json_surfaces_json_errors_after_permit() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .expect("request");
+
+        let (status, body) = acquire_permit_then_parse_json::<WriteRequest, _>(
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            None,
+            request,
+            &(),
+        )
+        .await
+        .expect_err("invalid JSON should still be reported once a permit is held");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0.code, "invalid_json_syntax");
     }
 
     #[test]
