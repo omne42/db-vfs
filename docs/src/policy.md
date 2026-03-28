@@ -25,6 +25,9 @@ Supported patterns:
 - exact match, e.g. `ws-prod`.
 - trailing wildcard prefix, e.g. `team-a-*`.
 
+`workspace_id` values themselves are always literal identifiers. They cannot contain `*`, so the
+wildcard syntax stays reserved for auth policy matching and never collides with a real namespace.
+
 Not supported:
 
 - multiple `*` (`foo*bar*`)
@@ -74,4 +77,4 @@ Secrets semantics:
 
 When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
 waits for its audit record to append+flush successfully, backpressure blocks callers, and losing
-the audit worker turns into process failure instead of silent event loss.
+the audit worker turns into a visible availability failure instead of silent event loss.

@@ -176,6 +176,31 @@ async fn embedded_router_write_works_without_connect_info() {
     assert_eq!(write.version, 1);
 }
 
+#[tokio::test]
+async fn workspace_id_with_wildcard_is_rejected() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
+        .expect("build app");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/write")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"workspace_id":"team-*","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+        ))
+        .expect("request");
+
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let err = serde_json::from_slice::<ErrorBody>(&body).expect("error json");
+    assert_eq!(err.code, "invalid_path");
+}
+
 #[cfg(feature = "postgres")]
 fn postgres_test_url() -> String {
     let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(

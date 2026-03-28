@@ -7,6 +7,7 @@ Use this checklist for production:
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
+- [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
 - [ ] enable audit log with `audit.jsonl_path` and keep `audit.required = true`;
 - [ ] run with restrictive file permissions/umask for SQLite.

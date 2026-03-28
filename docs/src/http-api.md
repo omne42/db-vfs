@@ -15,7 +15,7 @@ Request fields:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `workspace_id` | string | yes | namespace |
+| `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
 | `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice after redaction |
 | `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected |
@@ -72,6 +72,8 @@ multi-line secret redaction preserves original line boundaries before per-line r
 
 ## Path normalization rules
 
+- `workspace_id` must be a literal identifier; `*` is reserved for auth allowlist patterns and is
+  rejected in requests;
 - must be root-relative;
 - no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
 - normalized path is echoed in response fields.
