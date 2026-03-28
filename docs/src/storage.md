@@ -23,7 +23,8 @@ Retry decision still depends on operation semantics (`conflict`, idempotency, et
 - migrations run at service startup;
 - migration failure aborts startup;
 - migrations are expected to be idempotent for existing environments;
-- startup order: open connection -> run migrations -> serve traffic.
+- startup order: validate service policy/auth/audit wiring -> open connection -> run migrations ->
+  serve traffic.
 
 Version storage keeps a per-path generation row so CAS versions remain monotonic across
 delete/recreate. This prevents stale `expected_version` values from accidentally matching a new
