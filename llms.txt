@@ -104,6 +104,10 @@ Error body:
 {"code":"<stable_code>","message":"<human message>"}
 ```
 
+`workspace_id` is a literal namespace, not a glob. It must be non-empty and must not contain
+whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved for auth
+`allowed_workspaces` pattern syntax.
+
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
@@ -147,8 +151,8 @@ Secrets semantics:
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
 - With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
-  audit record to append+flush successfully, backpressure blocks callers, and worker loss aborts
-  the process instead of silently dropping events.
+  audit record to append+flush successfully, backpressure blocks callers, and worker loss turns
+  audited traffic into a visible availability failure instead of silently dropping events.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -589,7 +593,7 @@ section_id: "docs-src-concepts-md"
 
 ## Core rules
 
-- `workspace_id` **MUST** be valid and non-empty.
+- `workspace_id` **MUST** be valid, non-empty, and literal (`*` is reserved for auth allowlist patterns).
 - `path` and `path_prefix` **MUST** be root-relative (no leading `/`, no `..`, no control chars).
 - `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
 - `read/write/patch/delete` **MUST** pass secret deny checks for target path.
@@ -716,6 +720,9 @@ Supported patterns:
 - exact match, e.g. `ws-prod`.
 - trailing wildcard prefix, e.g. `team-a-*`.
 
+`workspace_id` values themselves are always literal identifiers. They cannot contain `*`, so the
+wildcard syntax stays reserved for auth policy matching and never collides with a real namespace.
+
 Not supported:
 
 - multiple `*` (`foo*bar*`)
@@ -765,7 +772,7 @@ Secrets semantics:
 
 When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
 waits for its audit record to append+flush successfully, backpressure blocks callers, and losing
-the audit worker turns into process failure instead of silent event loss.
+the audit worker turns into a visible availability failure instead of silent event loss.
 
 
 ---
@@ -791,7 +798,7 @@ Request fields:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `workspace_id` | string | yes | namespace |
+| `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
 | `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice after redaction |
 | `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected |
@@ -848,6 +855,8 @@ multi-line secret redaction preserves original line boundaries before per-line r
 
 ## Path normalization rules
 
+- `workspace_id` must be a literal identifier; `*` is reserved for auth allowlist patterns and is
+  rejected in requests;
 - must be root-relative;
 - no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
 - normalized path is echoed in response fields.
@@ -947,6 +956,7 @@ Use this checklist for production:
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
+- [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
 - [ ] enable audit log with `audit.jsonl_path` and keep `audit.required = true`;
 - [ ] run with restrictive file permissions/umask for SQLite.

@@ -2,7 +2,7 @@
 
 ## Core rules
 
-- `workspace_id` **MUST** be valid and non-empty.
+- `workspace_id` **MUST** be valid, non-empty, and literal (`*` is reserved for auth allowlist patterns).
 - `path` and `path_prefix` **MUST** be root-relative (no leading `/`, no `..`, no control chars).
 - `path_prefix = ""` **MUST NOT** be used unless `permissions.allow_full_scan = true`.
 - `read/write/patch/delete` **MUST** pass secret deny checks for target path.

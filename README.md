@@ -69,6 +69,10 @@ Error body:
 {"code":"<stable_code>","message":"<human message>"}
 ```
 
+`workspace_id` is a literal namespace, not a glob. It must be non-empty and must not contain
+whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved for auth
+`allowed_workspaces` pattern syntax.
+
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
@@ -112,8 +116,8 @@ Secrets semantics:
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
 - With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
-  audit record to append+flush successfully, backpressure blocks callers, and worker loss aborts
-  the process instead of silently dropping events.
+  audit record to append+flush successfully, backpressure blocks callers, and worker loss turns
+  audited traffic into a visible availability failure instead of silently dropping events.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 

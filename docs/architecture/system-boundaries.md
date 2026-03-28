@@ -22,6 +22,8 @@
     与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
+  - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`
+    模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
     append+flush 成功才返回；worker 丢失或写失败会转成可见故障，而不是静默丢日志。
 - 面向运维和集成者的 API / policy / security 文档

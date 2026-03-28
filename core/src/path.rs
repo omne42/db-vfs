@@ -71,7 +71,7 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
         )));
     }
 
-    let (has_nul, has_whitespace, has_control, has_separator, has_colon, has_dotdot) =
+    let (has_nul, has_whitespace, has_control, has_separator, has_colon, has_dotdot, has_wildcard) =
         if workspace_id.is_ascii() {
             let mut has_nul = false;
             let mut has_whitespace = false;
@@ -79,6 +79,7 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
             let mut has_separator = false;
             let mut has_colon = false;
             let mut has_dotdot = false;
+            let mut has_wildcard = false;
             let mut prev_dot = false;
 
             for &byte in workspace_id.as_bytes() {
@@ -97,6 +98,9 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
                 if byte == b':' {
                     has_colon = true;
                 }
+                if byte == b'*' {
+                    has_wildcard = true;
+                }
                 if byte == b'.' && prev_dot {
                     has_dotdot = true;
                 }
@@ -110,6 +114,7 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
                 has_separator,
                 has_colon,
                 has_dotdot,
+                has_wildcard,
             )
         } else {
             let mut has_nul = false;
@@ -118,6 +123,7 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
             let mut has_separator = false;
             let mut has_colon = false;
             let mut has_dotdot = false;
+            let mut has_wildcard = false;
             let mut prev_dot = false;
 
             for ch in workspace_id.chars() {
@@ -136,6 +142,9 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
                 if ch == ':' {
                     has_colon = true;
                 }
+                if ch == '*' {
+                    has_wildcard = true;
+                }
                 if ch == '.' && prev_dot {
                     has_dotdot = true;
                 }
@@ -149,6 +158,7 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
                 has_separator,
                 has_colon,
                 has_dotdot,
+                has_wildcard,
             )
         };
 
@@ -180,6 +190,12 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<()> {
     if has_dotdot {
         return Err(Error::InvalidPath(
             "workspace_id: must not contain '..'".to_string(),
+        ));
+    }
+    if has_wildcard {
+        return Err(Error::InvalidPath(
+            "workspace_id: must not contain '*' because auth allowlists reserve wildcard syntax"
+                .to_string(),
         ));
     }
     Ok(())
@@ -409,6 +425,8 @@ mod tests {
         assert!(validate_workspace_id("a\\b").is_err());
         assert!(validate_workspace_id("a:b").is_err());
         assert!(validate_workspace_id("a..b").is_err());
+        assert!(validate_workspace_id("*").is_err());
+        assert!(validate_workspace_id("team-*").is_err());
     }
 
     #[test]
