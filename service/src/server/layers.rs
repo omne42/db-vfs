@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use tracing::Instrument;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -58,13 +58,20 @@ pub(super) async fn rate_limit_middleware(
                 .extensions()
                 .get::<RequestId>()
                 .map_or_else(generate_request_id, |value| value.0.clone());
-            audit.log(super::audit::minimal_event(
-                request_id,
-                peer_ip,
-                op,
-                StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                Some("rate_limited"),
-            ));
+            if let Err((status, body)) = super::log_audit_event(
+                audit,
+                super::audit::minimal_event(
+                    request_id,
+                    peer_ip,
+                    op,
+                    StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    Some("rate_limited"),
+                ),
+            )
+            .await
+            {
+                return (status, body).into_response();
+            }
         }
         return super::err_response(
             StatusCode::TOO_MANY_REQUESTS,

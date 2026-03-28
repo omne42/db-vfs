@@ -260,6 +260,17 @@ impl AuditLogger {
             );
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn broken_required_logger_for_test() -> Self {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        Self {
+            sender,
+            disconnected_warned: Arc::new(AtomicBool::new(false)),
+            required: true,
+        }
+    }
 }
 
 fn now_ms() -> u64 {
