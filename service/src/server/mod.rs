@@ -41,6 +41,18 @@ struct AppInner {
     scan_concurrency: Arc<tokio::sync::Semaphore>,
 }
 
+struct PreparedState {
+    policy: Arc<ValidatedVfsPolicy>,
+    redactor: Arc<SecretRedactor>,
+    traversal: Arc<TraversalSkipper>,
+    audit: Option<audit::AuditLogger>,
+    auth: auth::AuthMode,
+    rate_limiter: rate_limiter::RateLimiter,
+    io_concurrency: usize,
+    scan_concurrency: usize,
+    body_limit: usize,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct ErrorBody {
     code: &'static str,
@@ -128,11 +140,10 @@ fn max_body_bytes(policy: &VfsPolicy) -> usize {
     usize::try_from(max).unwrap_or(usize::MAX)
 }
 
-fn build_state(
-    backend: backend::Backend,
+fn prepare_state(
     mut policy: ValidatedVfsPolicy,
     unsafe_no_auth: bool,
-) -> anyhow::Result<(AppState, usize)> {
+) -> anyhow::Result<PreparedState> {
     let estimated_scan_inflight_bytes = policy
         .limits
         .max_read_bytes
@@ -200,22 +211,36 @@ fn build_state(
 
     policy.clear_auth_tokens();
 
+    let body_limit = max_body_bytes(&policy);
+    Ok(PreparedState {
+        policy: Arc::new(policy),
+        redactor: Arc::new(redactor),
+        traversal: Arc::new(traversal),
+        audit,
+        auth,
+        rate_limiter,
+        io_concurrency,
+        scan_concurrency,
+        body_limit,
+    })
+}
+
+fn build_state(backend: backend::Backend, prepared: PreparedState) -> (AppState, usize) {
     let state = AppState {
         inner: Arc::new(AppInner {
             backend,
-            policy: Arc::new(policy),
-            redactor: Arc::new(redactor),
-            traversal: Arc::new(traversal),
-            audit,
-            auth,
-            rate_limiter,
-            io_concurrency: Arc::new(tokio::sync::Semaphore::new(io_concurrency)),
-            scan_concurrency: Arc::new(tokio::sync::Semaphore::new(scan_concurrency)),
+            policy: prepared.policy,
+            redactor: prepared.redactor,
+            traversal: prepared.traversal,
+            audit: prepared.audit,
+            auth: prepared.auth,
+            rate_limiter: prepared.rate_limiter,
+            io_concurrency: Arc::new(tokio::sync::Semaphore::new(prepared.io_concurrency)),
+            scan_concurrency: Arc::new(tokio::sync::Semaphore::new(prepared.scan_concurrency)),
         }),
     };
 
-    let body_limit = max_body_bytes(&state.inner.policy);
-    Ok((state, body_limit))
+    (state, prepared.body_limit)
 }
 
 fn build_router(state: AppState, body_limit: usize) -> Router {
@@ -269,18 +294,19 @@ pub fn build_app_sqlite(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
+    let prepared = prepare_state(policy, unsafe_no_auth)?;
     let manager = sqlite_connection_manager(&db_path);
-    let max_pool_size = sqlite_pool_max_size(&db_path, policy.limits.max_db_connections);
-    if max_pool_size != policy.limits.max_db_connections {
+    let max_pool_size = sqlite_pool_max_size(&db_path, prepared.policy.limits.max_db_connections);
+    if max_pool_size != prepared.policy.limits.max_db_connections {
         tracing::warn!(
-            configured_max_db_connections = policy.limits.max_db_connections,
+            configured_max_db_connections = prepared.policy.limits.max_db_connections,
             effective_max_db_connections = max_pool_size,
             "sqlite :memory: forces a single pooled connection so schema and data stay consistent"
         );
     }
     let pool = r2d2::Pool::builder()
         .max_size(max_pool_size)
-        .connection_timeout(Duration::from_millis(policy.limits.max_io_ms))
+        .connection_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms))
         .build(manager)
         .map_err(anyhow::Error::msg)?;
     {
@@ -288,8 +314,7 @@ pub fn build_app_sqlite(
         db_vfs::migrations::migrate_sqlite(&conn).map_err(anyhow::Error::msg)?;
     }
 
-    let (state, body_limit) =
-        build_state(backend::Backend::Sqlite { pool }, policy, unsafe_no_auth)?;
+    let (state, body_limit) = build_state(backend::Backend::Sqlite { pool }, prepared);
 
     Ok(build_router(state, body_limit))
 }
@@ -301,9 +326,10 @@ pub fn build_app_postgres(
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
+    let prepared = prepare_state(policy, unsafe_no_auth)?;
 
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
-    config.connect_timeout(Duration::from_millis(policy.limits.max_io_ms));
+    config.connect_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms));
 
     {
         let mut client = config.connect(r2d2_postgres::postgres::NoTls)?;
@@ -313,12 +339,11 @@ pub fn build_app_postgres(
     let manager =
         r2d2_postgres::PostgresConnectionManager::new(config, r2d2_postgres::postgres::NoTls);
     let pool = r2d2::Pool::builder()
-        .max_size(policy.limits.max_db_connections)
-        .connection_timeout(Duration::from_millis(policy.limits.max_io_ms))
+        .max_size(prepared.policy.limits.max_db_connections)
+        .connection_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms))
         .build(manager)?;
 
-    let (state, body_limit) =
-        build_state(backend::Backend::Postgres { pool }, policy, unsafe_no_auth)?;
+    let (state, body_limit) = build_state(backend::Backend::Postgres { pool }, prepared);
     Ok(build_router(state, body_limit))
 }
 
@@ -367,10 +392,28 @@ mod tests {
         let mut policy = VfsPolicy::default();
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
 
-        let err = build_app_sqlite(db_path, policy, true).expect_err("should fail");
+        let err = build_app_sqlite(db_path.clone(), policy, true).expect_err("should fail");
         assert!(
             err.to_string()
                 .contains("audit.jsonl_path must be a regular file")
+        );
+        assert!(
+            !db_path.exists(),
+            "invalid required audit config should fail before touching sqlite"
+        );
+    }
+
+    #[test]
+    fn auth_validation_fails_before_touching_sqlite() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+
+        let err = build_app_sqlite(db_path.clone(), VfsPolicy::default(), false)
+            .expect_err("missing auth tokens should fail");
+        assert!(err.to_string().contains("no auth tokens configured"));
+        assert!(
+            !db_path.exists(),
+            "invalid auth config should fail before touching sqlite"
         );
     }
 
