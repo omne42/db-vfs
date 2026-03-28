@@ -1038,7 +1038,7 @@ Recommended `RUST_LOG`:
 - configure external log rotation;
 - monitor disk usage;
 - understand both startup and runtime behavior difference between `audit.required=true/false`;
-- with `audit.required=true`, treat audit backpressure or worker loss as availability-impacting by design.
+- with `audit.required=true`, treat audit backpressure, per-request write/flush failures, or worker loss as availability-impacting by design.
 
 
 ---
