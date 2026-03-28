@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use globset::{GlobSet, GlobSetBuilder};
-use regex::{NoExpand, Regex};
+use regex::Regex;
 
 use crate::glob_utils::{
     build_glob_from_normalized, expand_dir_star_to_descendants,
@@ -198,11 +198,7 @@ impl SecretRedactor {
         }
         let mut current: Cow<'_, str> = Cow::Borrowed(input);
         for regex in &self.redact {
-            let replaced = regex.replace_all(current.as_ref(), NoExpand(&self.replacement));
-            if matches!(replaced, Cow::Borrowed(_)) {
-                continue;
-            }
-            current = Cow::Owned(replaced.into_owned());
+            current = redact_with_literal_replacement(current, regex, &self.replacement);
         }
         current.into_owned()
     }
@@ -213,7 +209,11 @@ impl SecretRedactor {
         }
 
         for regex in &self.redact {
-            let replaced = regex.replace_all(input.as_str(), NoExpand(&self.replacement));
+            let replaced = redact_with_literal_replacement(
+                Cow::Borrowed(input.as_str()),
+                regex,
+                &self.replacement,
+            );
             if let Cow::Owned(next) = replaced {
                 input = next;
             }
@@ -278,6 +278,46 @@ impl SecretRedactor {
     }
 }
 
+fn preserved_line_break_bytes(matched: &str) -> usize {
+    matched
+        .bytes()
+        .filter(|byte| matches!(byte, b'\n' | b'\r'))
+        .count()
+}
+
+fn push_preserved_line_breaks(matched: &str, out: &mut String) {
+    for ch in matched.chars() {
+        if matches!(ch, '\n' | '\r') {
+            out.push(ch);
+        }
+    }
+}
+
+fn redact_with_literal_replacement<'a>(
+    input: Cow<'a, str>,
+    regex: &Regex,
+    replacement: &str,
+) -> Cow<'a, str> {
+    let mut matches = regex.find_iter(input.as_ref());
+    let Some(first) = matches.next() else {
+        return input;
+    };
+
+    let input_ref = input.as_ref();
+    let mut out = String::with_capacity(input_ref.len());
+    let mut last = 0usize;
+
+    for m in std::iter::once(first).chain(matches) {
+        out.push_str(&input_ref[last..m.start()]);
+        out.push_str(replacement);
+        push_preserved_line_breaks(m.as_str(), &mut out);
+        last = m.end();
+    }
+
+    out.push_str(&input_ref[last..]);
+    Cow::Owned(out)
+}
+
 fn redact_with_literal_replacement_bounded<'a>(
     input: Cow<'a, str>,
     regex: &Regex,
@@ -307,6 +347,13 @@ fn redact_with_literal_replacement_bounded<'a>(
         }
         out.push_str(replacement);
         out_len += replacement.len();
+
+        let preserved_line_break_bytes = preserved_line_break_bytes(m.as_str());
+        if out_len > max_output_bytes.saturating_sub(preserved_line_break_bytes) {
+            return Err(max_output_bytes.saturating_add(1));
+        }
+        push_preserved_line_breaks(m.as_str(), &mut out);
+        out_len += preserved_line_break_bytes;
         last = m.end();
     }
 
@@ -453,5 +500,19 @@ mod tests {
             .expect("bounded redact");
         assert!(matches!(out, Cow::Borrowed(_)));
         assert_eq!(out.as_ref(), input);
+    }
+
+    #[test]
+    fn redact_text_preserves_line_breaks_inside_multiline_matches() {
+        let rules = SecretRules {
+            redact_regexes: vec!["BEGIN\\nsecret\\nEND".to_string()],
+            replacement: "REDACTED".to_string(),
+            ..SecretRules::default()
+        };
+        let redactor = SecretRedactor::from_rules(&rules).expect("redactor");
+        assert_eq!(
+            redactor.redact_text("BEGIN\nsecret\nEND\npublic\n"),
+            "REDACTED\n\n\npublic\n"
+        );
     }
 }

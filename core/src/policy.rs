@@ -113,6 +113,10 @@ const fn default_max_walk_files() -> usize {
     200_000
 }
 
+const fn default_max_walk_ms() -> Option<u64> {
+    Some(2_000)
+}
+
 const fn default_max_line_bytes() -> usize {
     4096
 }
@@ -154,7 +158,7 @@ impl Default for Limits {
             max_results: default_max_results(),
             max_walk_entries: default_max_walk_entries(),
             max_walk_files: default_max_walk_files(),
-            max_walk_ms: None,
+            max_walk_ms: default_max_walk_ms(),
             max_line_bytes: default_max_line_bytes(),
             max_io_ms: default_max_io_ms(),
             max_concurrency_io: default_max_concurrency_io(),
@@ -687,6 +691,11 @@ impl VfsPolicy {
                 MAX_SECRET_REPLACEMENT_BYTES
             )));
         }
+        if self.secrets.replacement.chars().any(char::is_control) {
+            return Err(Error::InvalidPolicy(
+                "secrets.replacement must not contain control characters".to_string(),
+            ));
+        }
 
         if self.secrets.redact_regexes.len() > MAX_REDACT_REGEXES {
             return Err(Error::InvalidPolicy(format!(
@@ -893,6 +902,20 @@ mod tests {
         policy.secrets.replacement = "x".repeat(MAX_SECRET_REPLACEMENT_BYTES + 1);
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_control_characters_in_secrets_replacement() {
+        let mut policy = VfsPolicy::default();
+        policy.secrets.replacement = "line1\nline2".to_string();
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn default_limits_enable_bounded_scan_runtime() {
+        let policy = VfsPolicy::default();
+        assert_eq!(policy.limits.max_walk_ms, Some(2_000));
     }
 
     #[test]
