@@ -99,7 +99,13 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
-- SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget; scan requests with `max_walk_ms = None` do not inherit `max_io_ms` as an implicit backend wait cap.
+- SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
+- Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
+
+Secrets semantics:
+
+- `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
+- Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
 
 ## Observability / Audit
 

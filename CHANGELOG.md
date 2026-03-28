@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
-- service/runtime: move to per-request stores with pooled SQLite/Postgres connections, bounded concurrency, and timeout headroom.
+- service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
 - service/api: reject unknown request fields with `invalid_json_schema` instead of silently accepting undeclared JSON members.
@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth+audit+sqlite: stop trimming env-backed auth tokens, make `audit.required` backpressure/fail loudly instead of silently dropping runtime events, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 - store/sqlite+postgres: make versioned delete distinguish `conflict` from `not_found` without a post-delete race window, and add regression coverage for the three-way outcome.
 - service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
+- store/sqlite+postgres: make CAS update failure classification use the row snapshot being updated, and clamp `updated_at_ms` to a monotonic floor so wall-clock rollback cannot violate persisted timestamp invariants.
+- core/policy+redaction+vfs/read+grep: default `max_walk_ms` to `Some(2000)`, reject control characters in `secrets.replacement`, and preserve line structure when redacting multi-line secret matches before ranged reads or grep responses are emitted.
+- service/runner+backend: remove undocumented `250ms` timeout headroom and keep scan DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
 - service/handlers: treat queue wait budget expiry as `408 timeout` and use the documented `not_permitted` error code for workspace allowlist rejections.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.

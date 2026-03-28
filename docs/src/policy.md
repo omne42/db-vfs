@@ -12,7 +12,7 @@ Start from [`policy.example.toml`](policy.example.toml).
 | `permissions` | `write/patch/delete` | `false` |
 | `permissions` | `allow_full_scan` | `false` |
 | `audit` | `required` | `true` |
-| `limits` | `max_walk_ms` | `None` |
+| `limits` | `max_walk_ms` | `Some(2000)` |
 
 `policy.example.toml` is an opt-in example for a real service deployment, not a dump of literal
 `VfsPolicy::default()` values.
@@ -53,8 +53,13 @@ Budget semantics:
 
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
-- `max_walk_ms = None` keeps scan execution unbounded; it does not implicitly fall back to `max_io_ms`.
+- `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - SQLite `busy_timeout` and Postgres `statement_timeout` are reset per request to the active request budget.
+
+Secrets semantics:
+
+- `secrets.replacement` must not contain control characters.
+- Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
 
 ## Audit behavior matrix
 
