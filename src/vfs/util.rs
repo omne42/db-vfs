@@ -181,8 +181,12 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
 
     if stopped_on_wildcard {
         prefix.push('/');
+        return Some(prefix);
     }
-    Some(prefix)
+
+    prefix
+        .rsplit_once('/')
+        .map(|(parent, _)| format!("{parent}/"))
 }
 
 #[cfg(test)]
@@ -221,5 +225,31 @@ mod tests {
         assert!(glob_is_match(&glob, "///./docs//a.txt"));
         assert!(!glob_is_match(&glob, "docs/../a.txt"));
         assert!(!glob_is_match(&glob, "docs/\na.txt"));
+    }
+
+    #[test]
+    fn derive_safe_prefix_uses_directory_scope_for_exact_file_patterns() {
+        assert_eq!(
+            derive_safe_prefix_from_glob("docs/a.txt"),
+            Some("docs/".to_string())
+        );
+        assert_eq!(
+            derive_safe_prefix_from_glob("docs/nested/a.txt"),
+            Some("docs/nested/".to_string())
+        );
+        assert_eq!(derive_safe_prefix_from_glob("top-level.txt"), None);
+    }
+
+    #[test]
+    fn derive_safe_prefix_keeps_wildcard_scopes() {
+        assert_eq!(
+            derive_safe_prefix_from_glob("docs/*.txt"),
+            Some("docs/".to_string())
+        );
+        assert_eq!(
+            derive_safe_prefix_from_glob("docs/**/a.txt"),
+            Some("docs/".to_string())
+        );
+        assert_eq!(derive_safe_prefix_from_glob("**/*.txt"), None);
     }
 }
