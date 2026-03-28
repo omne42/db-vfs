@@ -6,6 +6,7 @@ All endpoints are `POST` JSON.
 
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
+  - `<token>` must satisfy HTTP Bearer `token68` syntax; whitespace-bearing or malformed tokens are rejected before auth matching.
 
 ## Endpoint contracts
 
@@ -94,12 +95,16 @@ Common codes:
 
 - `invalid_json_syntax`, `invalid_json_schema`, `invalid_json`, `unsupported_media_type`, `payload_too_large`
 - `unauthorized`, `not_permitted`, `secret_path_denied`
-- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`
+- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`, `audit_unavailable`
 
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
+
+`audit_unavailable` means required audit append/flush failed after request handling started. The
+operation may already have completed, so callers should verify state before replaying writes.
 
 ## Retry guidance
 
 - `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `503 audit_unavailable`: restore audit backend health first; for writes, check current file state before deciding whether to retry.
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.

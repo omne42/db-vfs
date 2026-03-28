@@ -89,6 +89,7 @@ lifetime by accident.
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
+- If you use plaintext env-backed tokens, keep them valid HTTP Bearer tokens (`token68` syntax; no whitespace or disallowed punctuation).
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
 - Use TLS/HTTPS end-to-end for bearer token transport.
 - Enable audit log with `audit.required = true`.
@@ -121,6 +122,8 @@ Secrets semantics:
 - With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
   audit record to append+flush successfully, backpressure blocks callers, and worker loss turns
   audited traffic into a visible availability failure instead of silently dropping events.
+- If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
+  the operation may already have completed, so clients should verify state before retrying writes.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -132,7 +135,7 @@ Secrets semantics:
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
 | `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, pool/lock wait |
-| `503` | concurrency saturation | `max_concurrency_*`, `max_db_connections` |
+| `503` | concurrency saturation or required audit unavailable | `max_concurrency_*`, `max_db_connections`, audit worker / `audit.jsonl_path` health |
 
 ## More docs
 

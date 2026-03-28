@@ -37,6 +37,9 @@ Not supported:
 ## Token hash generation
 
 Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
+Plaintext env-backed tokens must also be valid HTTP Bearer tokens (`token68` syntax), so values
+with whitespace or disallowed punctuation are rejected at startup instead of becoming impossible
+runtime credentials.
 
 ```bash
 printf '%s' 'dev-token-change-me' | sha256sum
@@ -77,4 +80,6 @@ Secrets semantics:
 
 When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
 waits for its audit record to append+flush successfully, backpressure blocks callers, and losing
-the audit worker turns into a visible availability failure instead of silent event loss.
+the audit worker turns into a visible `503 audit_unavailable` failure instead of silent event loss
+or a panic-driven connection abort. That error means the request outcome may already be committed,
+so callers should verify state before retrying non-idempotent writes.
