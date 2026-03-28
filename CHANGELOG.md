@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/read: remove per-line byte-limit recount in line-range extraction by enforcing a single upfront content-size guard, reducing hot-loop overhead without changing limit behavior.
 - vfs/glob+grep pagination: reject non-monotonic path ordering within a single store page to avoid silent row skips on misordered paginated backends.
 - service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.
+- service/audit-redaction: expand brace-alternation probes before masking audited scan patterns so values like `.{envrc,netrc}` redact instead of leaking secret filenames.
 - vfs/glob+grep: compile single-pattern scan globs into `GlobMatcher` (instead of a one-entry `GlobSet`) to trim matcher overhead on scan hot paths.
 - store/sqlite+postgres+core: replace lossy `usize -> u64` casts in persisted size/pagination conversions with checked conversions to avoid silent truncation on wide-pointer targets.
 - vfs/grep: cache per-file escaped-path byte length while budgeting JSON response size, removing repeated per-match path escaping work on hot scan paths.

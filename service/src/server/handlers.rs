@@ -109,21 +109,125 @@ fn redact_glob_pattern(redactor: &db_vfs_core::redaction::SecretRedactor, patter
 }
 
 fn glob_redaction_probes(pattern: &str) -> Vec<String> {
-    let mut collapsed = String::with_capacity(pattern.len());
-    let mut saw_slash = false;
-    for ch in pattern.trim().chars() {
-        if ch == '/' {
-            if !collapsed.is_empty() && !saw_slash {
-                collapsed.push('/');
-            }
-            saw_slash = true;
+    const MAX_GLOB_PROBES: usize = 64;
+    let normalized = db_vfs_core::glob_utils::normalize_glob_pattern_for_matching(pattern);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut probes = Vec::new();
+    let mut active = vec![String::new()];
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
             continue;
         }
-        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!') {
+
+        let variants = glob_segment_probe_variants(segment);
+        if variants.is_empty() {
+            active.clear();
+            active.push(String::new());
+            continue;
+        }
+
+        let mut next = Vec::new();
+        for base in &active {
+            for variant in &variants {
+                let candidate = if base.is_empty() {
+                    variant.clone()
+                } else {
+                    format!("{base}/{variant}")
+                };
+                push_unique(&mut probes, candidate.clone(), MAX_GLOB_PROBES);
+                push_unique(&mut next, candidate, MAX_GLOB_PROBES);
+                if probes.len() >= MAX_GLOB_PROBES && next.len() >= MAX_GLOB_PROBES {
+                    break;
+                }
+            }
+            if probes.len() >= MAX_GLOB_PROBES && next.len() >= MAX_GLOB_PROBES {
+                break;
+            }
+        }
+        active = if next.is_empty() {
+            vec![String::new()]
+        } else {
+            next
+        };
+        if probes.len() >= MAX_GLOB_PROBES {
+            break;
+        }
+    }
+
+    probes
+}
+
+fn glob_segment_probe_variants(segment: &str) -> Vec<String> {
+    const MAX_SEGMENT_VARIANTS: usize = 16;
+    let expanded = expand_brace_variants(segment, MAX_SEGMENT_VARIANTS)
+        .unwrap_or_else(|| vec![segment.to_string()]);
+    let mut probes = Vec::new();
+    for variant in expanded {
+        for probe in sanitize_glob_probe_variant(&variant) {
+            push_unique(&mut probes, probe, MAX_SEGMENT_VARIANTS);
+        }
+    }
+    probes
+}
+
+fn expand_brace_variants(segment: &str, limit: usize) -> Option<Vec<String>> {
+    let Some(open) = segment.find('{') else {
+        return Some(vec![segment.to_string()]);
+    };
+
+    let mut depth = 0usize;
+    let mut close = None;
+    let mut split_points = Vec::new();
+    for (idx, ch) in segment[open..].char_indices() {
+        let absolute = open + idx;
+        match ch {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(absolute);
+                    break;
+                }
+            }
+            ',' if depth == 1 => split_points.push(absolute),
+            _ => {}
+        }
+    }
+    let close = close?;
+
+    let prefix = &segment[..open];
+    let suffix = &segment[close + 1..];
+    let mut start = open + 1;
+    let mut arms = Vec::new();
+    for split in split_points {
+        arms.push(&segment[start..split]);
+        start = split + 1;
+    }
+    arms.push(&segment[start..close]);
+
+    let mut expanded = Vec::new();
+    for arm in arms {
+        let nested = format!("{prefix}{arm}{suffix}");
+        for variant in expand_brace_variants(&nested, limit)? {
+            push_unique(&mut expanded, variant, limit);
+        }
+        if expanded.len() >= limit {
+            break;
+        }
+    }
+    Some(expanded)
+}
+
+fn sanitize_glob_probe_variant(segment: &str) -> Vec<String> {
+    let mut collapsed = String::with_capacity(segment.len());
+    for ch in segment.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '!') {
             continue;
         }
         collapsed.push(ch);
-        saw_slash = false;
     }
 
     let collapsed = collapsed.trim_matches('/').to_string();
@@ -137,6 +241,13 @@ fn glob_redaction_probes(pattern: &str) -> Vec<String> {
         probes.push(trimmed.to_string());
     }
     probes
+}
+
+fn push_unique(values: &mut Vec<String>, candidate: String, limit: usize) {
+    if values.len() >= limit || values.iter().any(|value| value == &candidate) {
+        return;
+    }
+    values.push(candidate);
 }
 
 fn audit_event_base(
@@ -773,8 +884,8 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_permit_with_budget, audit_preview, redact_glob_pattern, redact_path,
-        redact_path_pair,
+        acquire_permit_with_budget, audit_preview, glob_redaction_probes, redact_glob_pattern,
+        redact_path, redact_path_pair,
     };
     use axum::http::StatusCode;
     use db_vfs_core::policy::SecretRules;
@@ -792,8 +903,29 @@ mod tests {
         assert_eq!(redact_glob_pattern(&redactor, ".git"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, ".{envrc,netrc}"), "<secret>");
+        assert_eq!(
+            redact_glob_pattern(&redactor, "**/{.envrc,.netrc}"),
+            "<secret>"
+        );
         assert_eq!(redact_glob_pattern(&redactor, "docs/*.txt"), "docs/*.txt");
+        assert_eq!(
+            redact_glob_pattern(&redactor, "docs/{readme,license}.md"),
+            "docs/{readme,license}.md"
+        );
         assert_eq!(redact_path(&redactor, "docs"), "docs");
+    }
+
+    #[test]
+    fn glob_redaction_probes_expand_brace_literals_without_collapsing_them_together() {
+        let probes = glob_redaction_probes(".{envrc,netrc}");
+        assert!(probes.iter().any(|probe| probe == ".envrc"));
+        assert!(probes.iter().any(|probe| probe == ".netrc"));
+        assert!(!probes.iter().any(|probe| probe.contains(".envrcnetrc")));
+
+        let probes = glob_redaction_probes("**/{.envrc,.netrc}");
+        assert!(probes.iter().any(|probe| probe == ".envrc"));
+        assert!(probes.iter().any(|probe| probe == ".netrc"));
     }
 
     #[test]
