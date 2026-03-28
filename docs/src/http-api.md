@@ -102,6 +102,10 @@ Common codes:
 `audit_unavailable` means required audit append/flush failed after request handling started. The
 operation may already have completed, so callers should verify state before replaying writes.
 
+`busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
+permit before buffering and decoding the body, so saturated servers fail fast instead of spending
+CPU on request bodies they cannot execute.
+
 ## Retry guidance
 
 - `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).

@@ -107,6 +107,7 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
+- `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
 
