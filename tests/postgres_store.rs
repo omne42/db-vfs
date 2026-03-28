@@ -212,3 +212,84 @@ fn postgres_versions_remain_monotonic_across_delete_and_recreate() {
         .expect_err("stale delete should conflict");
     assert_eq!(err.code(), "conflict");
 }
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_update_distinguishes_conflict_and_not_found() {
+    let url = postgres_url();
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let version = store
+        .insert_file_new(&ws, &path, "v1", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(version, 1);
+
+    let err = store
+        .update_file_cas(&ws, &path, "stale", version + 1, now_ms())
+        .expect_err("mismatched version should conflict");
+    assert_eq!(err.code(), "conflict");
+
+    let deleted = store
+        .delete_file(&ws, &path, Some(version))
+        .unwrap_or_else(|err| panic!("delete_file failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let err = store
+        .update_file_cas(&ws, &path, "missing", version, now_ms())
+        .expect_err("missing row should report not_found");
+    assert_eq!(err.code(), "not_found");
+}
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
+    let url = postgres_url();
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let first = store
+        .insert_file_new(&ws, &path, "v1", 100)
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(first, 1);
+
+    let second = store
+        .update_file_cas(&ws, &path, "v2", first, 50)
+        .unwrap_or_else(|err| panic!("update_file_cas failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(second, 2);
+
+    let meta = store
+        .get_meta(&ws, &path)
+        .unwrap_or_else(|err| panic!("get_meta failed for ws={ws}, path={path}: {err}"))
+        .unwrap_or_else(|| panic!("meta missing for ws={ws}, path={path}"));
+    assert_eq!(meta.version, 2);
+    assert_eq!(meta.updated_at_ms, 100);
+}

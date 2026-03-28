@@ -360,6 +360,66 @@ fn store_versions_remain_monotonic_across_delete_and_recreate() {
 }
 
 #[test]
+fn store_update_distinguishes_conflict_and_not_found() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+
+    let version = store
+        .insert_file_new("ws", "docs/a.txt", "v1\n", now)
+        .expect("insert initial version");
+    assert_eq!(version, 1);
+
+    let err = store
+        .update_file_cas(
+            "ws",
+            "docs/a.txt",
+            "stale\n",
+            version + 1,
+            now.saturating_add(1),
+        )
+        .expect_err("mismatched version should conflict");
+    assert_eq!(err.code(), "conflict");
+
+    let deleted = store
+        .delete_file("ws", "docs/a.txt", Some(version))
+        .expect("delete matching version");
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let err = store
+        .update_file_cas(
+            "ws",
+            "docs/a.txt",
+            "missing\n",
+            version,
+            now.saturating_add(2),
+        )
+        .expect_err("missing row should report not_found");
+    assert_eq!(err.code(), "not_found");
+}
+
+#[test]
+fn store_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+
+    let first = store
+        .insert_file_new("ws", "docs/a.txt", "v1\n", 100)
+        .expect("insert initial version");
+    assert_eq!(first, 1);
+
+    let second = store
+        .update_file_cas("ws", "docs/a.txt", "v2\n", first, 50)
+        .expect("update should clamp timestamp");
+    assert_eq!(second, 2);
+
+    let meta = store
+        .get_meta("ws", "docs/a.txt")
+        .expect("read meta")
+        .expect("meta exists");
+    assert_eq!(meta.version, 2);
+    assert_eq!(meta.updated_at_ms, 100);
+}
+
+#[test]
 fn vfs_write_rejects_stale_expected_version_after_delete_and_recreate() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);
