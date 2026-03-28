@@ -262,6 +262,53 @@ impl AuditLogger {
             required: true,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn blocking_required_logger_for_test() -> (Self, BlockingRequiredAuditControl) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let blocked = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let blocked_for_worker = blocked.clone();
+        std::thread::Builder::new()
+            .name("db-vfs-audit-test-blocking".to_string())
+            .spawn(move || {
+                let queued: QueuedAuditEvent = receiver.recv().expect("receive queued audit event");
+                blocked_for_worker.store(true, Ordering::Release);
+                release_rx.recv().expect("wait for audit release");
+                if let Some(ack) = queued.ack {
+                    ack.send(Ok(())).expect("ack audit success");
+                }
+            })
+            .expect("spawn blocking audit test worker");
+        (
+            Self {
+                sender,
+                disconnected_warned: Arc::new(AtomicBool::new(false)),
+                required: true,
+            },
+            BlockingRequiredAuditControl {
+                blocked,
+                release_tx,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+pub(super) struct BlockingRequiredAuditControl {
+    blocked: Arc<AtomicBool>,
+    release_tx: mpsc::SyncSender<()>,
+}
+
+#[cfg(test)]
+impl BlockingRequiredAuditControl {
+    pub(super) fn is_blocked(&self) -> bool {
+        self.blocked.load(Ordering::Acquire)
+    }
+
+    pub(super) fn release_success(&self) {
+        self.release_tx.send(()).expect("release audit success");
+    }
 }
 
 fn now_ms() -> u64 {

@@ -100,11 +100,13 @@ Common codes:
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
 `audit_unavailable` means required audit append/flush failed after request handling started. The
-operation may already have completed, so callers should verify state before replaying writes.
+operation may already have completed, so callers should verify state before replaying writes. This
+also covers required-audit waits that overrun the originating request's remaining runtime budget.
 
 `busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending
-CPU on request bodies they cannot execute.
+CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
+until any required audit append+flush completes.
 
 ## Retry guidance
 

@@ -60,6 +60,8 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
+- When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
+- Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
 - SQLite `busy_timeout` and Postgres `statement_timeout` are reset per request to the active request budget.
 
 Secrets semantics:
@@ -79,7 +81,9 @@ Secrets semantics:
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
 
 When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
-waits for its audit record to append+flush successfully, backpressure blocks callers, and losing
-the audit worker turns into a visible `503 audit_unavailable` failure instead of silent event loss
-or a panic-driven connection abort. That error means the request outcome may already be committed,
-so callers should verify state before retrying non-idempotent writes.
+waits for its audit record to append+flush successfully, the originating concurrency permit stays
+held until that wait finishes, and the same request runtime budget continues to cover the required
+audit wait. Losing the audit worker, write/flush failures, or exhausting the remaining request
+budget turns into a visible `503 audit_unavailable` failure instead of silent event loss or a
+panic-driven connection abort. That error means the request outcome may already be committed, so
+callers should verify state before retrying non-idempotent writes.
