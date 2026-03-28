@@ -540,7 +540,7 @@ where
                 };
                 let event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                audit.log(event);
+                super::log_audit_event(audit, event).await?;
             }
             return Err((status, Json(body)));
         }
@@ -552,7 +552,7 @@ where
             let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
             audit_err(&state, &mut event, &body);
-            audit.log(event);
+            super::log_audit_event(audit, event).await?;
         }
         return Err((status, Json(body)));
     }
@@ -566,7 +566,7 @@ where
             let mut event =
                 audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
             audit_err(&state, &mut event, &body);
-            audit.log(event);
+            super::log_audit_event(audit, event).await?;
         }
         return Err((status, Json(body)));
     }
@@ -578,7 +578,7 @@ where
                 let mut event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
-                audit.log(event);
+                super::log_audit_event(audit, event).await?;
             }
             return Err((status, Json(body)));
         }
@@ -593,7 +593,7 @@ where
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event = audit_req.into_event(request_id, peer, op, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
-                audit.log(event);
+                super::log_audit_event(audit, event).await?;
             }
             Ok(Json(resp))
         }
@@ -602,7 +602,7 @@ where
                 let mut event =
                     audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
-                audit.log(event);
+                super::log_audit_event(audit, event).await?;
             }
             Err((status, Json(body)))
         }
@@ -858,5 +858,32 @@ mod tests {
         let tiny = audit_preview("abcdef", 2);
         assert_eq!(tiny, "ab");
         assert!(tiny.len() <= 2);
+    }
+
+    #[test]
+    fn audit_failure_response_is_service_unavailable() {
+        let (status, body) = super::super::audit_failure_response(
+            super::super::audit::AuditFailure::new("the audit worker stopped"),
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0.code, "audit_unavailable");
+        assert_eq!(
+            body.0.message,
+            "required audit logging failed; operation status is unknown and may still have completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_audit_event_surfaces_required_audit_failures() {
+        let audit = super::super::audit::AuditLogger::broken_required_logger_for_test();
+
+        let err = super::super::log_audit_event(
+            &audit,
+            super::super::audit::minimal_event("req-1".to_string(), None, "read", 200, None),
+        )
+        .await
+        .expect_err("required audit failure should become a service error");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
     }
 }

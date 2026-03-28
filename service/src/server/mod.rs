@@ -77,6 +77,30 @@ fn err_response(status: StatusCode, code: &'static str, message: impl Into<Strin
     err(status, code, message).into_response()
 }
 
+fn audit_failure_response(audit_err: audit::AuditFailure) -> (StatusCode, Json<ErrorBody>) {
+    tracing::error!(err = %audit_err, "required audit logging failed");
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        CODE_AUDIT_UNAVAILABLE,
+        "required audit logging failed; operation status is unknown and may still have completed",
+    )
+}
+
+async fn log_audit_event(
+    audit: &audit::AuditLogger,
+    event: audit::AuditEvent,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    let audit = audit.clone();
+    tokio::task::spawn_blocking(move || audit.try_log(event))
+        .await
+        .map_err(|err| {
+            audit_failure_response(audit::AuditFailure::new(format!(
+                "audit wait task failed: {err}"
+            )))
+        })?
+        .map_err(audit_failure_response)
+}
+
 const CODE_NOT_PERMITTED: &str = "not_permitted";
 const CODE_SECRET_PATH_DENIED: &str = "secret_path_denied";
 const CODE_INVALID_PATH: &str = "invalid_path";
@@ -89,6 +113,7 @@ const CODE_INPUT_TOO_LARGE: &str = "input_too_large";
 const CODE_FILE_TOO_LARGE: &str = "file_too_large";
 const CODE_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const CODE_TIMEOUT: &str = "timeout";
+const CODE_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 const RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
 const SQLITE_DEFAULT_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
 
