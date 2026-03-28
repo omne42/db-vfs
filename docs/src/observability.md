@@ -30,7 +30,10 @@ Core fields:
 
 ## `peer_ip` handling
 
-- source: TCP peer address (`ConnectInfo<SocketAddr>`);
+- source: TCP peer address (`ConnectInfo<SocketAddr>`) when the hosting server installs it;
+- embedded/direct `Router` use without `into_make_service_with_connect_info::<SocketAddr>()` keeps
+  `peer_ip` empty and falls back to the shared missing-IP rate-limit bucket instead of failing the
+  request;
 - no forwarded-header parsing;
 - apply local retention policy according to compliance requirements.
 
@@ -48,4 +51,4 @@ Recommended `RUST_LOG`:
 - configure external log rotation;
 - monitor disk usage;
 - understand both startup and runtime behavior difference between `audit.required=true/false`;
-- with `audit.required=true`, treat audit backpressure or worker loss as availability-impacting by design.
+- with `audit.required=true`, treat audit backpressure, per-request write/flush failures, or worker loss as availability-impacting by design.

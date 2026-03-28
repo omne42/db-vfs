@@ -111,7 +111,9 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
-- With `audit.required = true`, audit runs fail-closed after startup: requests block on audit backpressure, and worker loss aborts the process instead of silently dropping events.
+- With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
+  audit record to append+flush successfully, backpressure blocks callers, and worker loss aborts
+  the process instead of silently dropping events.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 

@@ -19,9 +19,14 @@ static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(super) struct AuditLogger {
-    sender: mpsc::SyncSender<AuditEvent>,
+    sender: mpsc::SyncSender<QueuedAuditEvent>,
     disconnected_warned: Arc<AtomicBool>,
     required: bool,
+}
+
+struct QueuedAuditEvent {
+    event: AuditEvent,
+    ack: Option<mpsc::SyncSender<Result<(), String>>>,
 }
 
 pub(super) fn op_from_path(path: &str) -> Option<&'static str> {
@@ -151,7 +156,7 @@ impl AuditLogger {
 
         let path = path.as_ref().to_path_buf();
         let (lock_file, file) = open_audit_file(&path)?;
-        let (sender, receiver) = mpsc::sync_channel::<AuditEvent>(AUDIT_CHANNEL_CAPACITY);
+        let (sender, receiver) = mpsc::sync_channel::<QueuedAuditEvent>(AUDIT_CHANNEL_CAPACITY);
 
         std::thread::Builder::new()
             .name("db-vfs-audit".to_string())
@@ -177,13 +182,26 @@ impl AuditLogger {
 
     pub(super) fn log(&self, event: AuditEvent) {
         if self.required {
-            if self.sender.send(event).is_err() {
+            let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+            if self
+                .sender
+                .send(QueuedAuditEvent {
+                    event,
+                    ack: Some(ack_tx),
+                })
+                .is_err()
+            {
                 panic!("audit.required=true but the audit worker stopped");
+            }
+            match ack_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => panic!("audit.required=true but {err}"),
+                Err(_) => panic!("audit.required=true but the audit worker stopped"),
             }
             return;
         }
 
-        match self.sender.try_send(event) {
+        match self.sender.try_send(QueuedAuditEvent { event, ack: None }) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 let dropped = DROPPED_AUDIT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -280,7 +298,7 @@ fn lock_path_for(log_path: &Path) -> PathBuf {
 
 fn audit_worker(
     file: std::fs::File,
-    receiver: mpsc::Receiver<AuditEvent>,
+    receiver: mpsc::Receiver<QueuedAuditEvent>,
     path: PathBuf,
     _lock_file: std::fs::File,
     required: bool,
@@ -300,7 +318,7 @@ fn audit_worker(
 
 fn audit_worker_with_writer<W: Write>(
     out: &mut BufWriter<W>,
-    receiver: mpsc::Receiver<AuditEvent>,
+    receiver: mpsc::Receiver<QueuedAuditEvent>,
     path: &Path,
     required: bool,
     flush_every_events: usize,
@@ -313,7 +331,7 @@ fn audit_worker_with_writer<W: Write>(
 
     loop {
         match receiver.recv_timeout(flush_max_interval) {
-            Ok(mut event) => {
+            Ok(QueuedAuditEvent { mut event, ack }) => {
                 if event.ts_ms == 0 {
                     event.ts_ms = now_ms();
                 }
@@ -321,6 +339,13 @@ fn audit_worker_with_writer<W: Write>(
                 if let Err(err) = serde_json::to_writer(&mut *out, &event) {
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
+                    if let Some(ack) = ack {
+                        let _ = ack.send(Err(format_unrecoverable_write_failure(
+                            path,
+                            "serialize audit event",
+                            &err,
+                        )));
+                    }
                     log_unrecoverable_write_failure(
                         required,
                         path,
@@ -333,6 +358,13 @@ fn audit_worker_with_writer<W: Write>(
                 if let Err(err) = out.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
+                    if let Some(ack) = ack {
+                        let _ = ack.send(Err(format_unrecoverable_write_failure(
+                            path,
+                            "append audit newline",
+                            &err,
+                        )));
+                    }
                     log_unrecoverable_write_failure(
                         required,
                         path,
@@ -341,6 +373,33 @@ fn audit_worker_with_writer<W: Write>(
                         "append audit newline",
                     );
                     break;
+                }
+
+                if required {
+                    if let Err(err) = out.flush() {
+                        write_failures = write_failures.saturating_add(1);
+                        writer_failed = true;
+                        if let Some(ack) = ack {
+                            let _ = ack.send(Err(format_unrecoverable_write_failure(
+                                path,
+                                "flush audit log",
+                                &err,
+                            )));
+                        }
+                        log_unrecoverable_write_failure(
+                            required,
+                            path,
+                            write_failures,
+                            &err,
+                            "flush audit log",
+                        );
+                        break;
+                    }
+                    if let Some(ack) = ack {
+                        let _ = ack.send(Ok(()));
+                    }
+                    last_flush = Instant::now();
+                    continue;
                 }
 
                 pending = pending.saturating_add(1);
@@ -408,6 +467,14 @@ fn log_unrecoverable_write_failure(
         stage,
         "audit worker cannot continue after write failure; stopping worker to avoid corrupting later JSONL"
     );
+}
+
+fn format_unrecoverable_write_failure(
+    path: &Path,
+    stage: &'static str,
+    err: &dyn std::fmt::Display,
+) -> String {
+    format!("{stage} for {} failed: {err}", path.display())
 }
 
 #[cfg(test)]
@@ -494,7 +561,9 @@ mod tests {
 
         let mut event = super::minimal_event("req-1".to_string(), None, "read", 200, None);
         event.ts_ms = 42;
-        sender.send(event).expect("send event");
+        sender
+            .send(super::QueuedAuditEvent { event, ack: None })
+            .expect("send event");
         drop(sender);
 
         let worker_path = path.clone();
@@ -560,22 +629,16 @@ mod tests {
     fn optional_audit_worker_stops_after_partial_write_failure() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
         sender
-            .send(super::minimal_event(
-                "req-1".to_string(),
-                None,
-                "read",
-                200,
-                None,
-            ))
+            .send(super::QueuedAuditEvent {
+                event: super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                ack: None,
+            })
             .expect("send first event");
         sender
-            .send(super::minimal_event(
-                "req-2".to_string(),
-                None,
-                "read",
-                200,
-                None,
-            ))
+            .send(super::QueuedAuditEvent {
+                event: super::minimal_event("req-2".to_string(), None, "read", 200, None),
+                ack: None,
+            })
             .expect("send second event");
         drop(sender);
 
@@ -604,5 +667,35 @@ mod tests {
             writes.load(Ordering::Relaxed) >= 2,
             "test writer should observe the retry that surfaces the failure"
         );
+    }
+
+    #[test]
+    fn required_audit_worker_reports_write_failure_to_caller() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+        sender
+            .send(super::QueuedAuditEvent {
+                event: super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                ack: Some(ack_tx),
+            })
+            .expect("send event");
+        drop(sender);
+
+        let (writer, _, _) = FailAfterPartialWrite::new(8);
+        let mut out = std::io::BufWriter::with_capacity(1, writer);
+        super::audit_worker_with_writer(
+            &mut out,
+            receiver,
+            Path::new("audit.jsonl"),
+            true,
+            1,
+            Duration::from_millis(1),
+        );
+
+        let err = ack_rx
+            .recv()
+            .expect("required audit ack")
+            .expect_err("required audit should surface write failure");
+        assert!(err.contains("serialize audit event") || err.contains("append audit newline"));
     }
 }

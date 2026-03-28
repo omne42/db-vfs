@@ -4,11 +4,14 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{
     AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
 use sha2::{Digest, Sha256};
+use tower::ServiceExt;
 
 const DEV_TOKEN: &str = "dev-token";
 
@@ -144,6 +147,33 @@ async fn setup() -> Option<TestServer> {
         client,
         handle,
     })
+}
+
+#[tokio::test]
+async fn embedded_router_write_works_without_connect_info() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
+        .expect("build app");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/write")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"workspace_id":"ws","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+        ))
+        .expect("request");
+
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().contains_key("x-request-id"));
+
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let write = serde_json::from_slice::<WriteBody>(&body).expect("write json");
+    assert_eq!(write.path, "docs/a.txt");
+    assert_eq!(write.version, 1);
 }
 
 #[cfg(feature = "postgres")]
