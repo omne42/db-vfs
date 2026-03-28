@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use db_vfs_core::policy::VfsPolicy;
@@ -214,22 +214,27 @@ fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
     matched
 }
 
-fn log_unauthorized(state: &super::AppState, req: &Request, peer_ip: Option<std::net::IpAddr>) {
-    if let Some(audit) = state.inner.audit.as_ref()
-        && let Some(op) = super::audit::op_from_path(req.uri().path())
-        && let Some(request_id) = req
-            .extensions()
-            .get::<super::layers::RequestId>()
-            .map(|v| v.0.clone())
-    {
-        audit.log(super::audit::minimal_event(
-            request_id,
-            peer_ip,
-            op,
-            StatusCode::UNAUTHORIZED.as_u16(),
-            Some("unauthorized"),
-        ));
+async fn log_unauthorized(
+    audit: Option<&super::audit::AuditLogger>,
+    request_id: Option<String>,
+    peer_ip: Option<std::net::IpAddr>,
+    op: Option<&'static str>,
+) -> Result<(), Response> {
+    if let (Some(audit), Some(request_id), Some(op)) = (audit, request_id, op) {
+        super::log_audit_event(
+            audit,
+            super::audit::minimal_event(
+                request_id,
+                peer_ip,
+                op,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                Some("unauthorized"),
+            ),
+        )
+        .await
+        .map_err(IntoResponse::into_response)?;
     }
+    Ok(())
 }
 
 pub(super) async fn auth_middleware(
@@ -241,6 +246,12 @@ pub(super) async fn auth_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
+    let audit = state.inner.audit.as_ref();
+    let request_id = req
+        .extensions()
+        .get::<super::layers::RequestId>()
+        .map(|v| v.0.clone());
+    let op = super::audit::op_from_path(req.uri().path());
 
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
@@ -248,7 +259,9 @@ pub(super) async fn auth_middleware(
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
-                log_unauthorized(&state, &req, peer_ip);
+                if let Err(resp) = log_unauthorized(audit, request_id.clone(), peer_ip, op).await {
+                    return resp;
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
@@ -257,7 +270,9 @@ pub(super) async fn auth_middleware(
             };
 
             let Some(rule) = match_token(rules, token) else {
-                log_unauthorized(&state, &req, peer_ip);
+                if let Err(resp) = log_unauthorized(audit, request_id, peer_ip, op).await {
+                    return resp;
+                }
                 return super::err_response(
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",

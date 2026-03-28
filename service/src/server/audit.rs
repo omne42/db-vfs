@@ -252,15 +252,6 @@ impl AuditLogger {
         Ok(())
     }
 
-    pub(super) fn log(&self, event: AuditEvent) {
-        if let Err(err) = self.try_log(event) {
-            tracing::error!(
-                err = %err,
-                "required audit logging failed in a synchronous caller"
-            );
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn broken_required_logger_for_test() -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
