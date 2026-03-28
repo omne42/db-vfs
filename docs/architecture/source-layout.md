@@ -33,9 +33,9 @@
 - `service/src/server/rate_limiter.rs`
   - per-IP 限流。
 - `service/src/server/audit.rs`
-  - 审计事件落盘。
-- `service/src/server/handlers.rs` / `layers.rs` / `runner.rs`
-  - HTTP handlers、middleware、服务装配。
+  - 审计事件落盘与 required-audit ack 协调。
+- `service/src/server/handlers.rs` / `layers.rs` / `runner.rs` / `mod.rs`
+  - HTTP handlers、middleware、请求预算/permit 生命周期和服务装配。
 
 ## Data And Migrations
 

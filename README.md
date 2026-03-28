@@ -108,6 +108,8 @@ Budget semantics:
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
+- When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
+- The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
 - SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
 
@@ -121,10 +123,13 @@ Secrets semantics:
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
 - With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
-  audit record to append+flush successfully, backpressure blocks callers, and worker loss turns
-  audited traffic into a visible availability failure instead of silently dropping events.
+  audit record to append+flush successfully, keeps its originating concurrency slot until that
+  wait finishes, and uses the same request runtime budget for the required audit wait; worker loss
+  or audit-budget exhaustion turns audited traffic into a visible availability failure instead of
+  silently dropping events.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
+  The same error is used when required audit cannot finish within the request's remaining runtime budget.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 

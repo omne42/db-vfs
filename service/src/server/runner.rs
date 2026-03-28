@@ -74,14 +74,17 @@ async fn run_blocking<T>(
     permit: tokio::sync::OwnedSemaphorePermit,
     cancel: Option<Arc<CancelState>>,
     f: impl FnOnce() -> db_vfs::Result<T> + Send + 'static,
-) -> Result<T, (StatusCode, Json<super::ErrorBody>)>
+) -> Result<
+    (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
+    (StatusCode, Json<super::ErrorBody>),
+>
 where
     T: Send + 'static,
 {
     let timed_out = timeout.map(|_| Arc::new(AtomicBool::new(false)));
     let timed_out_for_worker = timed_out.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
+        let permit = permit;
         let started = Instant::now();
         let result = f();
         if let Some(timed_out) = timed_out_for_worker
@@ -111,7 +114,7 @@ where
                 );
             }
         }
-        result
+        (result, permit)
     });
     let join = if let Some(timeout) = timeout {
         let sleep = tokio::time::sleep(timeout);
@@ -146,8 +149,7 @@ where
         handle.await
     };
 
-    let result = join.map_err(|err| super::map_err(db_vfs_core::Error::Db(err.to_string())))?;
-    result.map_err(super::map_err)
+    join.map_err(|err| super::map_err(db_vfs_core::Error::Db(err.to_string())))
 }
 
 pub(super) async fn run_vfs<T>(
@@ -155,7 +157,10 @@ pub(super) async fn run_vfs<T>(
     permit: tokio::sync::OwnedSemaphorePermit,
     timeout: Option<Duration>,
     op: impl FnOnce(&mut DbVfs<super::backend::BackendStore>) -> db_vfs::Result<T> + Send + 'static,
-) -> Result<T, (StatusCode, Json<super::ErrorBody>)>
+) -> Result<
+    (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
+    (StatusCode, Json<super::ErrorBody>),
+>
 where
     T: Send + 'static,
 {

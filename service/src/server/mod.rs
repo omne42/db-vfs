@@ -101,6 +101,48 @@ async fn log_audit_event(
         .map_err(audit_failure_response)
 }
 
+async fn log_audit_event_with_permit(
+    audit: &audit::AuditLogger,
+    event: audit::AuditEvent,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    budget: Option<Duration>,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    let audit = audit.clone();
+    let mut handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        audit.try_log(event)
+    });
+
+    let result = if let Some(timeout) = budget {
+        if timeout.is_zero() {
+            handle.abort();
+            return Err(audit_failure_response(audit::AuditFailure::new(
+                "audit wait budget exhausted before append+flush completed",
+            )));
+        }
+
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(join) => join,
+            Err(_) => {
+                handle.abort();
+                return Err(audit_failure_response(audit::AuditFailure::new(format!(
+                    "audit append+flush exceeded the remaining request budget ({timeout:?})"
+                ))));
+            }
+        }
+    } else {
+        handle.await
+    };
+
+    result
+        .map_err(|err| {
+            audit_failure_response(audit::AuditFailure::new(format!(
+                "audit wait task failed: {err}"
+            )))
+        })?
+        .map_err(audit_failure_response)
+}
+
 const CODE_NOT_PERMITTED: &str = "not_permitted";
 const CODE_SECRET_PATH_DENIED: &str = "secret_path_denied";
 const CODE_INVALID_PATH: &str = "invalid_path";
@@ -391,6 +433,8 @@ pub fn build_app(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use tempfile::tempdir;
 
     #[test]
@@ -526,5 +570,116 @@ mod tests {
             Duration::from_millis(SQLITE_DEFAULT_BUSY_TIMEOUT_MS),
             Duration::from_millis(i32::MAX as u64)
         );
+    }
+
+    #[tokio::test]
+    async fn required_audit_keeps_concurrency_permit_until_append_finishes() {
+        let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire permit");
+
+        let audit_task = tokio::spawn({
+            let audit = audit.clone();
+            async move {
+                log_audit_event_with_permit(
+                    &audit,
+                    audit::minimal_event("req-1".to_string(), None, "write", 200, None),
+                    permit,
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("audit wait should block");
+        let immediate =
+            tokio::time::timeout(Duration::from_millis(20), semaphore.clone().acquire_owned())
+                .await;
+        assert!(
+            immediate.is_err(),
+            "required audit should keep the originating permit until append+flush finishes"
+        );
+
+        control.release_success();
+        audit_task
+            .await
+            .expect("audit task join")
+            .expect("audit should succeed");
+
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("permit should be released after audit finishes")
+            .expect("acquire permit after audit");
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn required_audit_timeout_keeps_permit_until_worker_exits() {
+        let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire permit");
+
+        let audit_task = tokio::spawn({
+            let audit = audit.clone();
+            async move {
+                log_audit_event_with_permit(
+                    &audit,
+                    audit::minimal_event("req-2".to_string(), None, "write", 200, None),
+                    permit,
+                    Some(Duration::from_millis(25)),
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("audit wait should block");
+        let err = audit_task
+            .await
+            .expect("audit task join")
+            .expect_err("audit wait should time out");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+
+        let immediate =
+            tokio::time::timeout(Duration::from_millis(20), semaphore.clone().acquire_owned())
+                .await;
+        assert!(
+            immediate.is_err(),
+            "timed-out audit wait should still hold the permit until the worker exits"
+        );
+
+        control.release_success();
+
+        let eventual = tokio::time::timeout(Duration::from_secs(1), async move {
+            loop {
+                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
+                    return permit;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("permit should be released once timed-out audit worker finishes");
+        drop(eventual);
     }
 }

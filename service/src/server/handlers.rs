@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::async_trait;
@@ -716,17 +716,34 @@ where
     }
 
     let state_for_run = state.clone();
+    let started = Instant::now();
     let result =
         super::runner::run_vfs(state_for_run, permit, remaining, move |vfs| run(vfs, req)).await;
 
     match (result, request_id, audit_req) {
-        (Ok(resp), request_id, audit_req) => {
+        (Ok((Ok(resp), permit)), request_id, audit_req) => {
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event = audit_req.into_event(request_id, peer, op, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
-                super::log_audit_event(audit, event).await?;
+                let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
+                super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
+            } else {
+                drop(permit);
             }
             Ok(Json(resp))
+        }
+        (Ok((Err(err), permit)), request_id, audit_req) => {
+            let (status, Json(body)) = super::map_err(err);
+            if let Some(audit) = state.inner.audit.as_ref() {
+                let mut event =
+                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                audit_err(&state, &mut event, &body);
+                let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
+                super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
+            } else {
+                drop(permit);
+            }
+            Err((status, Json(body)))
         }
         (Err((status, Json(body))), request_id, audit_req) => {
             if let Some(audit) = state.inner.audit.as_ref() {
@@ -1087,5 +1104,119 @@ mod tests {
         .expect_err("required audit failure should become a service error");
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.code, "audit_unavailable");
+    }
+
+    #[tokio::test]
+    async fn log_audit_event_with_permit_keeps_semaphore_slot_until_ack_finishes() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+
+        let task = tokio::spawn({
+            let audit = audit.clone();
+            async move {
+                super::super::log_audit_event_with_permit(
+                    &audit,
+                    super::super::audit::minimal_event(
+                        "req-1".to_string(),
+                        None,
+                        "read",
+                        200,
+                        None,
+                    ),
+                    permit,
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("audit logger should block");
+        assert!(
+            semaphore.clone().try_acquire_owned().is_err(),
+            "required audit should keep the originating semaphore slot until ack completes"
+        );
+
+        control.release_success();
+        task.await.expect("audit task join").expect("audit log");
+
+        let reacquired = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("permit should be released once audit finishes");
+        drop(reacquired);
+    }
+
+    #[tokio::test]
+    async fn log_audit_event_with_permit_times_out_without_releasing_slot_early() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+
+        let task = tokio::spawn({
+            let audit = audit.clone();
+            async move {
+                super::super::log_audit_event_with_permit(
+                    &audit,
+                    super::super::audit::minimal_event(
+                        "req-timeout".to_string(),
+                        None,
+                        "write",
+                        200,
+                        None,
+                    ),
+                    permit,
+                    Some(Duration::from_millis(10)),
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("audit logger should block");
+        let err = task
+            .await
+            .expect("audit timeout task join")
+            .expect_err("audit timeout should fail closed");
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+        assert!(
+            semaphore.clone().try_acquire_owned().is_err(),
+            "timed-out audit should keep the semaphore slot until the worker actually unwinds"
+        );
+
+        control.release_success();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
+                    drop(permit);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("permit should be released after delayed audit completion");
     }
 }
