@@ -434,8 +434,6 @@ mod tests {
     use super::*;
 
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc;
 
     use tempfile::tempdir;
 
@@ -574,42 +572,9 @@ mod tests {
         );
     }
 
-    fn gated_required_logger() -> (
-        audit::AuditLogger,
-        mpsc::Receiver<()>,
-        mpsc::SyncSender<()>,
-        std::thread::JoinHandle<()>,
-    ) {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-
-        let logger = audit::AuditLogger {
-            sender,
-            disconnected_warned: Arc::new(AtomicBool::new(false)),
-            required: true,
-        };
-
-        let worker = std::thread::spawn(move || {
-            let queued = receiver.recv().expect("queued audit event");
-            started_tx.send(()).expect("started signal");
-            release_rx.recv().expect("release audit wait");
-            let ack = queued.ack.expect("required audit ack channel");
-            ack.send(Ok(())).expect("audit ack");
-        });
-
-        (logger, started_rx, release_tx, worker)
-    }
-
-    async fn wait_for_blocking_signal(rx: mpsc::Receiver<()>) {
-        tokio::task::spawn_blocking(move || rx.recv().expect("blocking signal"))
-            .await
-            .expect("signal wait join");
-    }
-
     #[tokio::test]
     async fn required_audit_keeps_concurrency_permit_until_append_finishes() {
-        let (audit, started_rx, release_tx, worker) = gated_required_logger();
+        let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
             .clone()
@@ -630,7 +595,13 @@ mod tests {
             }
         });
 
-        wait_for_blocking_signal(started_rx).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("audit wait should block");
         let immediate =
             tokio::time::timeout(Duration::from_millis(20), semaphore.clone().acquire_owned())
                 .await;
@@ -639,12 +610,11 @@ mod tests {
             "required audit should keep the originating permit until append+flush finishes"
         );
 
-        release_tx.send(()).expect("release audit");
+        control.release_success();
         audit_task
             .await
             .expect("audit task join")
             .expect("audit should succeed");
-        worker.join().expect("audit worker join");
 
         let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
             .await
@@ -655,7 +625,7 @@ mod tests {
 
     #[tokio::test]
     async fn required_audit_timeout_keeps_permit_until_worker_exits() {
-        let (audit, started_rx, release_tx, worker) = gated_required_logger();
+        let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
             .clone()
@@ -676,7 +646,13 @@ mod tests {
             }
         });
 
-        wait_for_blocking_signal(started_rx).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("audit wait should block");
         let err = audit_task
             .await
             .expect("audit task join")
@@ -692,8 +668,7 @@ mod tests {
             "timed-out audit wait should still hold the permit until the worker exits"
         );
 
-        release_tx.send(()).expect("release audit");
-        worker.join().expect("audit worker join");
+        control.release_success();
 
         let eventual = tokio::time::timeout(Duration::from_secs(1), async move {
             loop {
