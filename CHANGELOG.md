@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
 - core/path-policy: tighten workspace/path validation (control chars, wildcard constraints, oversized inputs).
 - migrations: add DB-level integrity checks for version/timestamp/path/content-size consistency.
+- service/audit-runtime: keep required-audit waits under the originating request's concurrency slot and remaining runtime budget so slow audit sinks cannot free execution capacity before the response can legally return.
 
 ### Changed
 
