@@ -6,7 +6,7 @@ use rusqlite::OptionalExtension;
 
 use db_vfs_core::{Error, Result};
 
-use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds};
+use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms};
 
 pub struct SqliteStoreWithConn<C> {
     conn: C,
@@ -174,10 +174,34 @@ where
             .map_err(map_sqlite_err)?;
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
+        let current = tx
+            .query_row(
+                "SELECT version, created_at_ms, updated_at_ms
+                 FROM files
+                 WHERE workspace_id = ?1 AND path = ?2",
+                rusqlite::params![workspace_id, path],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        i64_to_u64_sql(row.get::<_, i64>(1)?, "created_at_ms", 1)?,
+                        i64_to_u64_sql(row.get::<_, i64>(2)?, "updated_at_ms", 2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(map_sqlite_err)?;
+        let Some((current_version, created_at_ms, previous_updated_at_ms)) = current else {
+            return Err(Error::NotFound("file not found".to_string()));
+        };
         let new_version = super::next_version(expected_version)?;
+        if current_version != u64_to_i64(expected_version, "expected_version")? {
+            return Err(Error::Conflict("version mismatch".to_string()));
+        }
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
         let new_version_i64 = u64_to_i64(new_version, "new_version")?;
-        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
+        let next_updated_at_ms =
+            monotonic_updated_at_ms(now_ms, created_at_ms, previous_updated_at_ms);
+        let next_updated_at_ms_i64 = u64_to_i64(next_updated_at_ms, "updated_at_ms")?;
         let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
 
         let updated = tx
@@ -189,7 +213,7 @@ where
                     content,
                     size_bytes_i64,
                     new_version_i64,
-                    now_ms_i64,
+                    next_updated_at_ms_i64,
                     workspace_id,
                     path,
                     expected_version_i64,
@@ -204,18 +228,9 @@ where
             return Ok(new_version);
         }
 
-        let exists = tx
-            .query_row(
-                "SELECT version FROM files WHERE workspace_id = ?1 AND path = ?2",
-                rusqlite::params![workspace_id, path],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(map_sqlite_err)?;
-        if exists.is_none() {
-            return Err(Error::NotFound("file not found".to_string()));
-        }
-        Err(Error::Conflict("version mismatch".to_string()))
+        Err(Error::Db(format!(
+            "update_file_cas: expected to update exactly one row, updated={updated}"
+        )))
     }
 
     fn delete_file(

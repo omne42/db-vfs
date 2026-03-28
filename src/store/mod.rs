@@ -200,6 +200,10 @@ fn next_version(expected_version: u64) -> Result<u64> {
     Ok(expected_version + 1)
 }
 
+fn monotonic_updated_at_ms(now_ms: u64, created_at_ms: u64, previous_updated_at_ms: u64) -> u64 {
+    now_ms.max(created_at_ms).max(previous_updated_at_ms)
+}
+
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "sqlite")]
@@ -218,6 +222,13 @@ mod tests {
     fn next_version_rejects_overflow() {
         let err = next_version(MAX_STORE_VERSION).expect_err("should overflow");
         assert_eq!(err.code(), "conflict");
+    }
+
+    #[test]
+    fn monotonic_updated_at_clamps_clock_rollback() {
+        assert_eq!(monotonic_updated_at_ms(50, 100, 120), 120);
+        assert_eq!(monotonic_updated_at_ms(50, 100, 100), 100);
+        assert_eq!(monotonic_updated_at_ms(150, 100, 120), 150);
     }
 
     #[test]

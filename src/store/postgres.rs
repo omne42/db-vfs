@@ -2,7 +2,7 @@ use db_vfs_core::{Error, Result};
 
 use std::ops::DerefMut;
 
-use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds};
+use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms};
 
 pub struct PostgresStoreWithClient<C> {
     client: C,
@@ -152,13 +152,33 @@ where
     ) -> Result<u64> {
         let mut tx = self.client.transaction().map_err(map_postgres_err)?;
         lock_generation_row_postgres(&mut tx, workspace_id, path)?;
+        let current = tx
+            .query_opt(
+                "SELECT version, created_at_ms, updated_at_ms
+                 FROM files
+                 WHERE workspace_id = $1 AND path = $2
+                 FOR UPDATE",
+                &[&workspace_id, &path],
+            )
+            .map_err(map_postgres_err)?;
+        let Some(current) = current else {
+            return Err(Error::NotFound("file not found".to_string()));
+        };
         let size_bytes = u64::try_from(content.len())
             .map_err(|_| Error::Db("integer overflow converting size_bytes".to_string()))?;
         let new_version = super::next_version(expected_version)?;
+        let current_version = current.get::<_, i64>(0);
+        let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
+        if current_version != expected_version_i64 {
+            return Err(Error::Conflict("version mismatch".to_string()));
+        }
         let size_bytes_i64 = u64_to_i64(size_bytes, "size_bytes")?;
         let new_version_i64 = u64_to_i64(new_version, "new_version")?;
-        let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
-        let expected_version_i64 = u64_to_i64(expected_version, "expected_version")?;
+        let created_at_ms = i64_to_u64(current.get::<_, i64>(1), "created_at_ms")?;
+        let previous_updated_at_ms = i64_to_u64(current.get::<_, i64>(2), "updated_at_ms")?;
+        let next_updated_at_ms =
+            monotonic_updated_at_ms(now_ms, created_at_ms, previous_updated_at_ms);
+        let next_updated_at_ms_i64 = u64_to_i64(next_updated_at_ms, "updated_at_ms")?;
 
         let updated = tx
             .execute(
@@ -169,7 +189,7 @@ where
                     &content,
                     &size_bytes_i64,
                     &new_version_i64,
-                    &now_ms_i64,
+                    &next_updated_at_ms_i64,
                     &workspace_id,
                     &path,
                     &expected_version_i64,
@@ -183,16 +203,9 @@ where
             return Ok(new_version);
         }
 
-        let exists = tx
-            .query_opt(
-                "SELECT version FROM files WHERE workspace_id = $1 AND path = $2",
-                &[&workspace_id, &path],
-            )
-            .map_err(map_postgres_err)?;
-        if exists.is_none() {
-            return Err(Error::NotFound("file not found".to_string()));
-        }
-        Err(Error::Conflict("version mismatch".to_string()))
+        Err(Error::Db(format!(
+            "update_file_cas: expected to update exactly one row, updated={updated}"
+        )))
     }
 
     fn delete_file(
