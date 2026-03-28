@@ -11,6 +11,9 @@ use db_vfs::vfs::{
     DbVfs, DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
     PatchRequest, PatchResponse, ReadRequest, ReadResponse, WriteRequest, WriteResponse,
 };
+use db_vfs_core::glob_utils::{
+    normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
+};
 
 use super::audit::AuditEvent;
 
@@ -92,7 +95,56 @@ fn redact_path_pair(
 }
 
 fn redact_glob_pattern(redactor: &db_vfs_core::redaction::SecretRedactor, pattern: &str) -> String {
-    redact_path(redactor, pattern)
+    if is_path_or_descendant_denied(redactor, pattern) {
+        return "<secret>".to_string();
+    }
+
+    let normalized = normalize_glob_pattern_for_matching(pattern);
+    if validate_normalized_root_relative_glob_pattern(&normalized).is_err() {
+        return pattern.to_string();
+    }
+
+    for candidate in glob_probe_candidates(&normalized) {
+        if is_path_or_descendant_denied(redactor, &candidate) {
+            return "<secret>".to_string();
+        }
+    }
+
+    pattern.to_string()
+}
+
+fn glob_probe_candidates(pattern: &str) -> Vec<String> {
+    const GLOB_META: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+
+    let mut stripped = String::with_capacity(pattern.len());
+    let mut replaced = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if GLOB_META.contains(&ch) {
+            replaced.push('x');
+            continue;
+        }
+        stripped.push(ch);
+        replaced.push(ch);
+    }
+
+    let mut out = Vec::new();
+    for candidate in [stripped, replaced] {
+        let normalized = normalize_glob_pattern_for_matching(&candidate);
+        let normalized = normalized
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        if normalized.is_empty()
+            || validate_normalized_root_relative_glob_pattern(&normalized).is_err()
+        {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == &normalized) {
+            out.push(normalized);
+        }
+    }
+    out
 }
 
 fn audit_event_base(
@@ -709,8 +761,8 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_permit_with_budget, audit_preview, redact_glob_pattern, redact_path,
-        redact_path_pair,
+        acquire_permit_with_budget, audit_preview, glob_probe_candidates, redact_glob_pattern,
+        redact_path, redact_path_pair,
     };
     use axum::http::StatusCode;
     use db_vfs_core::policy::SecretRules;
@@ -739,6 +791,29 @@ mod tests {
         let (requested_path, path) = redact_path_pair(&redactor, "docs/a.txt", "docs/a.txt");
         assert_eq!(requested_path, "docs/a.txt");
         assert_eq!(path, "docs/a.txt");
+    }
+
+    #[test]
+    fn glob_probe_candidates_strip_or_fill_metacharacters() {
+        let candidates = glob_probe_candidates("docs/**/.env*");
+        assert!(candidates.iter().any(|candidate| candidate == "docs/.env"));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate == "docs/xx/.envx")
+        );
+    }
+
+    #[test]
+    fn redact_glob_pattern_hides_secret_probe_patterns() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, "**/.env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
+        assert_eq!(
+            redact_glob_pattern(&redactor, "docs/**/*.txt"),
+            "docs/**/*.txt"
+        );
     }
 
     #[tokio::test]
