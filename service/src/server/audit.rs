@@ -340,11 +340,11 @@ fn audit_worker_with_writer<W: Write>(
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
-                        let _ = ack.send(Err(format_unrecoverable_write_failure(
+                        drop(ack.send(Err(format_unrecoverable_write_failure(
                             path,
                             "serialize audit event",
                             &err,
-                        )));
+                        ))));
                     }
                     log_unrecoverable_write_failure(
                         required,
@@ -359,11 +359,11 @@ fn audit_worker_with_writer<W: Write>(
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
-                        let _ = ack.send(Err(format_unrecoverable_write_failure(
+                        drop(ack.send(Err(format_unrecoverable_write_failure(
                             path,
                             "append audit newline",
                             &err,
-                        )));
+                        ))));
                     }
                     log_unrecoverable_write_failure(
                         required,
@@ -380,11 +380,11 @@ fn audit_worker_with_writer<W: Write>(
                         write_failures = write_failures.saturating_add(1);
                         writer_failed = true;
                         if let Some(ack) = ack {
-                            let _ = ack.send(Err(format_unrecoverable_write_failure(
+                            drop(ack.send(Err(format_unrecoverable_write_failure(
                                 path,
                                 "flush audit log",
                                 &err,
-                            )));
+                            ))));
                         }
                         log_unrecoverable_write_failure(
                             required,
@@ -396,7 +396,7 @@ fn audit_worker_with_writer<W: Write>(
                         break;
                     }
                     if let Some(ack) = ack {
-                        let _ = ack.send(Ok(()));
+                        drop(ack.send(Ok(())));
                     }
                     last_flush = Instant::now();
                     continue;
