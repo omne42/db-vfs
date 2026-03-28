@@ -72,6 +72,6 @@ Secrets semantics:
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
 
-When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: requests block
-on audit backpressure, and losing the audit worker turns into process failure instead of silent
-event loss.
+When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
+waits for its audit record to append+flush successfully, backpressure blocks callers, and losing
+the audit worker turns into process failure instead of silent event loss.

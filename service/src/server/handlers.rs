@@ -1,11 +1,14 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
+use axum::async_trait;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Extension, State};
+use axum::extract::{ConnectInfo, Extension, FromRequestParts, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 
 use db_vfs::vfs::{
     DbVfs, DeleteRequest, DeleteResponse, GlobRequest, GlobResponse, GrepRequest, GrepResponse,
@@ -138,7 +141,7 @@ fn glob_redaction_probes(pattern: &str) -> Vec<String> {
 
 fn audit_event_base(
     request_id: String,
-    peer: SocketAddr,
+    peer: Option<SocketAddr>,
     op: &'static str,
     workspace_id: String,
     status: u16,
@@ -147,7 +150,7 @@ fn audit_event_base(
     AuditEvent {
         ts_ms: now_ms(),
         request_id,
-        peer_ip: Some(peer.ip().to_string()),
+        peer_ip: peer.map(|addr| addr.ip().to_string()),
         op,
         workspace_id,
         requested_path: None,
@@ -173,6 +176,26 @@ fn audit_event_base(
         skipped_secret_denied: None,
         skipped_glob_mismatch: None,
         skipped_missing_content: None,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MaybeConnectInfo(Option<SocketAddr>);
+
+#[async_trait]
+impl<S> FromRequestParts<S> for MaybeConnectInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| *addr),
+        ))
     }
 }
 
@@ -285,7 +308,7 @@ impl AuditRequest {
     fn into_event(
         self,
         request_id: String,
-        peer: SocketAddr,
+        peer: Option<SocketAddr>,
         op: &'static str,
         status: StatusCode,
         error_code: Option<String>,
@@ -423,7 +446,7 @@ fn audit_ok_grep(state: &super::AppState, event: &mut AuditEvent, resp: &GrepRes
 }
 
 struct RequestContext {
-    peer: SocketAddr,
+    peer: Option<SocketAddr>,
     state: super::AppState,
     request_id: String,
     auth: super::auth::AuthContext,
@@ -441,7 +464,7 @@ struct AuditHooks<Resp> {
 }
 
 fn request_ctx(
-    peer: SocketAddr,
+    peer: Option<SocketAddr>,
     state: super::AppState,
     request_id: String,
     auth: super::auth::AuthContext,
@@ -587,7 +610,7 @@ where
 }
 
 pub(super) async fn read(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
@@ -610,7 +633,7 @@ pub(super) async fn read(
 }
 
 pub(super) async fn write(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
@@ -633,7 +656,7 @@ pub(super) async fn write(
 }
 
 pub(super) async fn patch(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
@@ -656,7 +679,7 @@ pub(super) async fn patch(
 }
 
 pub(super) async fn delete(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
@@ -679,7 +702,7 @@ pub(super) async fn delete(
 }
 
 pub(super) async fn glob(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,
@@ -712,7 +735,7 @@ pub(super) async fn glob(
 }
 
 pub(super) async fn grep(
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    MaybeConnectInfo(peer): MaybeConnectInfo,
     State(state): State<super::AppState>,
     Extension(super::layers::RequestId(request_id)): Extension<super::layers::RequestId>,
     Extension(auth): Extension<super::auth::AuthContext>,

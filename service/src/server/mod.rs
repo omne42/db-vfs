@@ -325,6 +325,10 @@ pub fn build_app_postgres(
 /// Convenience entrypoint using the SQLite backend.
 ///
 /// For PostgreSQL, call `build_app_postgres` when the `postgres` feature is enabled.
+///
+/// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When no peer
+/// address is installed by the outer server, request handling still succeeds; audit `peer_ip`
+/// stays unset and rate limiting falls back to the shared unspecified-IP bucket.
 pub fn build_app(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
