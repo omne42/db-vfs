@@ -278,6 +278,105 @@ fn lock_path_for(log_path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AuditWorkerControl {
+    Continue,
+    Stop,
+}
+
+enum AppendAuditEventError {
+    Serialize(serde_json::Error),
+    Newline(std::io::Error),
+}
+
+impl std::fmt::Display for AppendAuditEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(err) => err.fmt(f),
+            Self::Newline(err) => err.fmt(f),
+        }
+    }
+}
+
+fn append_audit_event<W: Write>(
+    out: &mut W,
+    event: &AuditEvent,
+) -> std::result::Result<(), AppendAuditEventError> {
+    serde_json::to_writer(&mut *out, event).map_err(AppendAuditEventError::Serialize)?;
+    out.write_all(b"\n")
+        .map_err(AppendAuditEventError::Newline)?;
+    Ok(())
+}
+
+fn report_audit_worker_failure(
+    required: bool,
+    path: &Path,
+    write_failures: &mut u64,
+    stage: &'static str,
+    err: &dyn std::fmt::Display,
+) {
+    *write_failures = write_failures.saturating_add(1);
+    let write_failures = *write_failures;
+    if required {
+        tracing::error!(
+            err = %err,
+            audit_path = ?path,
+            write_failures,
+            stage,
+            "required audit worker cannot continue after a write failure; stopping worker"
+        );
+        return;
+    }
+    if write_failures == 1 || write_failures.is_multiple_of(1000) {
+        tracing::warn!(
+            err = %err,
+            audit_path = ?path,
+            write_failures,
+            stage,
+            "audit writer entered a failed state; stopping worker to avoid corrupting JSONL"
+        );
+    }
+}
+
+fn append_event_or_stop<W: Write>(
+    out: &mut W,
+    mut event: AuditEvent,
+    path: &Path,
+    required: bool,
+    write_failures: &mut u64,
+) -> AuditWorkerControl {
+    if event.ts_ms == 0 {
+        event.ts_ms = now_ms();
+    }
+
+    match append_audit_event(out, &event) {
+        Ok(()) => AuditWorkerControl::Continue,
+        Err(err) => {
+            let stage = match err {
+                AppendAuditEventError::Serialize(_) => "serialize",
+                AppendAuditEventError::Newline(_) => "write_newline",
+            };
+            report_audit_worker_failure(required, path, write_failures, stage, &err);
+            AuditWorkerControl::Stop
+        }
+    }
+}
+
+fn flush_or_stop<W: Write>(
+    out: &mut W,
+    path: &Path,
+    required: bool,
+    write_failures: &mut u64,
+) -> AuditWorkerControl {
+    match out.flush() {
+        Ok(()) => AuditWorkerControl::Continue,
+        Err(err) => {
+            report_audit_worker_failure(required, path, write_failures, "flush", &err);
+            AuditWorkerControl::Stop
+        }
+    }
+}
+
 fn audit_worker(
     file: std::fs::File,
     receiver: mpsc::Receiver<AuditEvent>,
@@ -294,52 +393,12 @@ fn audit_worker(
 
     loop {
         match receiver.recv_timeout(flush_max_interval) {
-            Ok(mut event) => {
-                if event.ts_ms == 0 {
-                    event.ts_ms = now_ms();
-                }
-
-                if let Err(err) = serde_json::to_writer(&mut out, &event) {
-                    write_failures = write_failures.saturating_add(1);
-                    if required {
-                        tracing::error!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "required audit worker cannot serialize events; stopping worker"
-                        );
-                        break;
-                    }
-                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                        tracing::warn!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "failed to serialize audit event"
-                        );
-                    }
-                    continue;
-                }
-                if let Err(err) = out.write_all(b"\n") {
-                    write_failures = write_failures.saturating_add(1);
-                    if required {
-                        tracing::error!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "required audit worker cannot write events; stopping worker"
-                        );
-                        break;
-                    }
-                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                        tracing::warn!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "failed to write audit event"
-                        );
-                    }
-                    continue;
+            Ok(event) => {
+                if matches!(
+                    append_event_or_stop(&mut out, event, &path, required, &mut write_failures),
+                    AuditWorkerControl::Stop
+                ) {
+                    break;
                 }
 
                 pending = pending.saturating_add(1);
@@ -353,26 +412,11 @@ fn audit_worker(
         }
 
         if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
-            if let Err(err) = out.flush() {
-                write_failures = write_failures.saturating_add(1);
-                if required {
-                    tracing::error!(
-                        err = %err,
-                        audit_path = ?path,
-                        write_failures,
-                        "required audit worker cannot flush events; stopping worker"
-                    );
-                    break;
-                }
-                if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                    tracing::warn!(
-                        err = %err,
-                        audit_path = ?path,
-                        write_failures,
-                        "failed to flush audit log"
-                    );
-                }
-                continue;
+            if matches!(
+                flush_or_stop(&mut out, &path, required, &mut write_failures),
+                AuditWorkerControl::Stop
+            ) {
+                break;
             }
             pending = 0;
             last_flush = Instant::now();
@@ -393,10 +437,69 @@ fn audit_worker(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
     use std::{panic, sync::Arc};
 
-    use std::sync::atomic::AtomicBool;
+    struct PartialFailWriter {
+        max_success_bytes: usize,
+        written: Vec<u8>,
+        failed: bool,
+    }
+
+    impl PartialFailWriter {
+        fn new(max_success_bytes: usize) -> Self {
+            Self {
+                max_success_bytes,
+                written: Vec::new(),
+                failed: false,
+            }
+        }
+    }
+
+    impl std::io::Write for PartialFailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.failed {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "writer already failed",
+                ));
+            }
+            let remaining = self.max_success_bytes.saturating_sub(self.written.len());
+            if remaining == 0 {
+                self.failed = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "forced partial write failure",
+                ));
+            }
+            let written = remaining.min(buf.len());
+            self.written.extend_from_slice(&buf[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FlushFailWriter {
+        written: Vec<u8>,
+    }
+
+    impl std::io::Write for FlushFailWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "forced flush failure",
+            ))
+        }
+    }
 
     #[test]
     fn lock_path_for_appends_lock_suffix() {
@@ -487,5 +590,53 @@ mod tests {
             ))
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_worker_stops_after_partial_write_failure() {
+        let mut writer = PartialFailWriter::new(8);
+        let mut write_failures = 0;
+
+        let control = super::append_event_or_stop(
+            &mut writer,
+            super::minimal_event("req-1".to_string(), None, "read", 200, None),
+            Path::new("audit.jsonl"),
+            false,
+            &mut write_failures,
+        );
+
+        assert!(matches!(control, super::AuditWorkerControl::Stop));
+        assert_eq!(write_failures, 1);
+        assert!(
+            !writer.written.is_empty(),
+            "test should demonstrate a partially written JSON fragment"
+        );
+    }
+
+    #[test]
+    fn optional_worker_stops_after_flush_failure() {
+        let mut writer = FlushFailWriter {
+            written: Vec::new(),
+        };
+        let mut write_failures = 0;
+
+        let append = super::append_event_or_stop(
+            &mut writer,
+            super::minimal_event("req-1".to_string(), None, "read", 200, None),
+            Path::new("audit.jsonl"),
+            false,
+            &mut write_failures,
+        );
+        assert!(matches!(append, super::AuditWorkerControl::Continue));
+        assert_eq!(write_failures, 0);
+
+        let flush = super::flush_or_stop(
+            &mut writer,
+            Path::new("audit.jsonl"),
+            false,
+            &mut write_failures,
+        );
+        assert!(matches!(flush, super::AuditWorkerControl::Stop));
+        assert_eq!(write_failures, 1);
     }
 }
