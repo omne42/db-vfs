@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use serde::{Deserialize, Serialize};
 
 use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
@@ -280,8 +278,6 @@ pub(super) fn grep<S: crate::store::Store>(
     let mut response_bytes: usize = GREP_RESPONSE_JSON_FIXED_OVERHEAD;
     let has_redaction_rules = vfs.redactor.has_redact_rules();
     let max_line_bytes = vfs.policy.limits.max_line_bytes;
-    let redaction_overflow_replacement = has_redaction_rules
-        .then(|| clamp_char_boundary(vfs.redactor.replacement(), max_line_bytes));
     let mut after: Option<String> = None;
 
     'scan: loop {
@@ -393,6 +389,9 @@ pub(super) fn grep<S: crate::store::Store>(
                 continue;
             }
 
+            let redacted_content =
+                has_redaction_rules.then(|| vfs.redactor.redact_text_owned(content.clone()));
+            let mut redacted_lines = redacted_content.as_deref().map(str::lines);
             let mut line_no: u64 = 1;
             for line in content.lines() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
@@ -407,33 +406,24 @@ pub(super) fn grep<S: crate::store::Store>(
                         .as_ref()
                         .is_some_and(|finder| finder.find(line.as_bytes()).is_some()),
                 };
+                let redacted_line = redacted_lines
+                    .as_mut()
+                    .and_then(|lines| lines.next())
+                    .unwrap_or(line);
                 if !ok {
                     line_no = line_no.saturating_add(1);
                     continue;
                 }
 
-                let line_slice = clamp_char_boundary(line, max_line_bytes);
-                let mut line_truncated = line_slice.len() < line.len();
-                let mut text: Option<Cow<'_, str>> = None;
-                if has_redaction_rules {
-                    let redacted =
-                        match vfs.redactor.redact_text_bounded(line_slice, max_line_bytes) {
-                            Ok(text) => text,
-                            Err(_) => {
-                                line_truncated = true;
-                                Cow::Borrowed(redaction_overflow_replacement.unwrap_or_default())
-                            }
-                        };
-                    text = Some(redacted);
-                }
+                let line_slice = clamp_char_boundary(redacted_line, max_line_bytes);
+                let line_truncated = line_slice.len() < redacted_line.len();
                 let path_json_escaped_len =
                     *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
                 // Budget against JSON-encoded output size (escaped strings + object structure).
-                let entry_text = text.as_deref().unwrap_or(line_slice);
                 let entry_bytes = grep_match_json_bytes(
                     path_json_escaped_len,
                     line_no,
-                    entry_text,
+                    line_slice,
                     line_truncated,
                 )
                 .saturating_add(usize::from(!matches.is_empty()));
@@ -444,15 +434,10 @@ pub(super) fn grep<S: crate::store::Store>(
                     break 'scan;
                 }
                 response_bytes = next_response_bytes;
-                let text = match text {
-                    Some(Cow::Borrowed(text)) => text.to_string(),
-                    Some(Cow::Owned(text)) => text,
-                    None => line_slice.to_string(),
-                };
                 matches.push(GrepMatch {
                     path: path.clone(),
                     line: line_no,
-                    text,
+                    text: line_slice.to_string(),
                     line_truncated,
                 });
                 line_no = line_no.saturating_add(1);
@@ -716,6 +701,41 @@ mod tests {
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].text, "X");
         assert!(resp.matches[0].line_truncated);
+    }
+
+    #[test]
+    fn grep_uses_line_preserving_redaction_for_multiline_secret_matches() {
+        let content = "BEGIN\nsecret\nEND\npublic\n";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.secrets.redact_regexes = vec!["BEGIN\\nsecret\\nEND".to_string()];
+        policy.secrets.replacement = "REDACTED".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "BEGIN".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 1);
+        assert_eq!(resp.matches[0].text, "REDACTED");
     }
 
     #[test]

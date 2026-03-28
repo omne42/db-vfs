@@ -52,11 +52,12 @@ pub(super) fn read<S: crate::store::Store>(
         return Err(Error::NotFound("file not found".to_string()));
     };
 
-    let (mut content, version) = match (request.start_line, request.end_line) {
+    let has_redaction_rules = vfs.redactor.has_redact_rules();
+    let (mut content, version, already_redacted) = match (request.start_line, request.end_line) {
         (None, None) => {
             let (meta, content) =
                 load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, true)?;
-            (content, meta.version)
+            (content, meta.version, false)
         }
         (Some(start_line), Some(end_line)) => {
             if start_line == 0 || end_line == 0 || start_line > end_line {
@@ -66,8 +67,11 @@ pub(super) fn read<S: crate::store::Store>(
                 )));
             }
 
-            let (meta, content) =
+            let (meta, mut content) =
                 load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, false)?;
+            if has_redaction_rules {
+                content = vfs.redactor.redact_text_owned(content);
+            }
             let extracted = extract_line_range(
                 &content,
                 start_line,
@@ -76,7 +80,7 @@ pub(super) fn read<S: crate::store::Store>(
                 meta.size_bytes,
                 &requested_path,
             )?;
-            (extracted, meta.version)
+            (extracted, meta.version, has_redaction_rules)
         }
         _ => {
             return Err(Error::InvalidPath(
@@ -86,15 +90,17 @@ pub(super) fn read<S: crate::store::Store>(
     };
 
     let max_read_bytes = vfs.policy.limits.max_read_bytes;
-    let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
-    content = vfs
-        .redactor
-        .redact_text_owned_bounded(content, max_read_bytes_usize)
-        .map_err(|size| Error::FileTooLarge {
-            path: requested_path.clone(),
-            size_bytes: u64::try_from(size).unwrap_or(u64::MAX),
-            max_bytes: max_read_bytes,
-        })?;
+    if !already_redacted {
+        let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
+        content = vfs
+            .redactor
+            .redact_text_owned_bounded(content, max_read_bytes_usize)
+            .map_err(|size| Error::FileTooLarge {
+                path: requested_path.clone(),
+                size_bytes: u64::try_from(size).unwrap_or(u64::MAX),
+                max_bytes: max_read_bytes,
+            })?;
+    }
 
     let bytes_read = u64::try_from(content.len()).unwrap_or(u64::MAX);
     if bytes_read > max_read_bytes {
@@ -753,5 +759,35 @@ mod tests {
             })
             .expect_err("slice should be too large");
         assert_eq!(err.code(), "file_too_large");
+    }
+
+    #[test]
+    fn ranged_read_redacts_multiline_matches_before_extracting_lines() {
+        let content = "BEGIN\nsecret\nEND\npublic\n";
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.secrets.redact_regexes = vec!["BEGIN\\nsecret\\nEND".to_string()];
+        policy.secrets.replacement = "REDACTED".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(3),
+            })
+            .expect("ranged read");
+        assert_eq!(resp.content, "\n\n");
     }
 }
