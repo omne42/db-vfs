@@ -94,6 +94,6 @@ Common codes:
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; includes request-budgeted queue, pool, or lock wait), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.

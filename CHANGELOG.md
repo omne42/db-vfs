@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - store/sqlite+postgres: make CAS update failure classification use the row snapshot being updated, and clamp `updated_at_ms` to a monotonic floor so wall-clock rollback cannot violate persisted timestamp invariants.
 - core/policy+redaction+vfs/read+grep: default `max_walk_ms` to `Some(2000)`, reject control characters in `secrets.replacement`, and preserve line structure when redacting multi-line secret matches before ranged reads or grep responses are emitted.
 - service/runner+backend: remove undocumented `250ms` timeout headroom and keep scan DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
-- service/handlers: treat queue wait budget expiry as `408 timeout` and use the documented `not_permitted` error code for workspace allowlist rejections.
+- service/handlers: stop spending request budgets on semaphore queueing; saturated concurrency now returns `503 busy`, while `408 timeout` stays reserved for pool/lock wait and in-flight execution budgets.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/grep: add a literal-query fast reject on loaded file content so non-matching files skip per-line scan work without changing match semantics.
 - vfs/glob+grep pagination: advance the cursor only when another page is expected, trimming redundant cursor string writes on terminal pages.
 - service/request-id: saturate UNIX-millis narrowing when generating `x-request-id` to avoid lossy timestamp wrap on extreme clock values.
-- service/handlers timeout budgeting: when queue wait consumes the full request budget, fail fast before spawning blocking VFS work, avoiding guaranteed-timeout worker churn under saturation.
+- service/handlers timeout budgeting: stop queueing behind saturated semaphores so request budgets are not spent before execution starts.
 - service/handlers timeout budgeting: guard `tokio::Instant` deadline construction with `checked_add` so extremely large budgets no longer panic on overflow, and fast-fail zero-budget requests before semaphore wait.
 - vfs/grep + core/redaction: build regex error previews lazily only on compile failure, removing avoidable per-request/per-rule string allocations on successful paths.
 - vfs/read: when initial metadata reports an oversized file, re-check metadata before failing so concurrent newer/smaller versions do not return a false `file_too_large`.

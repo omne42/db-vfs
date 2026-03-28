@@ -56,7 +56,7 @@ Use this template for each failure:
 - Immediate checks: `limits.max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`.
 - Fix: tune concurrency, reduce expensive operations.
 - Retry: yes, with bounded retries.
-- Success criteria: queue drains and requests recover to normal latencies.
+- Success criteria: available slots recover and requests return to normal latencies.
 
 ## `415 unsupported_media_type`
 
