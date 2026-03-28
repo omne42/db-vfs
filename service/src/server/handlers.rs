@@ -92,7 +92,48 @@ fn redact_path_pair(
 }
 
 fn redact_glob_pattern(redactor: &db_vfs_core::redaction::SecretRedactor, pattern: &str) -> String {
-    redact_path(redactor, pattern)
+    if is_path_or_descendant_denied(redactor, pattern) {
+        return "<secret>".to_string();
+    }
+
+    for probe in glob_redaction_probes(pattern) {
+        if is_path_or_descendant_denied(redactor, &probe) {
+            return "<secret>".to_string();
+        }
+    }
+
+    pattern.to_string()
+}
+
+fn glob_redaction_probes(pattern: &str) -> Vec<String> {
+    let mut collapsed = String::with_capacity(pattern.len());
+    let mut saw_slash = false;
+    for ch in pattern.trim().chars() {
+        if ch == '/' {
+            if !collapsed.is_empty() && !saw_slash {
+                collapsed.push('/');
+            }
+            saw_slash = true;
+            continue;
+        }
+        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | ',' | '!') {
+            continue;
+        }
+        collapsed.push(ch);
+        saw_slash = false;
+    }
+
+    let collapsed = collapsed.trim_matches('/').to_string();
+    if collapsed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut probes = vec![collapsed.clone()];
+    let trimmed = collapsed.trim_end_matches(['.', '-', '_']);
+    if !trimmed.is_empty() && trimmed != collapsed {
+        probes.push(trimmed.to_string());
+    }
+    probes
 }
 
 fn audit_event_base(
@@ -726,6 +767,9 @@ mod tests {
         assert_eq!(redact_path(&redactor, ".git/"), "<secret>");
         assert_eq!(redact_path(&redactor, ".git"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".git"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, "docs/*.txt"), "docs/*.txt");
         assert_eq!(redact_path(&redactor, "docs"), "docs");
     }
 

@@ -288,9 +288,28 @@ fn audit_worker(
     flush_max_interval: Duration,
 ) {
     let mut out = BufWriter::new(file);
+    audit_worker_with_writer(
+        &mut out,
+        receiver,
+        &path,
+        required,
+        flush_every_events,
+        flush_max_interval,
+    );
+}
+
+fn audit_worker_with_writer<W: Write>(
+    out: &mut BufWriter<W>,
+    receiver: mpsc::Receiver<AuditEvent>,
+    path: &Path,
+    required: bool,
+    flush_every_events: usize,
+    flush_max_interval: Duration,
+) {
     let mut write_failures: u64 = 0;
     let mut pending: usize = 0;
     let mut last_flush: Instant = Instant::now();
+    let mut writer_failed = false;
 
     loop {
         match receiver.recv_timeout(flush_max_interval) {
@@ -299,47 +318,29 @@ fn audit_worker(
                     event.ts_ms = now_ms();
                 }
 
-                if let Err(err) = serde_json::to_writer(&mut out, &event) {
+                if let Err(err) = serde_json::to_writer(&mut *out, &event) {
                     write_failures = write_failures.saturating_add(1);
-                    if required {
-                        tracing::error!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "required audit worker cannot serialize events; stopping worker"
-                        );
-                        break;
-                    }
-                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                        tracing::warn!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "failed to serialize audit event"
-                        );
-                    }
-                    continue;
+                    writer_failed = true;
+                    log_unrecoverable_write_failure(
+                        required,
+                        path,
+                        write_failures,
+                        &err,
+                        "serialize audit event",
+                    );
+                    break;
                 }
                 if let Err(err) = out.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
-                    if required {
-                        tracing::error!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "required audit worker cannot write events; stopping worker"
-                        );
-                        break;
-                    }
-                    if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                        tracing::warn!(
-                            err = %err,
-                            audit_path = ?path,
-                            write_failures,
-                            "failed to write audit event"
-                        );
-                    }
-                    continue;
+                    writer_failed = true;
+                    log_unrecoverable_write_failure(
+                        required,
+                        path,
+                        write_failures,
+                        &err,
+                        "append audit newline",
+                    );
+                    break;
                 }
 
                 pending = pending.saturating_add(1);
@@ -355,31 +356,23 @@ fn audit_worker(
         if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
             if let Err(err) = out.flush() {
                 write_failures = write_failures.saturating_add(1);
-                if required {
-                    tracing::error!(
-                        err = %err,
-                        audit_path = ?path,
-                        write_failures,
-                        "required audit worker cannot flush events; stopping worker"
-                    );
-                    break;
-                }
-                if write_failures == 1 || write_failures.is_multiple_of(1000) {
-                    tracing::warn!(
-                        err = %err,
-                        audit_path = ?path,
-                        write_failures,
-                        "failed to flush audit log"
-                    );
-                }
-                continue;
+                writer_failed = true;
+                log_unrecoverable_write_failure(
+                    required,
+                    path,
+                    write_failures,
+                    &err,
+                    "flush audit log",
+                );
+                break;
             }
             pending = 0;
             last_flush = Instant::now();
         }
     }
 
-    if pending > 0
+    if !writer_failed
+        && pending > 0
         && let Err(err) = out.flush()
     {
         tracing::warn!(
@@ -390,13 +383,87 @@ fn audit_worker(
     }
 }
 
+fn log_unrecoverable_write_failure(
+    required: bool,
+    path: &Path,
+    write_failures: u64,
+    err: &dyn std::fmt::Display,
+    stage: &'static str,
+) {
+    if required {
+        tracing::error!(
+            err = %err,
+            audit_path = ?path,
+            write_failures,
+            stage,
+            "required audit worker cannot continue after write failure; stopping worker"
+        );
+        return;
+    }
+
+    tracing::warn!(
+        err = %err,
+        audit_path = ?path,
+        write_failures,
+        stage,
+        "audit worker cannot continue after write failure; stopping worker to avoid corrupting later JSONL"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::time::Duration;
     use std::{panic, sync::Arc};
 
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FailAfterPartialWrite {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        partial_bytes: usize,
+        pending_error: bool,
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl FailAfterPartialWrite {
+        fn new(partial_bytes: usize) -> (Self, Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>) {
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let writes = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    bytes: bytes.clone(),
+                    partial_bytes,
+                    pending_error: false,
+                    writes: writes.clone(),
+                },
+                bytes,
+                writes,
+            )
+        }
+    }
+
+    impl std::io::Write for FailAfterPartialWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            if self.pending_error {
+                return Err(std::io::Error::other("synthetic audit writer failure"));
+            }
+
+            let written = buf.len().min(self.partial_bytes.max(1));
+            self.partial_bytes = self.partial_bytes.saturating_sub(written);
+            self.pending_error = self.partial_bytes == 0;
+            self.bytes
+                .lock()
+                .expect("lock audit bytes")
+                .extend_from_slice(&buf[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn lock_path_for_appends_lock_suffix() {
@@ -487,5 +554,55 @@ mod tests {
             ))
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_audit_worker_stops_after_partial_write_failure() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(super::minimal_event(
+                "req-1".to_string(),
+                None,
+                "read",
+                200,
+                None,
+            ))
+            .expect("send first event");
+        sender
+            .send(super::minimal_event(
+                "req-2".to_string(),
+                None,
+                "read",
+                200,
+                None,
+            ))
+            .expect("send second event");
+        drop(sender);
+
+        let (writer, bytes, writes) = FailAfterPartialWrite::new(64);
+        let mut out = std::io::BufWriter::with_capacity(1, writer);
+
+        super::audit_worker_with_writer(
+            &mut out,
+            receiver,
+            Path::new("audit.jsonl"),
+            false,
+            1,
+            Duration::from_millis(1),
+        );
+
+        let raw = String::from_utf8(bytes.lock().expect("lock bytes").clone()).expect("utf8");
+        assert!(
+            raw.contains("req-1"),
+            "first event should have started writing before the synthetic failure"
+        );
+        assert!(
+            !raw.contains("req-2"),
+            "worker should stop before attempting later events after the stream becomes unreliable"
+        );
+        assert!(
+            writes.load(Ordering::Relaxed) >= 2,
+            "test writer should observe the retry that surfaces the failure"
+        );
     }
 }
