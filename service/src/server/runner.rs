@@ -227,12 +227,12 @@ mod tests {
 
         let run = tokio::spawn(async move {
             run_blocking(
-                Some(Duration::from_millis(10)),
+                Some(Duration::from_millis(100)),
                 permit,
                 None,
                 move || -> db_vfs::Result<()> {
                     let _ = started_tx.send(());
-                    std::thread::sleep(Duration::from_millis(80));
+                    std::thread::sleep(Duration::from_millis(250));
                     Ok(())
                 },
             )
