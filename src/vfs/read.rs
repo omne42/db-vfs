@@ -75,7 +75,7 @@ pub(super) fn read<S: crate::store::Store>(
                     &request.workspace_id,
                     &requested_path,
                     meta,
-                    false,
+                    true,
                 )?;
                 let content = vfs
                     .redactor
@@ -1058,6 +1058,93 @@ mod tests {
                 end_line: Some(2),
             })
             .expect_err("redacted whole-file intermediate should stay budgeted");
+        assert_eq!(err.code(), "file_too_large");
+    }
+
+    struct OversizedRedactionInputStore {
+        meta: FileMeta,
+    }
+
+    impl Store for OversizedRedactionInputStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            Ok(Some(self.meta.clone()))
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            panic!("oversized redaction path should fail before loading full content")
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn ranged_read_with_redaction_rules_rejects_oversized_raw_input_before_loading_content() {
+        let store = OversizedRedactionInputStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 1024,
+                version: 1,
+                updated_at_ms: 0,
+            },
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 8;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+        policy.secrets.replacement = "x".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(1),
+                end_line: Some(1),
+            })
+            .expect_err("oversized raw content should fail before full-content load");
         assert_eq!(err.code(), "file_too_large");
     }
 }
