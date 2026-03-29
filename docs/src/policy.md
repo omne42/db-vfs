@@ -68,6 +68,9 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
+- Redaction-expanded intermediates are still budgeted by `limits.max_read_bytes`; when that
+  bounded redaction cannot stay within budget, ranged `read` fails with `file_too_large` and
+  `grep` counts the file under `skipped_too_large_files`.
 
 ## Audit behavior matrix
 
@@ -80,10 +83,11 @@ Secrets semantics:
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
 
-When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
+When audit is enabled and `audit.required = true`, runtime behavior is response-gated: each request
 waits for its audit record to append+flush successfully, the originating concurrency permit stays
 held until that wait finishes, and the same request runtime budget continues to cover the required
 audit wait. Losing the audit worker, write/flush failures, or exhausting the remaining request
 budget turns into a visible `503 audit_unavailable` failure instead of silent event loss or a
-panic-driven connection abort. That error means the request outcome may already be committed, so
-callers should verify state before retrying non-idempotent writes.
+panic-driven connection abort. This still is not a cross-store transaction with the VFS backend,
+so that error can arrive after the underlying mutation has already been committed; callers should
+verify state before retrying non-idempotent writes.

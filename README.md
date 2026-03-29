@@ -76,9 +76,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
-Line-range `read` still enforces `max_read_bytes` on the returned slice, but when secret
-redaction rules are active the redacted whole-file intermediate must also fit within the same
-budget; otherwise the request fails with `file_too_large` before slice extraction.
+Line-range `read` enforces `max_read_bytes` on the returned slice when no secret redaction rules
+apply. If `secrets.redact_regexes` is enabled, ranged reads still have to budget the whole
+redacted intermediate and may return `file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -114,6 +114,7 @@ Budget semantics:
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
 - SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
+- Redaction-expanded intermediates are also bounded by `max_read_bytes`; ranged `read` fails and `grep` counts the file as too large if secret redaction cannot stay inside that budget.
 
 Secrets semantics:
 
@@ -126,14 +127,15 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
-- With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
-  audit record to append+flush successfully, keeps its originating concurrency slot until that
-  wait finishes, and uses the same request runtime budget for the required audit wait; worker loss
-  or audit-budget exhaustion turns audited traffic into a visible availability failure instead of
-  silently dropping events.
+- With `audit.required = true`, the service gates each HTTP response on append+flush success: each
+  request waits for its audit record to append+flush successfully, keeps its originating
+  concurrency slot until that wait finishes, and uses the same request runtime budget for the
+  required audit wait; worker loss or audit-budget exhaustion turns audited traffic into a visible
+  availability failure instead of silently dropping events.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
-  the operation may already have completed, so clients should verify state before retrying writes.
-  The same error is used when required audit cannot finish within the request's remaining runtime budget.
+  this is not a cross-store transaction, so the operation may already have completed and clients
+  should verify state before retrying writes. The same error is used when required audit cannot
+  finish within the request's remaining runtime budget.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 

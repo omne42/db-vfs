@@ -111,9 +111,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
-Line-range `read` still enforces `max_read_bytes` on the returned slice, but when secret
-redaction rules are active the redacted whole-file intermediate must also fit within the same
-budget; otherwise the request fails with `file_too_large` before slice extraction.
+Line-range `read` enforces `max_read_bytes` on the returned slice when no secret redaction rules
+apply. If `secrets.redact_regexes` is enabled, ranged reads still have to budget the whole
+redacted intermediate and may return `file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -149,6 +149,7 @@ Budget semantics:
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
 - SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
+- Redaction-expanded intermediates are also bounded by `max_read_bytes`; ranged `read` fails and `grep` counts the file as too large if secret redaction cannot stay inside that budget.
 
 Secrets semantics:
 
@@ -161,14 +162,15 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
-- With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
-  audit record to append+flush successfully, keeps its originating concurrency slot until that
-  wait finishes, and uses the same request runtime budget for the required audit wait; worker loss
-  or audit-budget exhaustion turns audited traffic into a visible availability failure instead of
-  silently dropping events.
+- With `audit.required = true`, the service gates each HTTP response on append+flush success: each
+  request waits for its audit record to append+flush successfully, keeps its originating
+  concurrency slot until that wait finishes, and uses the same request runtime budget for the
+  required audit wait; worker loss or audit-budget exhaustion turns audited traffic into a visible
+  availability failure instead of silently dropping events.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
-  the operation may already have completed, so clients should verify state before retrying writes.
-  The same error is used when required audit cannot finish within the request's remaining runtime budget.
+  this is not a cross-store transaction, so the operation may already have completed and clients
+  should verify state before retrying writes. The same error is used when required audit cannot
+  finish within the request's remaining runtime budget.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -343,7 +345,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
+- core/redaction+vfs/read+grep+docs: make `SecretRedactor::from_rules()` validate `secrets.replacement` on its own public boundary, bound redaction-expanded intermediates by `max_read_bytes` in ranged `read`/`grep`, and document that `audit.required=true` gates HTTP responses without making audit append atomic with the underlying VFS mutation.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
 - store/sqlite+postgres: persist per-path version generations across delete/recreate so stale `expected_version` values cannot match a newly recreated file, and add regression coverage for SQLite, Postgres store integration, and Postgres HTTP smoke paths.
@@ -786,6 +788,9 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
+- Redaction-expanded intermediates are still budgeted by `limits.max_read_bytes`; when that
+  bounded redaction cannot stay within budget, ranged `read` fails with `file_too_large` and
+  `grep` counts the file under `skipped_too_large_files`.
 
 ## Audit behavior matrix
 
@@ -798,13 +803,14 @@ Secrets semantics:
 
 `flush_every_events` and `flush_max_interval_ms` are valid only when `jsonl_path` is set.
 
-When audit is enabled and `audit.required = true`, runtime behavior is fail-closed: each request
+When audit is enabled and `audit.required = true`, runtime behavior is response-gated: each request
 waits for its audit record to append+flush successfully, the originating concurrency permit stays
 held until that wait finishes, and the same request runtime budget continues to cover the required
 audit wait. Losing the audit worker, write/flush failures, or exhausting the remaining request
 budget turns into a visible `503 audit_unavailable` failure instead of silent event loss or a
-panic-driven connection abort. That error means the request outcome may already be committed, so
-callers should verify state before retrying non-idempotent writes.
+panic-driven connection abort. This still is not a cross-store transaction with the VFS backend,
+so that error can arrive after the underlying mutation has already been committed; callers should
+verify state before retrying non-idempotent writes.
 
 
 ---
@@ -833,7 +839,7 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice, but redaction-enabled ranged reads also require the redacted whole-file intermediate to stay within that budget |
+| `start_line` | u64|null | no | must pair with `end_line`; without secret redaction rules `max_read_bytes` applies to the returned slice, but redacted ranged reads may still fail earlier if the whole redacted intermediate exceeds budget |
 | `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and over-budget redacted intermediates fail as `file_too_large` before slice extraction |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
@@ -889,8 +895,8 @@ shape as `glob`).
 
 `matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
-If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
-counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
+If redacting a file would expand the intermediate text beyond `max_read_bytes`, that file is
+counted as `skipped_too_large_files` instead of being scanned further.
 
 ## Path normalization rules
 
@@ -917,8 +923,10 @@ Common codes:
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
 `audit_unavailable` means required audit append/flush failed after request handling started. The
-operation may already have completed, so callers should verify state before replaying writes. This
-also covers required-audit waits that overrun the originating request's remaining runtime budget.
+service withholds the HTTP response on audit success, but it does not make the VFS store mutation
+and JSONL append atomic, so the operation may already have completed; callers should verify state
+before replaying writes. This also covers required-audit waits that overrun the originating
+request's remaining runtime budget.
 
 `busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending

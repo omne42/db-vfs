@@ -30,12 +30,14 @@
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
-  - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
+  - `audit.required = true` 是运行期的 response-gating 语义：请求必须等到对应 audit 记录
     append+flush 成功才返回；对应的 `max_concurrency_*` permit 会一直持有到 audit wait
     结束，避免请求在“已执行但未完成审计”时提前把并发槽位还回去。
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - 这个边界不是“DB 变更 + 外部 JSONL append”的原子事务；`503 audit_unavailable`
+    仍然可能出现在底层 VFS 操作已经落库之后，所以调用方重试写请求前必须先校验状态。
   - crate 兼容构造器 `DbVfs::new_with_matchers_validated` 不允许因为 policy-derived
     matcher 无法重建而 panic；这类状态必须转成可控的 `invalid_policy` 错误。
 - 面向运维和集成者的 API / policy / security 文档
