@@ -162,8 +162,10 @@ impl<S: Store> DbVfs<S> {
         {
             (redactor, traversal)
         } else {
-            let (policy_redactor, policy_traversal) =
-                Self::build_matchers(policy.as_ref()).expect("ValidatedVfsPolicy invariant broken");
+            let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
+                Ok(matchers) => matchers,
+                Err(err) => unreachable!("ValidatedVfsPolicy invariant broken: {err}"),
+            };
             (Arc::new(policy_redactor), Arc::new(policy_traversal))
         };
         Self {
