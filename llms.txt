@@ -111,7 +111,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
-Line-range `read` enforces `max_read_bytes` on the returned slice, not on the whole backing file.
+Line-range `read` still enforces `max_read_bytes` on the returned slice, but when secret
+redaction rules are active the redacted whole-file intermediate must also fit within the same
+budget; otherwise the request fails with `file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -151,7 +153,9 @@ Budget semantics:
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
+- `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
+- `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
 
 ## Observability / Audit
 
@@ -339,6 +343,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
 - store/sqlite+postgres: persist per-path version generations across delete/recreate so stale `expected_version` values cannot match a newly recreated file, and add regression coverage for SQLite, Postgres store integration, and Postgres HTTP smoke paths.
@@ -828,8 +833,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice after redaction |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice, but redaction-enabled ranged reads also require the redacted whole-file intermediate to stay within that budget |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and over-budget redacted intermediates fail as `file_too_large` before slice extraction |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -884,6 +889,8 @@ shape as `glob`).
 
 `matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
+If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
+counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
 
 ## Path normalization rules
 

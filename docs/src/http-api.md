@@ -18,8 +18,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice after redaction |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice, but redaction-enabled ranged reads also require the redacted whole-file intermediate to stay within that budget |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and over-budget redacted intermediates fail as `file_too_large` before slice extraction |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -74,6 +74,8 @@ shape as `glob`).
 
 `matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
+If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
+counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
 
 ## Path normalization rules
 
