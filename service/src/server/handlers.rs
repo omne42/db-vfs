@@ -70,7 +70,25 @@ fn is_path_or_descendant_denied(
     descendant_probe.push_str(trimmed);
     descendant_probe.push('/');
     descendant_probe.push_str("__db_vfs_audit_probe__");
-    redactor.is_path_denied(&descendant_probe)
+    if redactor.is_path_denied(&descendant_probe) {
+        return true;
+    }
+
+    for probe in path_redaction_probes(path) {
+        if redactor.is_path_denied(&probe) {
+            return true;
+        }
+
+        let mut descendant_probe = String::with_capacity(probe.len().saturating_add(24));
+        descendant_probe.push_str(&probe);
+        descendant_probe.push('/');
+        descendant_probe.push_str("__db_vfs_audit_probe__");
+        if redactor.is_path_denied(&descendant_probe) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) -> String {
@@ -160,6 +178,53 @@ fn glob_redaction_probes(pattern: &str) -> Vec<String> {
     }
 
     probes
+}
+
+fn path_redaction_probes(path: &str) -> Vec<String> {
+    const MAX_PATH_PROBES: usize = 64;
+
+    let normalized = path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut probes = Vec::new();
+    let mut current = String::new();
+    for segment in normalized
+        .split('/')
+        .map(sanitize_path_probe_segment)
+        .filter(|segment| !segment.is_empty())
+    {
+        if segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            current.clear();
+            continue;
+        }
+
+        push_unique(&mut probes, segment.clone(), MAX_PATH_PROBES);
+        let joined = if current.is_empty() {
+            segment
+        } else {
+            format!("{current}/{segment}")
+        };
+        push_unique(&mut probes, joined.clone(), MAX_PATH_PROBES);
+        current = joined;
+        if probes.len() >= MAX_PATH_PROBES {
+            break;
+        }
+    }
+
+    probes
+}
+
+fn sanitize_path_probe_segment(segment: &str) -> String {
+    segment
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 fn glob_segment_probe_variants(segment: &str) -> Vec<String> {
@@ -922,7 +987,8 @@ pub(super) async fn grep(
 mod tests {
     use super::{
         acquire_permit_then_parse_json, acquire_permit_with_budget, audit_preview,
-        glob_redaction_probes, redact_glob_pattern, redact_path, redact_path_pair,
+        glob_redaction_probes, path_redaction_probes, redact_glob_pattern, redact_path,
+        redact_path_pair,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -978,6 +1044,32 @@ mod tests {
         let (requested_path, path) = redact_path_pair(&redactor, "docs/a.txt", "docs/a.txt");
         assert_eq!(requested_path, "docs/a.txt");
         assert_eq!(path, "docs/a.txt");
+    }
+
+    #[test]
+    fn redact_path_hides_secretish_malformed_paths() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert_eq!(redact_path(&redactor, ".env/../visible.txt"), "<secret>");
+        assert_eq!(
+            redact_path(&redactor, "docs/.git/\u{0000}config"),
+            "<secret>"
+        );
+        assert_eq!(
+            redact_path(&redactor, "docs/../visible.txt"),
+            "docs/../visible.txt"
+        );
+    }
+
+    #[test]
+    fn path_redaction_probes_keep_secret_segments_from_malformed_paths() {
+        let probes = path_redaction_probes(".env/../visible.txt");
+        assert!(probes.iter().any(|probe| probe == ".env"));
+        assert!(probes.iter().any(|probe| probe == "visible.txt"));
+
+        let probes = path_redaction_probes("docs/.git/\u{0000}config");
+        assert!(probes.iter().any(|probe| probe == ".git"));
+        assert!(probes.iter().any(|probe| probe == "docs/.git"));
     }
 
     #[tokio::test]
