@@ -274,6 +274,112 @@ mod tests {
     use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::VfsPolicy;
 
+    struct PrefixFilteringStore {
+        rows: Vec<FileMeta>,
+    }
+
+    impl Store for PrefixFilteringStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self
+                .rows
+                .iter()
+                .filter(|meta| meta.path.starts_with(prefix))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn glob_allows_root_exact_file_patterns_without_full_scan() {
+        let store = PrefixFilteringStore {
+            rows: vec![
+                FileMeta {
+                    path: "README.md".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "README.md.bak".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/README.md".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ],
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "README.md".to_string(),
+                path_prefix: None,
+            })
+            .expect("glob");
+
+        assert_eq!(resp.matches, vec!["README.md".to_string()]);
+        assert_eq!(resp.scanned_entries, 2);
+        assert_eq!(resp.scanned_files, 2);
+    }
+
     struct NonMonotonicPageStore {
         row: FileMeta,
     }
