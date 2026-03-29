@@ -28,6 +28,9 @@
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
+  - `auth.tokens[*].token_env_var` 只承载明文 bearer token；预哈希输入只允许放在
+    `auth.tokens[*].token`。把字面 `sha256:<hex>` 放进 `token_env_var` 必须在启动时直接拒绝，
+    不能被当成预哈希 token 接受。
   - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
