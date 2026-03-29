@@ -15,11 +15,12 @@
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
-  - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
+  - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界，validated matcher 构造器遇到不匹配时也必须直接报错，不能静默 fallback 到 policy-derived matcher。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
   - redaction 路径的原始输入和中间结果都必须受 `max_read_bytes` 约束；当 ranged `read`
     或 `grep` 需要 whole-file redaction 时，raw content 和 redacted whole-file intermediate
     任何一侧超出预算都必须显式失败/跳过，而不是继续无界分配。
+  - `grep` 必须在 redaction 之后做匹配；调用方不能通过“是否命中”来探测被隐藏的 secret 子串是否存在。
   - scan 内存预算要按 redaction 放大系数计入；启用 `secrets.redact_regexes` 时，service
     需要按每个 in-flight scan 最多同时持有一份原文和一份有界 redacted copy 来估算容量，
     不能只按单 buffer 估算。
@@ -45,8 +46,8 @@
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
-    `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
-    panic，也不需要把这类状态延后到运行期才暴露。
+    validated constructor family 可以在构造期稳定暴露 matcher/policy 失配，而不是把
+    panic 或 fallback 状态拖到运行期。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
 - 面向运维和集成者的 API / policy / security 文档

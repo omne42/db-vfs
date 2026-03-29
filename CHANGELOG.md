@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
-- vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
+- vfs/core: reject caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so validated constructors cannot silently rewrite matcher inputs or bypass `secrets.deny_globs` / `traversal.skip_globs`.
 - store/sqlite+postgres: persist per-path version generations across delete/recreate so stale `expected_version` values cannot match a newly recreated file, and add regression coverage for SQLite, Postgres store integration, and Postgres HTTP smoke paths.
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
 - service/auth+audit+sqlite: reject plaintext env-backed tokens that violate HTTP Bearer token syntax, reject literal `sha256:<hex>` values in `token_env_var` instead of treating them as pre-hashed secrets, return stable `503 audit_unavailable` errors when required audit append/flush fails, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/handlers: stop spending request budgets on semaphore queueing; saturated concurrency now returns `503 busy`, while `408 timeout` stays reserved for pool/lock wait and in-flight execution budgets.
 - service/audit-handlers: switch path/glob audit redaction helpers to borrowed-string inputs and avoid eager response-path cloning in read/write/patch/delete audit hooks, reducing per-request transient allocations without changing redaction behavior.
 - core/path+redaction+traversal+vfs/glob-match: centralize runtime canonical-path checks into a shared single-pass helper, removing duplicated multi-scan validators and preventing matcher-behavior drift across modules.
+- vfs/grep: apply literal/regex matching to redacted line content itself so hidden secrets no longer leak through hit/miss side channels.
 - service/auth: validate workspace wildcard syntax during auth-rule compilation and reject invalid trailing `*` patterns early, avoiding silent runtime no-match configs while removing redundant per-request wildcard-shape checks.
 - core/path: add an ASCII fast path for `workspace_id` validation to reduce per-request character-class overhead on common hot-path inputs.
 - service/auth: precompile `allowed_workspaces` patterns at startup and decode `sha256:` token hashes directly into fixed-size buffers, reducing per-request auth matching overhead and startup-time transient allocations.
@@ -132,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
 - tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.
 - tests: add regression coverage for required-audit worker loss returning stable `503 audit_unavailable` errors.
+- tests: add router-level regressions covering both authorized write paths and unauthorized early rejects when required audit logging fails closed.
 
 ## [0.1.0] - 2026-01-31
 

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use globset::GlobMatcher;
@@ -7,8 +6,10 @@ use db_vfs_core::glob_utils::{
     build_glob_from_normalized, normalize_glob_pattern_for_matching,
     validate_normalized_root_relative_glob_pattern,
 };
-use db_vfs_core::path::is_canonical_runtime_relative_path;
+use db_vfs_core::path::normalize_runtime_path_for_matching;
 use db_vfs_core::{Error, Result};
+
+use crate::store::FileMeta;
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
 
@@ -90,60 +91,9 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(glob.compile_matcher())
 }
 
-fn is_canonical_runtime_path(path: &str) -> bool {
-    is_canonical_runtime_relative_path(path)
-}
-
-fn strip_leading_dot_slashes(mut s: &str) -> &str {
-    while let Some(rest) = s.strip_prefix("./") {
-        s = rest;
-    }
-    s
-}
-
-fn strip_leading_slashes(s: &str) -> &str {
-    s.trim_start_matches('/')
-}
-
 pub(super) fn glob_is_match(glob: &GlobMatcher, path: &str) -> bool {
-    if is_canonical_runtime_path(path) {
-        return glob.is_match(std::path::Path::new(path));
-    }
-
-    let trimmed = path.trim();
-    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
-        Cow::Owned(trimmed.replace('\\', "/"))
-    } else {
-        Cow::Borrowed(trimmed)
-    };
-    let normalized = strip_leading_dot_slashes(normalized.as_ref());
-    let normalized = strip_leading_slashes(normalized);
-    if normalized.is_empty()
-        || normalized.contains('\0')
-        || normalized.chars().any(char::is_control)
-    {
-        return false;
-    }
-
-    let mut out = String::with_capacity(normalized.len());
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return false;
-        }
-        if !out.is_empty() {
-            out.push('/');
-        }
-        out.push_str(segment);
-    }
-
-    if out.is_empty() {
-        return false;
-    }
-
-    glob.is_match(std::path::Path::new(&out))
+    normalize_runtime_path_for_matching(path)
+        .is_some_and(|normalized| glob.is_match(std::path::Path::new(normalized.as_ref())))
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
@@ -186,6 +136,59 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
     Some(prefix)
 }
 
+pub(super) fn ensure_page_strictly_increasing(metas: &[FileMeta], op: &'static str) -> Result<()> {
+    for pair in metas.windows(2) {
+        if pair[0].path >= pair[1].path {
+            return Err(Error::Db(format!(
+                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
+                pair[0].path, pair[1].path
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_page_starts_after_cursor(
+    metas: &[FileMeta],
+    after: Option<&str>,
+    op: &'static str,
+) -> Result<()> {
+    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
+        return Ok(());
+    };
+    if first.path.as_str() <= prev_after {
+        return Err(Error::Db(format!(
+            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
+            first.path
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn advance_after_cursor(
+    after: &mut Option<String>,
+    metas: &[FileMeta],
+    op: &'static str,
+) -> Result<()> {
+    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
+        return Ok(());
+    };
+    if let Some(prev_after) = after.as_ref()
+        && next_after <= prev_after.as_str()
+    {
+        return Err(Error::Db(format!(
+            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
+        )));
+    }
+    if let Some(cursor) = after.as_mut() {
+        cursor.clear();
+        cursor.push_str(next_after);
+    } else {
+        *after = Some(next_after.to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,11 +211,21 @@ mod tests {
 
     #[test]
     fn canonical_runtime_path_detection_is_strict() {
-        assert!(is_canonical_runtime_path("docs/a.txt"));
-        assert!(!is_canonical_runtime_path("./docs/a.txt"));
-        assert!(!is_canonical_runtime_path("/docs/a.txt"));
-        assert!(!is_canonical_runtime_path("docs//a.txt"));
-        assert!(!is_canonical_runtime_path("docs/a.txt/"));
+        assert!(db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "./docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "/docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs//a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs/a.txt/"
+        ));
     }
 
     #[test]

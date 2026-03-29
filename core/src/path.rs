@@ -209,6 +209,59 @@ pub fn normalize_path_prefix(prefix: &str) -> Result<String> {
     normalize_path_inner(prefix, PathKind::Prefix)
 }
 
+fn strip_leading_runtime_match_prefixes(mut s: &str) -> &str {
+    loop {
+        if let Some(rest) = s.strip_prefix("./") {
+            s = rest;
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix('/') {
+            s = rest;
+            continue;
+        }
+        return s;
+    }
+}
+
+pub fn normalize_runtime_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
+    if is_canonical_runtime_relative_path(path) {
+        return Some(Cow::Borrowed(path));
+    }
+
+    let trimmed = path.trim();
+    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
+        Cow::Owned(trimmed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(trimmed)
+    };
+    let normalized = strip_leading_runtime_match_prefixes(normalized.as_ref());
+    if normalized.is_empty() || normalized.contains('\0') {
+        return None;
+    }
+    if normalized.chars().any(char::is_control) {
+        return None;
+    }
+
+    let mut out = String::with_capacity(normalized.len());
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return None;
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(segment);
+    }
+
+    if out.is_empty() {
+        return None;
+    }
+    Some(Cow::Owned(out))
+}
+
 #[derive(Clone, Copy)]
 enum PathKind {
     File,
@@ -461,5 +514,23 @@ mod tests {
         assert!(!is_canonical_runtime_relative_path(" docs/a.txt"));
         assert!(!is_canonical_runtime_relative_path("docs/a.txt "));
         assert!(!is_canonical_runtime_relative_path("docs\\a.txt"));
+    }
+
+    #[test]
+    fn normalize_runtime_path_for_matching_canonicalizes_matcher_inputs() {
+        assert_eq!(
+            normalize_runtime_path_for_matching("././docs//a.txt")
+                .unwrap()
+                .as_ref(),
+            "docs/a.txt"
+        );
+        assert_eq!(
+            normalize_runtime_path_for_matching("///./docs/a.txt")
+                .unwrap()
+                .as_ref(),
+            "docs/a.txt"
+        );
+        assert_eq!(normalize_runtime_path_for_matching("docs/../a.txt"), None);
+        assert_eq!(normalize_runtime_path_for_matching("docs/\na.txt"), None);
     }
 }

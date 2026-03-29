@@ -6,8 +6,9 @@ use db_vfs_core::{Error, Result};
 use regex_syntax::hir::{Class, Hir, HirKind};
 
 use super::util::{
-    compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
-    u64_decimal_len,
+    advance_after_cursor, compile_glob, derive_safe_prefix_from_glob, elapsed_ms,
+    ensure_page_starts_after_cursor, ensure_page_strictly_increasing, glob_is_match,
+    json_escaped_str_len, u64_decimal_len,
 };
 use super::{DbVfs, ScanLimitReason};
 
@@ -64,62 +65,6 @@ const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
 const META_PAGE_SIZE: usize = 2048;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
-
-fn advance_after_cursor(
-    after: &mut Option<String>,
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
-        return Ok(());
-    };
-    if let Some(prev_after) = after.as_ref()
-        && next_after <= prev_after.as_str()
-    {
-        return Err(Error::Db(format!(
-            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
-        )));
-    }
-    if let Some(cursor) = after.as_mut() {
-        cursor.clear();
-        cursor.push_str(next_after);
-    } else {
-        *after = Some(next_after.to_string());
-    }
-    Ok(())
-}
-
-fn ensure_page_strictly_increasing(
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    for pair in metas.windows(2) {
-        if pair[0].path >= pair[1].path {
-            return Err(Error::Db(format!(
-                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
-                pair[0].path, pair[1].path
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_page_starts_after_cursor(
-    metas: &[crate::store::FileMeta],
-    after: Option<&str>,
-    op: &'static str,
-) -> Result<()> {
-    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
-        return Ok(());
-    };
-    if first.path.as_str() <= prev_after {
-        return Err(Error::Db(format!(
-            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
-            first.path
-        )));
-    }
-    Ok(())
-}
 
 fn grep_match_json_bytes(
     path_json_escaped_len: usize,
@@ -435,31 +380,28 @@ pub(super) fn grep<S: crate::store::Store>(
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
                 continue;
             }
-            if let Some(finder) = literal_finder.as_ref()
-                && finder.find(content.as_bytes()).is_none()
-            {
-                continue;
-            }
-
-            let redacted_content = if has_redaction_rules {
+            let searchable = if has_redaction_rules {
                 match vfs
                     .redactor
-                    .redact_text_bounded(content.as_str(), max_read_bytes_usize)
+                    .redact_text_owned_bounded(content, max_read_bytes_usize)
                 {
-                    Ok(redacted) => Some(redacted),
+                    Ok(redacted) => redacted,
                     Err(_) => {
                         skipped_too_large_files = skipped_too_large_files.saturating_add(1);
                         continue;
                     }
                 }
             } else {
-                None
+                content
             };
-            let mut redacted_lines = redacted_content
-                .as_ref()
-                .map(|redacted| redacted.as_ref().lines());
+            if let Some(finder) = literal_finder.as_ref()
+                && finder.find(searchable.as_bytes()).is_none()
+            {
+                continue;
+            }
+
             let mut line_no: u64 = 1;
-            for line in content.lines() {
+            for line in searchable.lines() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                     scan_limit_reached = true;
                     scan_limit_reason = Some(ScanLimitReason::Time);
@@ -472,17 +414,13 @@ pub(super) fn grep<S: crate::store::Store>(
                         .as_ref()
                         .is_some_and(|finder| finder.find(line.as_bytes()).is_some()),
                 };
-                let redacted_line = redacted_lines
-                    .as_mut()
-                    .and_then(|lines| lines.next())
-                    .unwrap_or(line);
                 if !ok {
                     line_no = line_no.saturating_add(1);
                     continue;
                 }
 
-                let line_slice = clamp_char_boundary(redacted_line, max_line_bytes);
-                let line_truncated = line_slice.len() < redacted_line.len();
+                let line_slice = clamp_char_boundary(line, max_line_bytes);
+                let line_truncated = line_slice.len() < line.len();
                 let path_json_escaped_len =
                     *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
                 // Budget against JSON-encoded output size (escaped strings + object structure).
@@ -787,7 +725,7 @@ mod tests {
         let resp = vfs
             .grep(GrepRequest {
                 workspace_id: "ws".to_string(),
-                query: "a".to_string(),
+                query: "XX".to_string(),
                 regex: false,
                 glob: None,
                 path_prefix: Some("".to_string()),
@@ -832,6 +770,49 @@ mod tests {
     }
 
     #[test]
+    fn grep_matches_against_redacted_text_instead_of_raw_content() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 7,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "secret\n".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+        policy.secrets.replacement = "***".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let secret_resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "secret".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+        assert!(secret_resp.matches.is_empty());
+
+        let redacted_resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "***".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+        assert_eq!(redacted_resp.matches.len(), 1);
+        assert_eq!(redacted_resp.matches[0].text, "***");
+    }
+
+    #[test]
     fn grep_uses_line_preserving_redaction_for_multiline_secret_matches() {
         let content = "BEGIN\nsecret\nEND\npublic\n";
         let store = SingleFileStore {
@@ -854,7 +835,7 @@ mod tests {
         let resp = vfs
             .grep(GrepRequest {
                 workspace_id: "ws".to_string(),
-                query: "BEGIN".to_string(),
+                query: "REDACTED".to_string(),
                 regex: false,
                 glob: None,
                 path_prefix: Some("".to_string()),

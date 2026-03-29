@@ -454,7 +454,63 @@ mod tests {
 
     use std::sync::Arc;
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use db_vfs_core::policy::{AuthPolicy, AuthToken, Permissions};
+    use rusqlite::params;
     use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    const TEST_TOKEN_SHA256: &str =
+        "sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712";
+
+    fn write_enabled_policy() -> VfsPolicy {
+        VfsPolicy {
+            permissions: Permissions {
+                read: true,
+                glob: true,
+                grep: true,
+                write: true,
+                patch: true,
+                delete: true,
+                allow_full_scan: false,
+            },
+            ..VfsPolicy::default()
+        }
+    }
+
+    fn write_enabled_policy_with_auth() -> VfsPolicy {
+        let mut policy = write_enabled_policy();
+        policy.auth = AuthPolicy {
+            tokens: vec![AuthToken {
+                token: Some(TEST_TOKEN_SHA256.to_string()),
+                token_env_var: None,
+                allowed_workspaces: vec!["ws".to_string()],
+            }],
+        };
+        policy
+    }
+
+    fn sqlite_router_with_prepared_state(
+        db_path: &std::path::Path,
+        prepared: PreparedState,
+    ) -> Router {
+        let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
+        let manager = sqlite_connection_manager(db_path, migration_timeout);
+        let max_pool_size =
+            sqlite_pool_max_size(db_path, prepared.policy.limits.max_db_connections);
+        let pool = r2d2::Pool::builder()
+            .max_size(max_pool_size)
+            .connection_timeout(migration_timeout)
+            .build(manager)
+            .expect("sqlite pool");
+        {
+            let conn = pool.get().expect("sqlite connection");
+            db_vfs::migrations::migrate_sqlite(&conn).expect("migrate sqlite");
+        }
+        let (state, body_limit) = build_state(backend::Backend::Sqlite { pool }, prepared);
+        build_router(state, body_limit)
+    }
 
     #[test]
     fn audit_required_false_allows_startup_when_audit_path_invalid() {
@@ -756,5 +812,76 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.code, "audit_unavailable");
+    }
+
+    #[tokio::test]
+    async fn router_write_returns_structured_503_when_required_audit_fails() {
+        let db = tempfile::NamedTempFile::new().expect("temp db");
+        let policy = ValidatedVfsPolicy::new(write_enabled_policy()).expect("validated policy");
+        let mut prepared = prepare_state(policy, true).expect("prepare state");
+        prepared.audit = Some(audit::AuditLogger::broken_required_logger_for_test());
+        let app = sqlite_router_with_prepared_state(db.path(), prepared);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let err = serde_json::from_slice::<serde_json::Value>(&body).expect("error json");
+        assert_eq!(err["code"], CODE_AUDIT_UNAVAILABLE);
+        assert_eq!(
+            err["message"],
+            "required audit logging failed; operation status is unknown and may still have completed"
+        );
+
+        let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM files WHERE workspace_id = ?1 AND path = ?2",
+                params!["ws", "docs/a.txt"],
+                |row| row.get(0),
+            )
+            .expect("written row should be committed before audit failure surfaces");
+        assert_eq!(content, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn router_unauthorized_returns_structured_503_when_required_audit_fails() {
+        let db = tempfile::NamedTempFile::new().expect("temp db");
+        let policy =
+            ValidatedVfsPolicy::new(write_enabled_policy_with_auth()).expect("validated policy");
+        let mut prepared = prepare_state(policy, false).expect("prepare state");
+        prepared.audit = Some(audit::AuditLogger::broken_required_logger_for_test());
+        let app = sqlite_router_with_prepared_state(db.path(), prepared);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let err = serde_json::from_slice::<serde_json::Value>(&body).expect("error json");
+        assert_eq!(err["code"], CODE_AUDIT_UNAVAILABLE);
+        assert_eq!(
+            err["message"],
+            "required audit logging failed; operation status is unknown and may still have completed"
+        );
     }
 }

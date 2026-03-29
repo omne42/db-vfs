@@ -10,10 +10,12 @@
 
 ## Safe literal prefix
 
-A safe literal prefix is a non-wildcard, root-relative directory prefix extracted from `glob`.
+A safe literal prefix is a non-wildcard, root-relative literal scope extracted from `glob`. It may
+be either a directory prefix or an exact file path.
 
 Examples:
 
+- `README.md` -> safe prefix `README.md`.
 - `docs/**/*.md` -> safe prefix `docs/`.
 - `docs/*` -> safe prefix `docs/`.
 - `**/*.md` -> no safe prefix (caller must provide `path_prefix`).

@@ -121,11 +121,22 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
+    /// Strict alias for [`DbVfs::new_with_matchers_validated`].
+    pub fn try_new_with_matchers_validated(
+        store: S,
+        policy: Arc<ValidatedVfsPolicy>,
+        redactor: impl Into<Arc<SecretRedactor>>,
+        traversal: impl Into<Arc<TraversalSkipper>>,
+    ) -> Result<Self> {
+        Self::new_with_matchers_validated(store, policy, redactor, traversal)
+    }
+
     /// Builds a VFS from a validated policy plus caller-supplied matchers.
     ///
-    /// This is the strict constructor: mismatched matchers are rejected
-    /// instead of being silently rebuilt from policy state.
-    pub fn try_new_with_matchers_validated(
+    /// The supplied matchers must come from the same policy. Callers that want
+    /// policy-derived matchers without supplying their own should use
+    /// [`DbVfs::new_validated`].
+    pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
         redactor: impl Into<Arc<SecretRedactor>>,
@@ -141,39 +152,6 @@ impl<S: Store> DbVfs<S> {
             traversal,
             store,
         })
-    }
-
-    /// Compatibility constructor for pre-built matchers.
-    ///
-    /// If the supplied matchers do not match the policy, this rebuilds the
-    /// policy-derived matchers and ignores the incompatible inputs. Prefer
-    /// [`DbVfs::try_new_with_matchers_validated`] when mismatch should fail
-    /// hard instead of silently falling back.
-    pub fn new_with_matchers_validated(
-        store: S,
-        policy: Arc<ValidatedVfsPolicy>,
-        redactor: impl Into<Arc<SecretRedactor>>,
-        traversal: impl Into<Arc<TraversalSkipper>>,
-    ) -> Self {
-        let redactor = redactor.into();
-        let traversal = traversal.into();
-        let (redactor, traversal) = if redactor.is_compatible_with_rules(&policy.secrets)
-            && traversal.is_compatible_with_rules(&policy.traversal)
-        {
-            (redactor, traversal)
-        } else {
-            let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
-                Ok(matchers) => matchers,
-                Err(err) => unreachable!("ValidatedVfsPolicy invariant broken: {err}"),
-            };
-            (Arc::new(policy_redactor), Arc::new(policy_traversal))
-        };
-        Self {
-            policy,
-            redactor,
-            traversal,
-            store,
-        }
     }
 
     pub fn policy(&self) -> &VfsPolicy {
@@ -313,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_validated_constructor_rebuilds_mismatched_matchers() {
+    fn validated_constructor_rejects_mismatched_matchers() {
         let policy = validated_policy();
         let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
             replacement: "DIFFERENT".to_string(),
@@ -322,10 +300,9 @@ mod tests {
         .expect("mismatched redactor");
         let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
 
-        let vfs =
-            DbVfs::new_with_matchers_validated(DummyStore, policy.clone(), mismatched, traversal);
-        assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
-        assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
+        let err = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
+            .expect_err("mismatch should fail");
+        assert_eq!(err.code(), "invalid_policy");
     }
 
     #[test]

@@ -5,7 +5,9 @@ use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
 use db_vfs_core::{Error, Result};
 
 use super::util::{
-    compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
+    advance_after_cursor, compile_glob, derive_safe_prefix_from_glob, elapsed_ms,
+    ensure_page_starts_after_cursor, ensure_page_strictly_increasing, glob_is_match,
+    json_escaped_str_len,
 };
 use super::{DbVfs, ScanLimitReason};
 
@@ -39,62 +41,6 @@ pub struct GlobResponse {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub scanned_entries: u64,
-}
-
-fn advance_after_cursor(
-    after: &mut Option<String>,
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
-        return Ok(());
-    };
-    if let Some(prev_after) = after.as_ref()
-        && next_after <= prev_after.as_str()
-    {
-        return Err(Error::Db(format!(
-            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
-        )));
-    }
-    if let Some(cursor) = after.as_mut() {
-        cursor.clear();
-        cursor.push_str(next_after);
-    } else {
-        *after = Some(next_after.to_string());
-    }
-    Ok(())
-}
-
-fn ensure_page_strictly_increasing(
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    for pair in metas.windows(2) {
-        if pair[0].path >= pair[1].path {
-            return Err(Error::Db(format!(
-                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
-                pair[0].path, pair[1].path
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_page_starts_after_cursor(
-    metas: &[crate::store::FileMeta],
-    after: Option<&str>,
-    op: &'static str,
-) -> Result<()> {
-    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
-        return Ok(());
-    };
-    if first.path.as_str() <= prev_after {
-        return Err(Error::Db(format!(
-            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
-            first.path
-        )));
-    }
-    Ok(())
 }
 
 pub(super) fn glob<S: crate::store::Store>(
