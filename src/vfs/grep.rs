@@ -800,6 +800,38 @@ mod tests {
     }
 
     #[test]
+    fn grep_allows_root_exact_glob_without_full_scan() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "README.md".to_string(),
+                size_bytes: 12,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "hello world\n".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "hello".to_string(),
+                regex: false,
+                glob: Some("README.md".to_string()),
+                path_prefix: None,
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].path, "README.md");
+        assert_eq!(resp.scanned_entries, 1);
+        assert_eq!(resp.scanned_files, 1);
+    }
+
+    #[test]
     fn grep_uses_line_preserving_redaction_for_multiline_secret_matches() {
         let content = "BEGIN\nsecret\nEND\npublic\n";
         let store = SingleFileStore {

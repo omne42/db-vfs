@@ -181,12 +181,9 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
 
     if stopped_on_wildcard {
         prefix.push('/');
-        return Some(prefix);
     }
 
-    prefix
-        .rsplit_once('/')
-        .map(|(parent, _)| format!("{parent}/"))
+    Some(prefix)
 }
 
 #[cfg(test)]
@@ -228,16 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn derive_safe_prefix_uses_directory_scope_for_exact_file_patterns() {
+    fn derive_safe_prefix_accepts_exact_file_patterns() {
         assert_eq!(
             derive_safe_prefix_from_glob("docs/a.txt"),
-            Some("docs/".to_string())
+            Some("docs/a.txt".to_string())
         );
         assert_eq!(
             derive_safe_prefix_from_glob("docs/nested/a.txt"),
-            Some("docs/nested/".to_string())
+            Some("docs/nested/a.txt".to_string())
         );
-        assert_eq!(derive_safe_prefix_from_glob("top-level.txt"), None);
+        assert_eq!(
+            derive_safe_prefix_from_glob("top-level.txt"),
+            Some("top-level.txt".to_string())
+        );
     }
 
     #[test]
