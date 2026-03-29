@@ -52,13 +52,7 @@ jobs:
       - name: Build docs
         run: ./scripts/docs.sh
 
-      - name: Configure Pages
-        if: github.event_name == 'push' && github.event.repository.private == false
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-        with:
-          enablement: true
-
-      - name: Check Pages enabled
+      - name: Detect Pages availability
         id: pages
         if: github.event_name == 'push' && github.event.repository.private == false
         env:
@@ -76,10 +70,9 @@ jobs:
             200)
               echo "enabled=true" >>"${GITHUB_OUTPUT}"
               ;;
-            404)
-              echo "Pages is not enabled for ${GITHUB_REPOSITORY}." >&2
-              echo "Enable Pages in repository settings, then re-run this workflow." >&2
-              exit 1
+            403|404)
+              echo "enabled=false" >>"${GITHUB_OUTPUT}"
+              echo "::notice title=Pages skipped::GitHub Pages is unavailable for ${GITHUB_REPOSITORY} (status=${status}); skipping deploy."
               ;;
             5*|000)
               echo "Transient GitHub Pages API failure (status=${status})." >&2
@@ -90,6 +83,10 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Configure Pages
+        if: github.event_name == 'push' && github.event.repository.private == false && steps.pages.outputs.enabled == 'true'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.event.repository.private == false && steps.pages.outputs.enabled == 'true'
