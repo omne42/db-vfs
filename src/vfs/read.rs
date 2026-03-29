@@ -53,6 +53,8 @@ pub(super) fn read<S: crate::store::Store>(
     };
 
     let has_redaction_rules = vfs.redactor.has_redact_rules();
+    let max_read_bytes = vfs.policy.limits.max_read_bytes;
+    let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
     let (mut content, version, already_redacted) = match (request.start_line, request.end_line) {
         (None, None) => {
             let (meta, content) =
@@ -67,16 +69,22 @@ pub(super) fn read<S: crate::store::Store>(
                 )));
             }
 
-            let (meta, mut content) =
+            let (meta, content) =
                 load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, false)?;
-            if has_redaction_rules {
-                content = vfs.redactor.redact_text_owned(content);
-            }
+            let content = if has_redaction_rules {
+                vfs.redactor
+                    .redact_text_owned_bounded(content, max_read_bytes_usize)
+                    .map_err(|size| {
+                        file_too_large_due_to_redaction(&requested_path, size, max_read_bytes)
+                    })?
+            } else {
+                content
+            };
             let extracted = extract_line_range(
                 &content,
                 start_line,
                 end_line,
-                vfs.policy.limits.max_read_bytes,
+                max_read_bytes,
                 meta.size_bytes,
                 &requested_path,
             )?;
@@ -89,16 +97,12 @@ pub(super) fn read<S: crate::store::Store>(
         }
     };
 
-    let max_read_bytes = vfs.policy.limits.max_read_bytes;
     if !already_redacted {
-        let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
         content = vfs
             .redactor
             .redact_text_owned_bounded(content, max_read_bytes_usize)
-            .map_err(|size| Error::FileTooLarge {
-                path: requested_path.clone(),
-                size_bytes: u64::try_from(size).unwrap_or(u64::MAX),
-                max_bytes: max_read_bytes,
+            .map_err(|size| {
+                file_too_large_due_to_redaction(&requested_path, size, max_read_bytes)
             })?;
     }
 
@@ -120,6 +124,14 @@ pub(super) fn read<S: crate::store::Store>(
         end_line: request.end_line,
         version,
     })
+}
+
+fn file_too_large_due_to_redaction(path: &str, size: usize, max_bytes: u64) -> Error {
+    Error::FileTooLarge {
+        path: path.to_string(),
+        size_bytes: u64::try_from(size).unwrap_or(u64::MAX),
+        max_bytes,
+    }
 }
 
 fn load_content_with_retry<S: crate::store::Store>(
@@ -789,5 +801,36 @@ mod tests {
             })
             .expect("ranged read");
         assert_eq!(resp.content, "\n\n");
+    }
+
+    #[test]
+    fn ranged_read_with_redaction_rules_rejects_large_file_before_slice_extraction() {
+        let content = "line-1\nline-2\nline-3\n".repeat(64);
+        let store = StaticContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 8;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+        policy.secrets.replacement = "x".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(2),
+            })
+            .expect_err("redacted whole-file intermediate should stay budgeted");
+        assert_eq!(err.code(), "file_too_large");
     }
 }

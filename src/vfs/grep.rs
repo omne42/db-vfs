@@ -314,6 +314,7 @@ pub(super) fn grep<S: crate::store::Store>(
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
     let max_scan_files_u64 = u64::try_from(max_scan_files).unwrap_or(u64::MAX);
     let max_read_bytes = vfs.policy.limits.max_read_bytes;
+    let max_read_bytes_usize = usize::try_from(max_read_bytes).unwrap_or(usize::MAX);
 
     let mut matches = Vec::<GrepMatch>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut skipped_too_large_files: u64 = 0;
@@ -440,9 +441,23 @@ pub(super) fn grep<S: crate::store::Store>(
                 continue;
             }
 
-            let redacted_content =
-                has_redaction_rules.then(|| vfs.redactor.redact_text_owned(content.clone()));
-            let mut redacted_lines = redacted_content.as_deref().map(str::lines);
+            let redacted_content = if has_redaction_rules {
+                match vfs
+                    .redactor
+                    .redact_text_bounded(content.as_str(), max_read_bytes_usize)
+                {
+                    Ok(redacted) => Some(redacted),
+                    Err(_) => {
+                        skipped_too_large_files = skipped_too_large_files.saturating_add(1);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let mut redacted_lines = redacted_content
+                .as_ref()
+                .map(|redacted| redacted.as_ref().lines());
             let mut line_no: u64 = 1;
             for line in content.lines() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
@@ -1047,6 +1062,40 @@ mod tests {
         assert_eq!(resp.scanned_files, 1);
         assert_eq!(resp.skipped_too_large_files, 0);
         assert_eq!(vfs.store_mut().content_calls, 0);
+    }
+
+    #[test]
+    fn grep_counts_redaction_expansion_over_budget_as_too_large() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 2,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "a\n".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.limits.max_read_bytes = 2;
+        policy.secrets.redact_regexes = vec!["a".to_string()];
+        policy.secrets.replacement = "XX".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "a".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.skipped_too_large_files, 1);
     }
 
     struct NonMonotonicPageStore {
