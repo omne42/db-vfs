@@ -760,17 +760,8 @@ mod tests {
 
             self.chunk_reads = self.chunk_reads.saturating_add(1);
             let take = max_chars.min(self.chunk_chars);
-<<<<<<< HEAD
-<<<<<<< HEAD
             let start_idx = usize::try_from(start_char.saturating_sub(1))
                 .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
-=======
-            let start_idx = usize::try_from(start_char.saturating_sub(1)).unwrap_or(usize::MAX);
->>>>>>> 43b5a87 (fix(vfs): finish validated matcher and ranged read paths)
-=======
-            let start_idx = usize::try_from(start_char.saturating_sub(1))
-                .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
->>>>>>> 689c510 (fix(vfs): tighten chunked line range handling)
             Ok(Some(
                 self.content.chars().skip(start_idx).take(take).collect(),
             ))
