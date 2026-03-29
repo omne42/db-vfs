@@ -193,7 +193,6 @@ pub trait Store {
                     &chunk[segment_start..],
                 );
             }
-
             start_char = start_char.saturating_add(chunk_char_count);
         }
     }

@@ -268,7 +268,6 @@ fn load_line_range_with_retry<S: crate::store::Store>(
             max_bytes,
         )? {
             Some(range) => {
-            Some(range) => {
                 if range.total_lines < end_line || start_line > range.total_lines {
                     return Err(line_range_out_of_bounds_error(
                         path,
@@ -277,7 +276,6 @@ fn load_line_range_with_retry<S: crate::store::Store>(
                         range.total_lines,
                     ));
                 }
-
                 if range.bytes_read > max_bytes {
                     return Err(Error::FileTooLarge {
                         path: path.to_string(),
@@ -763,11 +761,16 @@ mod tests {
             self.chunk_reads = self.chunk_reads.saturating_add(1);
             let take = max_chars.min(self.chunk_chars);
 <<<<<<< HEAD
+<<<<<<< HEAD
             let start_idx = usize::try_from(start_char.saturating_sub(1))
                 .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
 =======
             let start_idx = usize::try_from(start_char.saturating_sub(1)).unwrap_or(usize::MAX);
 >>>>>>> 43b5a87 (fix(vfs): finish validated matcher and ranged read paths)
+=======
+            let start_idx = usize::try_from(start_char.saturating_sub(1))
+                .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
+>>>>>>> 689c510 (fix(vfs): tighten chunked line range handling)
             Ok(Some(
                 self.content.chars().skip(start_idx).take(take).collect(),
             ))
