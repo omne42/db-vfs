@@ -3,6 +3,8 @@ use std::fmt;
 
 use crate::Error;
 use crate::Result;
+use crate::redaction::SecretRedactor;
+use crate::traversal::TraversalSkipper;
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
 const MAX_SECRET_DENY_GLOBS: usize = 4096;
@@ -289,17 +291,18 @@ pub struct VfsPolicy {
 
 /// A [`VfsPolicy`] that has passed [`VfsPolicy::validate`].
 ///
-/// This guarantees only the structural validation enforced by `VfsPolicy::validate()` (limits,
-/// basic sizes, and auth token shapes). It does **not** guarantee that secret/traversal glob
-/// patterns or redaction regexes compile — those are validated when building matchers (e.g.
-/// [`crate::redaction::SecretRedactor::from_rules`] and
-/// [`crate::traversal::TraversalSkipper::from_rules`]).
+/// This guarantees the structural validation enforced by `VfsPolicy::validate()` (limits, basic
+/// sizes, and auth token shapes) *and* that policy-derived secret/traversal matchers can be
+/// built. That keeps constructor families such as `DbVfs::new_validated()` and
+/// `DbVfs::new_with_matchers_validated()` aligned on the same invariant.
 #[derive(Debug, Clone)]
 pub struct ValidatedVfsPolicy(VfsPolicy);
 
 impl ValidatedVfsPolicy {
     pub fn new(policy: VfsPolicy) -> Result<Self> {
         policy.validate()?;
+        SecretRedactor::from_rules(&policy.secrets)?;
+        TraversalSkipper::from_rules(&policy.traversal)?;
         Ok(Self(policy))
     }
 
