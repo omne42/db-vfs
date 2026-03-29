@@ -90,11 +90,7 @@ pub(super) fn build_auth_mode(
             if value.is_empty() {
                 anyhow::bail!("auth token env var {env:?} must be non-empty");
             }
-            if value.starts_with("sha256:") {
-                parse_token_sha256(&value)?
-            } else {
-                hash_plaintext_token_sha256(&value, &format!("auth token env var {env:?}"))?
-            }
+            hash_plaintext_token_sha256(&value, &format!("auth token env var {env:?}"))?
         } else {
             anyhow::bail!("auth token entry {idx} is missing token / token_env_var");
         };
@@ -487,5 +483,28 @@ mod tests {
             &rules[0].token_sha256,
             &parse_token_sha256(&digest).unwrap()
         ));
+    }
+
+    #[test]
+    fn build_auth_mode_rejects_sha256_prefixed_env_value_as_invalid_plaintext_token() {
+        let var = format!("DB_VFS_TEST_TOKEN_SHA256_{}", std::process::id());
+        let token = format!("sha256:{}", "a".repeat(64));
+
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: None,
+            token_env_var: Some(var.clone()),
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::set_var(&var, &token) };
+        let err = build_auth_mode(&policy, false)
+            .err()
+            .expect("sha256-prefixed env value should be treated as invalid plaintext");
+        // SAFETY: test-only scoped environment mutation.
+        unsafe { std::env::remove_var(&var) };
+
+        assert!(err.to_string().contains("valid HTTP Bearer token"));
     }
 }
