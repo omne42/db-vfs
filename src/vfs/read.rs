@@ -269,10 +269,12 @@ fn load_line_range_with_retry<S: crate::store::Store>(
         )? {
             Some(range) => {
                 if range.total_lines < end_line || start_line > range.total_lines {
-                    return Err(Error::InvalidPath(format!(
-                        "line range {}..{} out of bounds (file has {} lines)",
-                        start_line, end_line, range.total_lines
-                    )));
+                    return Err(line_range_out_of_bounds_error(
+                        path,
+                        start_line,
+                        end_line,
+                        range.total_lines,
+                    ));
                 }
                 if range.bytes_read > max_bytes {
                     return Err(Error::FileTooLarge {
@@ -306,6 +308,18 @@ fn load_line_range_with_retry<S: crate::store::Store>(
 
 fn read_not_found_err(path: &str, attempts: usize) -> Error {
     Error::NotFound(format!("file not found (path={path}, attempts={attempts})"))
+}
+
+fn line_range_out_of_bounds_error(
+    _path: &str,
+    start_line: u64,
+    end_line: u64,
+    line_count: u64,
+) -> Error {
+    Error::InvalidPath(format!(
+        "line range {}..{} out of bounds (file has {} lines)",
+        start_line, end_line, line_count
+    ))
 }
 
 fn extract_line_range(
@@ -342,16 +356,20 @@ fn extract_line_range(
     }
 
     let Some(start_pos) = start_pos else {
-        return Err(Error::InvalidPath(format!(
-            "line range {}..{} out of bounds (file has {} lines)",
-            start_line, end_line, current_line
-        )));
+        return Err(line_range_out_of_bounds_error(
+            path,
+            start_line,
+            end_line,
+            current_line,
+        ));
     };
     let Some(end_pos) = end_pos else {
-        return Err(Error::InvalidPath(format!(
-            "line range {}..{} out of bounds (file has {} lines)",
-            start_line, end_line, current_line
-        )));
+        return Err(line_range_out_of_bounds_error(
+            path,
+            start_line,
+            end_line,
+            current_line,
+        ));
     };
 
     let slice = &content[start_pos..end_pos];

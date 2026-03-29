@@ -184,7 +184,6 @@ pub trait Store {
                 current_line = current_line.saturating_add(1);
                 segment_start = segment_end;
             }
-
             if segment_start < chunk.len() && current_line >= start_line && current_line <= end_line
             {
                 append_range_segment(
@@ -194,7 +193,6 @@ pub trait Store {
                     &chunk[segment_start..],
                 );
             }
-
             start_char = start_char.saturating_add(chunk_char_count);
         }
     }

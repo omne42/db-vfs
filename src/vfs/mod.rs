@@ -29,7 +29,6 @@ pub struct DbVfs<S> {
     policy: Arc<ValidatedVfsPolicy>,
     redactor: Arc<SecretRedactor>,
     traversal: Arc<TraversalSkipper>,
-    matcher_build_error: Option<String>,
     store: S,
 }
 
@@ -75,7 +74,6 @@ impl<S: Store> DbVfs<S> {
             policy: Arc::new(policy),
             redactor: Arc::new(redactor),
             traversal: Arc::new(traversal),
-            matcher_build_error: None,
             store,
         })
     }
@@ -86,7 +84,6 @@ impl<S: Store> DbVfs<S> {
             policy: Arc::new(policy),
             redactor: Arc::new(redactor),
             traversal: Arc::new(traversal),
-            matcher_build_error: None,
             store,
         })
     }
@@ -103,7 +100,6 @@ impl<S: Store> DbVfs<S> {
             policy: Arc::new(policy),
             redactor: Arc::new(redactor),
             traversal: Arc::new(traversal),
-            matcher_build_error: None,
             store,
         })
     }
@@ -121,7 +117,6 @@ impl<S: Store> DbVfs<S> {
             policy: Arc::new(policy),
             redactor: Arc::new(redactor),
             traversal: Arc::new(traversal),
-            matcher_build_error: None,
             store,
         })
     }
@@ -144,7 +139,6 @@ impl<S: Store> DbVfs<S> {
             policy,
             redactor,
             traversal,
-            matcher_build_error: None,
             store,
         })
     }
@@ -155,10 +149,6 @@ impl<S: Store> DbVfs<S> {
     /// policy-derived matchers and ignores the incompatible inputs. Prefer
     /// [`DbVfs::try_new_with_matchers_validated`] when mismatch should fail
     /// hard instead of silently falling back.
-    ///
-    /// If the policy-derived matchers cannot be rebuilt, the constructor keeps
-    /// source compatibility and defers the failure until the first operation,
-    /// which returns `invalid_policy` instead of panicking the process.
     pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
@@ -167,24 +157,21 @@ impl<S: Store> DbVfs<S> {
     ) -> Self {
         let redactor = redactor.into();
         let traversal = traversal.into();
-        let (redactor, traversal, matcher_build_error) = if redactor
-            .is_compatible_with_rules(&policy.secrets)
+        let (redactor, traversal) = if redactor.is_compatible_with_rules(&policy.secrets)
             && traversal.is_compatible_with_rules(&policy.traversal)
         {
-            (redactor, traversal, None)
+            (redactor, traversal)
         } else {
-            match Self::build_matchers(policy.as_ref()) {
-                Ok((policy_redactor, policy_traversal)) => {
-                    (Arc::new(policy_redactor), Arc::new(policy_traversal), None)
-                }
-                Err(err) => (redactor, traversal, Some(err.to_string())),
-            }
+            let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
+                Ok(matchers) => matchers,
+                Err(err) => unreachable!("ValidatedVfsPolicy invariant broken: {err}"),
+            };
+            (Arc::new(policy_redactor), Arc::new(policy_traversal))
         };
         Self {
             policy,
             redactor,
             traversal,
-            matcher_build_error,
             store,
         }
     }
@@ -209,44 +196,31 @@ pub enum ScanLimitReason {
 
 impl<S: Store> DbVfs<S> {
     pub fn read(&mut self, request: ReadRequest) -> Result<ReadResponse> {
-        self.ensure_ready()?;
         read::read(self, request)
     }
 
     pub fn write(&mut self, request: WriteRequest) -> Result<WriteResponse> {
-        self.ensure_ready()?;
         write::write(self, request)
     }
 
     pub fn apply_unified_patch(&mut self, request: PatchRequest) -> Result<PatchResponse> {
-        self.ensure_ready()?;
         patch::apply_unified_patch(self, request)
     }
 
     pub fn delete(&mut self, request: DeleteRequest) -> Result<DeleteResponse> {
-        self.ensure_ready()?;
         delete::delete(self, request)
     }
 
     pub fn glob(&mut self, request: GlobRequest) -> Result<GlobResponse> {
-        self.ensure_ready()?;
         glob::glob(self, request)
     }
 
     pub fn grep(&mut self, request: GrepRequest) -> Result<GrepResponse> {
-        self.ensure_ready()?;
         grep::grep(self, request)
     }
 }
 
 impl<S> DbVfs<S> {
-    fn ensure_ready(&self) -> Result<()> {
-        if let Some(err) = self.matcher_build_error.as_deref() {
-            return Err(Error::InvalidPolicy(err.to_string()));
-        }
-        Ok(())
-    }
-
     fn ensure_allowed(&self, ok: bool, op: &str) -> Result<()> {
         if ok {
             Ok(())
@@ -355,26 +329,10 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_validated_constructor_defers_unbuildable_policy_matchers_to_runtime_error() {
+    fn validated_policy_rejects_unbuildable_matchers() {
         let mut raw_policy = VfsPolicy::default();
         raw_policy.secrets.redact_regexes = vec!["(".to_string()];
-        let policy = Arc::new(ValidatedVfsPolicy::new(raw_policy).expect("validated policy"));
-        let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
-            replacement: "DIFFERENT".to_string(),
-            ..VfsPolicy::default().secrets
-        })
-        .expect("mismatched redactor");
-        let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
-
-        let mut vfs = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal);
-        let err = vfs
-            .read(ReadRequest {
-                workspace_id: "ws".to_string(),
-                path: "docs/file.txt".to_string(),
-                start_line: None,
-                end_line: None,
-            })
-            .expect_err("unbuildable policy-derived matchers should surface as invalid_policy");
+        let err = ValidatedVfsPolicy::new(raw_policy).expect_err("policy should be rejected");
         assert_eq!(err.code(), "invalid_policy");
     }
 }
