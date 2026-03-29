@@ -294,13 +294,7 @@ pub trait Store {
 
 fn range_read_chunk_chars(max_bytes: u64) -> usize {
     let budget_chars = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
-<<<<<<< HEAD
     budget_chars.clamp(DEFAULT_RANGE_READ_CHUNK_CHARS, MAX_RANGE_READ_CHUNK_CHARS)
-=======
-    budget_chars
-        .max(DEFAULT_RANGE_READ_CHUNK_CHARS)
-        .min(MAX_RANGE_READ_CHUNK_CHARS)
->>>>>>> 43b5a87 (fix(vfs): finish validated matcher and ranged read paths)
 }
 
 fn append_range_segment(content: &mut String, bytes_read: &mut u64, max_bytes: u64, segment: &str) {
