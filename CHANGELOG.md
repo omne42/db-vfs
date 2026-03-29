@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
 - store/sqlite+postgres: persist per-path version generations across delete/recreate so stale `expected_version` values cannot match a newly recreated file, and add regression coverage for SQLite, Postgres store integration, and Postgres HTTP smoke paths.
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
-- service/auth+audit+sqlite: reject plaintext env-backed tokens that violate HTTP Bearer token syntax, return stable `503 audit_unavailable` errors when required audit append/flush fails, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
+- service/auth+audit+sqlite: reject plaintext env-backed tokens that violate HTTP Bearer token syntax, reject literal `sha256:<hex>` values in `token_env_var` instead of treating them as pre-hashed secrets, return stable `503 audit_unavailable` errors when required audit append/flush fails, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 - vfs/api: keep `DbVfs::new_with_matchers_validated` source-compatible while removing the reachable panic when policy-derived matchers cannot be rebuilt; affected operations now return `invalid_policy`.
 - store/sqlite+postgres: make versioned delete distinguish `conflict` from `not_found` without a post-delete race window, and add regression coverage for the three-way outcome.
 - service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
@@ -123,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 - tests: add regression coverage to ensure audit worker keeps provided event timestamps unchanged.
 - tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
+- tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.
+- tests: add regression coverage for required-audit worker loss returning stable `503 audit_unavailable` errors.
 
 ## [0.1.0] - 2026-01-31
 
