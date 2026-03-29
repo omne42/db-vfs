@@ -18,8 +18,8 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice, but redaction-enabled ranged reads also require the redacted whole-file intermediate to stay within that budget |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and over-budget redacted intermediates fail as `file_too_large` before slice extraction |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads still require any redacted whole-file intermediate to stay within budget |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 

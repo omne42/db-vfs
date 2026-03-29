@@ -14,6 +14,7 @@
   - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` 跟随 scan runtime 预算。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
+  - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
   - redaction 路径的中间结果也必须受 `max_read_bytes` 约束；当 ranged `read` 或 `grep`
@@ -39,8 +40,11 @@
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
-  - crate 兼容构造器 `DbVfs::new_with_matchers_validated` 不允许因为 policy-derived
-    matcher 无法重建而 panic；这类状态必须转成可控的 `invalid_policy` 错误。
+  - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
+    `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
+    panic，也不需要把这类状态延后到运行期才暴露。
+  - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
+    traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
 - 面向运维和集成者的 API / policy / security 文档
 
 ## 当前仍在本仓本地实现的通用能力
