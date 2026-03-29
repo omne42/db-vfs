@@ -682,4 +682,19 @@ mod tests {
         .expect("permit should be released once timed-out audit worker finishes");
         drop(eventual);
     }
+
+    #[tokio::test]
+    async fn required_audit_worker_loss_returns_service_unavailable() {
+        let audit = audit::AuditLogger::broken_required_logger_for_test();
+
+        let err = log_audit_event(
+            &audit,
+            audit::minimal_event("req-broken".to_string(), None, "write", 500, Some("broken")),
+        )
+        .await
+        .expect_err("broken required audit logger should surface as HTTP error");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+    }
 }
