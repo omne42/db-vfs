@@ -1,8 +1,16 @@
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use db_vfs_core::{Error, Result};
 
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
 const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
+static PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static PREFIX_PAGE_FALLBACK_WARNING_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PREFIX_PAGE_FALLBACK_TEST_GUARD: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct FileRecord {
@@ -67,6 +75,31 @@ pub struct LineRangeData {
     pub content: Option<String>,
     pub bytes_read: u64,
     pub total_lines: u64,
+}
+
+fn warn_prefix_page_fallback_once() {
+    if PREFIX_PAGE_FALLBACK_WARNED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        PREFIX_PAGE_FALLBACK_WARNING_COUNT.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "db-vfs: Store::list_metas_by_prefix_page fell back to repeated prefix rescans; \
+override list_metas_by_prefix_page in your Store impl to preserve large-prefix \
+scan-budget/performance guarantees"
+        );
+    }
+}
+
+#[cfg(test)]
+fn reset_prefix_page_fallback_warning_for_test() {
+    PREFIX_PAGE_FALLBACK_WARNED.store(false, Ordering::Release);
+    PREFIX_PAGE_FALLBACK_WARNING_COUNT.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+fn prefix_page_fallback_warning_count_for_test() -> u64 {
+    PREFIX_PAGE_FALLBACK_WARNING_COUNT.load(Ordering::Acquire)
 }
 
 pub trait Store {
@@ -226,6 +259,11 @@ pub trait Store {
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome>;
 
+    /// Legacy prefix listing entrypoint.
+    ///
+    /// Implementing only this method keeps basic scans working, but cursor pagination will
+    /// degrade into repeated prefix rescans once callers pass `after`. That fallback now emits a
+    /// one-time warning so degraded scan-budget/performance semantics are visible to implementors.
     fn list_metas_by_prefix(
         &mut self,
         workspace_id: &str,
@@ -239,7 +277,8 @@ pub trait Store {
     /// compatibility fallback below. The default implementation preserves
     /// correctness for legacy stores, but it may re-scan the prefix from the
     /// beginning multiple times and therefore does not preserve large-prefix
-    /// performance or scan-budget predictability.
+    /// performance or scan-budget predictability. When that degraded path is
+    /// used (`after.is_some()`), the fallback emits a one-time warning.
     fn list_metas_by_prefix_page(
         &mut self,
         workspace_id: &str,
@@ -258,6 +297,7 @@ pub trait Store {
         // `list_metas_by_prefix`. This may require repeated prefix scans.
         // Implement `list_metas_by_prefix_page` in concrete stores to avoid
         // this fallback and provide predictable large-prefix performance.
+        warn_prefix_page_fallback_once();
         let mut fetch_limit = limit.max(64);
         loop {
             let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
@@ -600,6 +640,8 @@ mod tests {
 
     #[test]
     fn default_page_impl_supports_cursor_pagination_with_legacy_stores() {
+        let _guard = PREFIX_PAGE_FALLBACK_TEST_GUARD.lock().expect("test guard");
+        reset_prefix_page_fallback_warning_for_test();
         let mut store = PrefixOnlyStore {
             paths: vec![
                 "docs/a.txt".to_string(),
@@ -612,10 +654,13 @@ mod tests {
             .expect("cursor pagination fallback should work");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert_eq!(prefix_page_fallback_warning_count_for_test(), 1);
     }
 
     #[test]
     fn default_page_impl_handles_unsorted_legacy_rows() {
+        let _guard = PREFIX_PAGE_FALLBACK_TEST_GUARD.lock().expect("test guard");
+        reset_prefix_page_fallback_warning_for_test();
         let mut store = UnsortedPrefixStore {
             paths: vec![
                 "docs/a.txt".to_string(),
@@ -629,5 +674,58 @@ mod tests {
             .expect("fallback should sort unsorted legacy rows");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert_eq!(prefix_page_fallback_warning_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_page_impl_warns_only_once_across_repeated_cursor_fallbacks() {
+        let _guard = PREFIX_PAGE_FALLBACK_TEST_GUARD.lock().expect("test guard");
+        reset_prefix_page_fallback_warning_for_test();
+        let mut store = PrefixOnlyStore {
+            paths: vec![
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+                "docs/c.txt".to_string(),
+                "docs/d.txt".to_string(),
+            ],
+        };
+
+        let first = store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 1)
+            .expect("first fallback page");
+        let second = store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/b.txt"), 1)
+            .expect("second fallback page");
+
+        assert_eq!(
+            first.into_iter().map(|meta| meta.path).collect::<Vec<_>>(),
+            vec!["docs/b.txt".to_string()]
+        );
+        assert_eq!(
+            second.into_iter().map(|meta| meta.path).collect::<Vec<_>>(),
+            vec!["docs/c.txt".to_string()]
+        );
+        assert_eq!(prefix_page_fallback_warning_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_page_impl_without_cursor_does_not_emit_fallback_warning() {
+        let _guard = PREFIX_PAGE_FALLBACK_TEST_GUARD.lock().expect("test guard");
+        reset_prefix_page_fallback_warning_for_test();
+        let mut store = PrefixOnlyStore {
+            paths: vec!["docs/a.txt".to_string(), "docs/b.txt".to_string()],
+        };
+
+        let page = store
+            .list_metas_by_prefix_page("ws", "docs/", None, 2)
+            .expect("non-cursor page");
+        let mut paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        paths.sort();
+
+        assert_eq!(
+            paths,
+            vec!["docs/a.txt".to_string(), "docs/b.txt".to_string()]
+        );
+        assert_eq!(prefix_page_fallback_warning_count_for_test(), 0);
     }
 }
