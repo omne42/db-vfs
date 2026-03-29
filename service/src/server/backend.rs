@@ -166,12 +166,12 @@ fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_
     db_vfs::Error::Timeout(format!("backend={backend} stage=pool_get detail={err}"))
 }
 
-fn sqlite_busy_timeout(timeout: Option<Duration>) -> Duration {
+pub(super) fn sqlite_busy_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS))
 }
 
 #[cfg(feature = "postgres")]
-fn postgres_statement_timeout_ms(timeout: Option<Duration>) -> u64 {
+fn postgres_timeout_ms(timeout: Option<Duration>) -> u64 {
     match timeout {
         None => 0,
         Some(timeout) => {
@@ -186,16 +186,18 @@ fn postgres_statement_timeout_ms(timeout: Option<Duration>) -> u64 {
 }
 
 #[cfg(feature = "postgres")]
-fn configure_postgres_statement_timeout(
+pub(super) fn configure_postgres_session_timeouts(
     client: &mut r2d2_postgres::postgres::Client,
     timeout: Option<Duration>,
 ) -> db_vfs::Result<()> {
-    let timeout_ms = postgres_statement_timeout_ms(timeout);
+    let timeout_ms = postgres_timeout_ms(timeout);
     client
-        .simple_query(&format!("SET statement_timeout = {timeout_ms}"))
+        .batch_execute(&format!(
+            "SET statement_timeout = {timeout_ms}; SET lock_timeout = {timeout_ms};"
+        ))
         .map_err(|err| {
             db_vfs::Error::Db(format!(
-                "backend=postgres stage=set_statement_timeout timeout_ms={timeout_ms} error={err}"
+                "backend=postgres stage=set_session_timeouts timeout_ms={timeout_ms} error={err}"
             ))
         })?;
     Ok(())
@@ -236,7 +238,7 @@ impl BackendStore {
                         .get()
                         .map_err(|err| map_pool_get_error("postgres", err))?,
                 };
-                configure_postgres_statement_timeout(&mut client, operation_timeout)?;
+                configure_postgres_session_timeouts(&mut client, operation_timeout)?;
                 let cancel = CancelHandle::Postgres(client.cancel_token());
                 Ok((
                     Self::Postgres(Box::new(PostgresStore::from_client(client))),
@@ -330,9 +332,9 @@ impl Store for BackendStore {
 #[cfg(test)]
 mod postgres_tests {
     #[cfg(feature = "postgres")]
-    use super::configure_postgres_statement_timeout;
+    use super::configure_postgres_session_timeouts;
     #[cfg(feature = "postgres")]
-    use super::postgres_statement_timeout_ms;
+    use super::postgres_timeout_ms;
     #[cfg(feature = "postgres")]
     use r2d2_postgres::postgres::NoTls;
     #[cfg(feature = "postgres")]
@@ -340,26 +342,20 @@ mod postgres_tests {
 
     #[cfg(feature = "postgres")]
     #[test]
-    fn postgres_statement_timeout_is_unbounded_without_budget() {
-        assert_eq!(postgres_statement_timeout_ms(None), 0);
+    fn postgres_session_timeouts_are_unbounded_without_budget() {
+        assert_eq!(postgres_timeout_ms(None), 0);
     }
 
     #[cfg(feature = "postgres")]
     #[test]
-    fn postgres_statement_timeout_rounds_positive_sub_millisecond_budget_up() {
-        assert_eq!(
-            postgres_statement_timeout_ms(Some(Duration::from_nanos(1))),
-            1
-        );
+    fn postgres_session_timeouts_round_positive_sub_millisecond_budget_up() {
+        assert_eq!(postgres_timeout_ms(Some(Duration::from_nanos(1))), 1);
     }
 
     #[cfg(feature = "postgres")]
     #[test]
-    fn postgres_statement_timeout_uses_budget_milliseconds() {
-        assert_eq!(
-            postgres_statement_timeout_ms(Some(Duration::from_millis(1450))),
-            1450
-        );
+    fn postgres_session_timeouts_use_budget_milliseconds() {
+        assert_eq!(postgres_timeout_ms(Some(Duration::from_millis(1450))), 1450);
     }
 
     #[cfg(feature = "postgres")]
@@ -377,30 +373,42 @@ mod postgres_tests {
 
     #[cfg(feature = "postgres")]
     fn current_statement_timeout_ms(client: &mut r2d2_postgres::postgres::Client) -> i64 {
+        current_timeout_ms(client, "statement_timeout")
+    }
+
+    #[cfg(feature = "postgres")]
+    fn current_lock_timeout_ms(client: &mut r2d2_postgres::postgres::Client) -> i64 {
+        current_timeout_ms(client, "lock_timeout")
+    }
+
+    #[cfg(feature = "postgres")]
+    fn current_timeout_ms(client: &mut r2d2_postgres::postgres::Client, name: &str) -> i64 {
         client
             .query_one(
-                "SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
-                &[],
+                "SELECT setting::bigint FROM pg_settings WHERE name = $1",
+                &[&name],
             )
-            .expect("query statement_timeout")
+            .unwrap_or_else(|_| panic!("query {name}"))
             .get(0)
     }
 
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
-    fn configure_postgres_statement_timeout_tracks_request_budget() {
+    fn configure_postgres_session_timeouts_track_request_budget() {
         let url = postgres_test_url();
         let mut client =
             r2d2_postgres::postgres::Client::connect(&url, NoTls).expect("connect postgres");
 
-        configure_postgres_statement_timeout(&mut client, Some(Duration::from_millis(1450)))
-            .expect("set bounded statement_timeout");
+        configure_postgres_session_timeouts(&mut client, Some(Duration::from_millis(1450)))
+            .expect("set bounded postgres session timeouts");
         assert_eq!(current_statement_timeout_ms(&mut client), 1450);
+        assert_eq!(current_lock_timeout_ms(&mut client), 1450);
 
-        configure_postgres_statement_timeout(&mut client, None)
-            .expect("clear statement_timeout for unbounded scans");
+        configure_postgres_session_timeouts(&mut client, None)
+            .expect("clear postgres session timeouts for unbounded scans");
         assert_eq!(current_statement_timeout_ms(&mut client), 0);
+        assert_eq!(current_lock_timeout_ms(&mut client), 0);
     }
 }
 
