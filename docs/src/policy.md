@@ -37,6 +37,10 @@ Not supported:
 ## Token hash generation
 
 Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
+Use `auth.tokens[*].token` for pre-hashed `sha256:<64 hex>` values. `auth.tokens[*].token_env_var`
+always loads the raw bearer token from the environment and hashes that plaintext at startup.
+A literal `sha256:<64 hex>` value in `token_env_var` is rejected as invalid plaintext bearer
+syntax instead of being treated as a pre-hashed token.
 Plaintext env-backed tokens must also be valid HTTP Bearer tokens (`token68` syntax), so values
 with whitespace or disallowed punctuation are rejected at startup instead of becoming impossible
 runtime credentials.

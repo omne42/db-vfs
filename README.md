@@ -91,6 +91,10 @@ lifetime by accident.
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
+- `auth.tokens[*].token_env_var` always carries the raw bearer token; only
+  `auth.tokens[*].token` accepts a pre-hashed `sha256:<64 hex>` value.
+- A literal `sha256:<64 hex>` string in `token_env_var` is rejected at startup because it is not a
+  valid Bearer token value.
 - If you use plaintext env-backed tokens, keep them valid HTTP Bearer tokens (`token68` syntax; no whitespace or disallowed punctuation).
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
 - Use TLS/HTTPS end-to-end for bearer token transport.
