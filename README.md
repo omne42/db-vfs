@@ -78,8 +78,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 
 Line-range `read` still enforces `max_read_bytes` on the returned slice. Without secret redaction
 rules, the store can stop after the requested range instead of materializing the whole file. When
-secret redaction rules are active, the redacted whole-file intermediate must still fit within the
-same budget; otherwise the request fails with `file_too_large` before slice extraction.
+secret redaction rules are active, both the raw backing file and the redacted whole-file
+intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
+before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -121,6 +122,7 @@ Budget semantics:
 - Service startup DB migrations also reuse `max_io_ms` for connect/lock budgeting, so startup cannot hang indefinitely under backend contention.
 - SQLite `busy_timeout` and Postgres `statement_timeout`/`lock_timeout` follow the active request or startup migration budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
+- When secret redaction rules are active, size scan concurrency for up to `2 * max_read_bytes` per in-flight scan because the service may hold both the original file content and a bounded redacted copy at once.
 
 Secrets semantics:
 

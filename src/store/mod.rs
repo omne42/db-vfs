@@ -1,8 +1,20 @@
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use db_vfs_core::{Error, Result};
 
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
 const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
+
+static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct FileRecord {
@@ -239,7 +251,9 @@ pub trait Store {
     /// compatibility fallback below. The default implementation preserves
     /// correctness for legacy stores, but it may re-scan the prefix from the
     /// beginning multiple times and therefore does not preserve large-prefix
-    /// performance or scan-budget predictability.
+    /// performance or scan-budget predictability. When this slow path is used,
+    /// `db-vfs` emits a one-time warning naming the store type so degraded scan
+    /// behavior is visible instead of silent.
     fn list_metas_by_prefix_page(
         &mut self,
         workspace_id: &str,
@@ -258,6 +272,7 @@ pub trait Store {
         // `list_metas_by_prefix`. This may require repeated prefix scans.
         // Implement `list_metas_by_prefix_page` in concrete stores to avoid
         // this fallback and provide predictable large-prefix performance.
+        warn_legacy_prefix_page_fallback::<Self>();
         let mut fetch_limit = limit.max(64);
         loop {
             let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
@@ -289,6 +304,28 @@ pub trait Store {
             fetch_limit = next;
         }
     }
+}
+
+fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
+    if !LEGACY_PREFIX_PAGE_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+        #[cfg(test)]
+        LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+        log::warn!(
+            "Store::list_metas_by_prefix_page is using the legacy compatibility fallback for {}; implement cursor pagination to preserve scan-budget predictability",
+            std::any::type_name::<S>()
+        );
+    }
+}
+
+#[cfg(test)]
+fn reset_legacy_prefix_page_fallback_warning_for_test() {
+    LEGACY_PREFIX_PAGE_FALLBACK_WARNED.store(false, Ordering::Release);
+    LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+fn legacy_prefix_page_fallback_warn_count_for_test() -> usize {
+    LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
 }
 
 fn range_read_chunk_chars(max_bytes: u64) -> usize {
@@ -600,6 +637,10 @@ mod tests {
 
     #[test]
     fn default_page_impl_supports_cursor_pagination_with_legacy_stores() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
         let mut store = PrefixOnlyStore {
             paths: vec![
                 "docs/a.txt".to_string(),
@@ -612,10 +653,15 @@ mod tests {
             .expect("cursor pagination fallback should work");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 
     #[test]
     fn default_page_impl_handles_unsorted_legacy_rows() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
         let mut store = UnsortedPrefixStore {
             paths: vec![
                 "docs/a.txt".to_string(),
@@ -629,5 +675,30 @@ mod tests {
             .expect("fallback should sort unsorted legacy rows");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_page_impl_warns_only_once_for_repeated_legacy_fallbacks() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
+        let mut store = PrefixOnlyStore {
+            paths: vec![
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+                "docs/c.txt".to_string(),
+            ],
+        };
+
+        store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
+            .expect("first fallback page");
+        store
+            .list_metas_by_prefix_page("ws", "docs/", Some("docs/b.txt"), 1)
+            .expect("second fallback page");
+
+        assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 }

@@ -17,8 +17,12 @@
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
-  - redaction 路径的中间结果也必须受 `max_read_bytes` 约束；当 ranged `read` 或 `grep`
-    需要的 redacted whole-file intermediate 超出预算时，必须显式失败/跳过，而不是继续无界分配。
+  - redaction 路径的原始输入和中间结果都必须受 `max_read_bytes` 约束；当 ranged `read`
+    或 `grep` 需要 whole-file redaction 时，raw content 和 redacted whole-file intermediate
+    任何一侧超出预算都必须显式失败/跳过，而不是继续无界分配。
+  - scan 内存预算要按 redaction 放大系数计入；启用 `secrets.redact_regexes` 时，service
+    需要按每个 in-flight scan 最多同时持有一份原文和一份有界 redacted copy 来估算容量，
+    不能只按单 buffer 估算。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
   - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响 `peer_ip`
@@ -54,6 +58,9 @@
   - 当前这里没有接入 YAML。
 - `service/src/server/auth.rs`
   - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验、摘要匹配和 workspace allowlist 约束。
+- `src/store/mod.rs`
+  - 仍保留 legacy `list_metas_by_prefix_page` compatibility fallback，但它只保证正确性，
+    不保证大前缀 scan budget / 性能语义；fallback 命中时现在会显式告警，不再静默退化。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 
