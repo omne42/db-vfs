@@ -61,7 +61,7 @@ pub struct Limits {
     pub max_walk_entries: usize,
     #[serde(default = "default_max_walk_files")]
     pub max_walk_files: usize,
-    #[serde(default)]
+    #[serde(default = "default_max_walk_ms")]
     pub max_walk_ms: Option<u64>,
     #[serde(default = "default_max_line_bytes")]
     pub max_line_bytes: usize,
@@ -832,6 +832,19 @@ impl VfsPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn deserialize_limits_defaults_max_walk_ms_when_omitted_in_json() {
+        let limits: Limits = serde_json::from_str("{}").expect("deserialize limits");
+        assert_eq!(limits.max_walk_ms, Some(2_000));
+    }
+
+    #[test]
+    fn deserialize_limits_defaults_max_walk_ms_when_omitted_in_toml() {
+        let limits: Limits = toml::from_str("").expect("deserialize limits");
+        assert_eq!(limits.max_walk_ms, Some(2_000));
+    }
 
     #[test]
     fn validate_rejects_large_max_results() {
@@ -1067,5 +1080,20 @@ mod tests {
         policy.audit.flush_max_interval_ms = Some(MAX_AUDIT_FLUSH_MAX_INTERVAL_MS + 1);
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn deserialize_missing_max_walk_ms_uses_policy_default() {
+        let policy: VfsPolicy = serde_json::from_value(json!({
+            "permissions": {},
+            "limits": {},
+            "secrets": {},
+            "traversal": {},
+            "audit": {},
+            "auth": {}
+        }))
+        .expect("deserialize policy");
+
+        assert_eq!(policy.limits.max_walk_ms, Some(2_000));
     }
 }

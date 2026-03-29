@@ -13,3 +13,7 @@ globset = "0.4"
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+
+[dev-dependencies]
+serde_json = "1"
+toml = "0.8"
