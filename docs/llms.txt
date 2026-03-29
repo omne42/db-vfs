@@ -148,6 +148,7 @@ Tune policy `limits` for your workload:
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
+- Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
@@ -333,6 +334,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
+- core/policy: make omitted `limits.max_walk_ms` deserialize to the default `Some(2000)` scan budget.
 - core/path-policy: tighten workspace/path validation (control chars, wildcard constraints, oversized inputs).
 - migrations: add DB-level integrity checks for version/timestamp/path/content-size consistency.
 - service/audit-runtime: keep required-audit waits under the originating request's concurrency slot and remaining runtime budget so slow audit sinks cannot free execution capacity before the response can legally return.
@@ -794,6 +796,7 @@ Critical bounded fields include:
 Budget semantics:
 
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
+- Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
