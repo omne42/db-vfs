@@ -113,6 +113,7 @@ Tune policy `limits` for your workload:
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`) and DB pool wait/connect time.
+- Service startup migrations also use `max_io_ms` as their DB wait/lock budget: SQLite binds migration `busy_timeout` to it, and Postgres applies it to startup `statement_timeout` plus `lock_timeout`.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
