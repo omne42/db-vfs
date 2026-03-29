@@ -76,7 +76,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
-Line-range `read` enforces `max_read_bytes` on the returned slice, not on the whole backing file.
+Line-range `read` still enforces `max_read_bytes` on the returned slice, but when secret
+redaction rules are active the redacted whole-file intermediate must also fit within the same
+budget; otherwise the request fails with `file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -116,7 +118,9 @@ Budget semantics:
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
+- `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
+- `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
 
 ## Observability / Audit
 

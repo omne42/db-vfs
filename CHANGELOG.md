@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
 - store/sqlite+postgres: persist per-path version generations across delete/recreate so stale `expected_version` values cannot match a newly recreated file, and add regression coverage for SQLite, Postgres store integration, and Postgres HTTP smoke paths.
