@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/read+service/runtime: make redaction-enabled ranged `read` reject oversized raw files before whole-file loading, and count redaction copy amplification in scan in-flight memory warnings so configured scan budgets better match real peak memory.
+- store/pagination: make the legacy `list_metas_by_prefix_page` compatibility fallback emit a one-time explicit warning when it degrades into repeated prefix rescans, so third-party store implementations do not silently lose large-prefix scan-budget/performance guarantees.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.

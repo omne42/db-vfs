@@ -69,11 +69,16 @@ Budget semantics:
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
 - SQLite `busy_timeout` and Postgres `statement_timeout` / `lock_timeout` are reset to the active request or startup migration budget.
+- When `secrets.redact_regexes` is non-empty, size budgeting must account for both the original
+  scan input and a bounded redacted copy. Treat one in-flight redacted scan as up to
+  `2 * max_read_bytes` of content memory.
 
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
+- Ranged `read` with redaction enabled rejects files whose original content already exceeds
+  `max_read_bytes`, even if the requested line slice would be smaller after redaction.
 
 ## Audit behavior matrix
 

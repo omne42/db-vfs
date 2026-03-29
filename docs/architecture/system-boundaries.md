@@ -15,10 +15,14 @@
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
+  - 开启 redaction 规则的 ranged `read` 仍然需要 whole-file 视图来保住多行 redaction 的行语义；
+    因此原始文件内容和 redacted intermediate 都必须受 `max_read_bytes` 约束，超预算时要在切片前显式失败。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
   - redaction 路径的中间结果也必须受 `max_read_bytes` 约束；当 ranged `read` 或 `grep`
     需要的 redacted whole-file intermediate 超出预算时，必须显式失败/跳过，而不是继续无界分配。
+  - `Store::list_metas_by_prefix_page` 的兼容回退只保证正确性，不保证大前缀 scan 的预算/性能语义；
+    如果 concrete store 退回到 repeated prefix rescans，运行时必须给实现者显式信号，不能继续静默退化。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
   - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响 `peer_ip`
@@ -40,6 +44,8 @@
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - service 的 scan 内存预算提示必须把 redaction 造成的 whole-file copy 算进去；仅按单份
+    `max_read_bytes * max_concurrency_scan` 估算会低报峰值内存。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
     `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
     panic，也不需要把这类状态延后到运行期才暴露。
