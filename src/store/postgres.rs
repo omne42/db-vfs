@@ -90,6 +90,34 @@ where
         Ok(row.map(|row| row.get::<_, String>(0)))
     }
 
+    fn get_content_chunk(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_char: u64,
+        max_chars: usize,
+    ) -> Result<Option<String>> {
+        if max_chars == 0 {
+            return Ok(Some(String::new()));
+        }
+
+        let version = u64_to_i64(version, "version")?;
+        let start_char = u64_to_i64(start_char, "start_char")?;
+        let max_chars = usize_to_i64(max_chars, "max_chars")?;
+        let row = self
+            .client
+            .query_opt(
+                "SELECT substring(content FROM $4 FOR $5)
+                 FROM files
+                 WHERE workspace_id = $1 AND path = $2 AND version = $3",
+                &[&workspace_id, &path, &version, &start_char, &max_chars],
+            )
+            .map_err(map_postgres_err)?;
+
+        Ok(row.map(|row| row.get::<_, String>(0)))
+    }
+
     fn insert_file_new(
         &mut self,
         workspace_id: &str,
@@ -436,6 +464,10 @@ fn map_postgres_err(err: postgres::Error) -> Error {
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
+}
+
+fn usize_to_i64(value: usize, field: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 
