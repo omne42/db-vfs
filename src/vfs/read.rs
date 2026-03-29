@@ -69,26 +69,40 @@ pub(super) fn read<S: crate::store::Store>(
                 )));
             }
 
-            let (meta, content) =
-                load_content_with_retry(vfs, &request.workspace_id, &requested_path, meta, false)?;
-            let content = if has_redaction_rules {
-                vfs.redactor
+            if has_redaction_rules {
+                let (meta, content) = load_content_with_retry(
+                    vfs,
+                    &request.workspace_id,
+                    &requested_path,
+                    meta,
+                    false,
+                )?;
+                let content = vfs
+                    .redactor
                     .redact_text_owned_bounded(content, max_read_bytes_usize)
                     .map_err(|size| {
                         file_too_large_due_to_redaction(&requested_path, size, max_read_bytes)
-                    })?
+                    })?;
+                let extracted = extract_line_range(
+                    &content,
+                    start_line,
+                    end_line,
+                    max_read_bytes,
+                    meta.size_bytes,
+                    &requested_path,
+                )?;
+                (extracted, meta.version, true)
             } else {
-                content
-            };
-            let extracted = extract_line_range(
-                &content,
-                start_line,
-                end_line,
-                max_read_bytes,
-                meta.size_bytes,
-                &requested_path,
-            )?;
-            (extracted, meta.version, has_redaction_rules)
+                let (meta, extracted) = load_line_range_with_retry(
+                    vfs,
+                    &request.workspace_id,
+                    &requested_path,
+                    meta,
+                    start_line,
+                    end_line,
+                )?;
+                (extracted, meta.version, false)
+            }
         }
         _ => {
             return Err(Error::InvalidPath(
@@ -206,6 +220,83 @@ fn load_content_with_retry<S: crate::store::Store>(
                 } else {
                     // `read` is synchronous; service runs it in a blocking worker.
                     // Keep a tiny backoff here to avoid tight spinning on rapidly mutating rows.
+                    std::thread::sleep(Duration::from_millis(CONTENT_RETRY_BACKOFF_MS));
+                }
+            }
+        }
+    }
+}
+
+fn load_line_range_with_retry<S: crate::store::Store>(
+    vfs: &mut DbVfs<S>,
+    workspace_id: &str,
+    path: &str,
+    mut meta: crate::store::FileMeta,
+    start_line: u64,
+    end_line: u64,
+) -> Result<(crate::store::FileMeta, String)> {
+    let max_bytes = vfs.policy.limits.max_read_bytes;
+    let mut attempts: usize = 0;
+    loop {
+        if attempts >= MAX_CONTENT_LOAD_ATTEMPTS {
+            let now = vfs.store.get_meta(workspace_id, path)?;
+            return Err(match now {
+                None => read_not_found_err(path, attempts),
+                Some(now) => {
+                    if now.version != meta.version {
+                        Error::Conflict(format!(
+                            "file changed during read (path={path}, expected_version={}, actual_version={}, attempts={attempts})",
+                            meta.version, now.version
+                        ))
+                    } else {
+                        Error::Db(format!(
+                            "file line range could not be loaded (path={path}, version={}, attempts={attempts})",
+                            meta.version
+                        ))
+                    }
+                }
+            });
+        }
+        attempts += 1;
+
+        match vfs.store.get_line_range(
+            workspace_id,
+            path,
+            meta.version,
+            start_line,
+            end_line,
+            max_bytes,
+        )? {
+            Some(range) => {
+                if range.total_lines < end_line || start_line > range.total_lines {
+                    return Err(Error::InvalidPath(format!(
+                        "line range {}..{} out of bounds (file has {} lines)",
+                        start_line, end_line, range.total_lines
+                    )));
+                }
+                if range.bytes_read > max_bytes {
+                    return Err(Error::FileTooLarge {
+                        path: path.to_string(),
+                        size_bytes: range.bytes_read,
+                        max_bytes,
+                    });
+                }
+                let content = range.content.ok_or_else(|| {
+                    Error::Db(format!(
+                        "store returned no content for in-bounds line range (path={path}, version={})",
+                        meta.version
+                    ))
+                })?;
+                return Ok((meta, content));
+            }
+            None => {
+                meta = vfs
+                    .store
+                    .get_meta(workspace_id, path)?
+                    .ok_or_else(|| read_not_found_err(path, attempts))?;
+                if attempts <= CONTENT_RETRY_YIELD_ATTEMPTS {
+                    std::thread::yield_now();
+                } else {
                     std::thread::sleep(Duration::from_millis(CONTENT_RETRY_BACKOFF_MS));
                 }
             }
@@ -612,6 +703,92 @@ mod tests {
         }
     }
 
+    struct ChunkOnlyStore {
+        meta: FileMeta,
+        content: String,
+        chunk_chars: usize,
+        chunk_reads: usize,
+    }
+
+    impl Store for ChunkOnlyStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            panic!("chunked ranged read should not fall back to get_content");
+        }
+
+        fn get_content_chunk(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+            start_char: u64,
+            max_chars: usize,
+        ) -> Result<Option<String>> {
+            if path != self.meta.path || version != self.meta.version {
+                return Ok(None);
+            }
+
+            self.chunk_reads = self.chunk_reads.saturating_add(1);
+            let take = max_chars.min(self.chunk_chars);
+            let start_idx = usize::try_from(start_char.saturating_sub(1))
+                .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
+            Ok(Some(
+                self.content.chars().skip(start_idx).take(take).collect(),
+            ))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
     #[test]
     fn read_fails_when_redaction_expands_beyond_max_read_bytes() {
         let store = StaticContentStore {
@@ -742,6 +919,38 @@ mod tests {
             .expect("ranged read");
         assert_eq!(resp.content, "line-2\n");
         assert_eq!(resp.bytes_read, 7);
+    }
+
+    #[test]
+    fn ranged_read_without_redaction_uses_chunked_store_reads() {
+        let content = "line-1\nline-2\nline-3\n".repeat(32);
+        let store = ChunkOnlyStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content,
+            chunk_chars: 5,
+            chunk_reads: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 8;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(2),
+            })
+            .expect("ranged read");
+        assert_eq!(resp.content, "line-2\n");
+        assert!(vfs.store_mut().chunk_reads > 1);
     }
 
     #[test]

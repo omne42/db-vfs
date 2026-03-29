@@ -114,6 +114,38 @@ where
         .map_err(map_sqlite_err)
     }
 
+    fn get_content_chunk(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_char: u64,
+        max_chars: usize,
+    ) -> Result<Option<String>> {
+        if max_chars == 0 {
+            return Ok(Some(String::new()));
+        }
+
+        let version = u64_to_i64(version, "version")?;
+        let start_char = u64_to_i64(start_char, "start_char")?;
+        let max_chars = usize_to_i64(max_chars, "max_chars")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT substr(content, ?4, ?5)
+                 FROM files
+                 WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
+            )
+            .map_err(map_sqlite_err)?;
+
+        stmt.query_row(
+            rusqlite::params![workspace_id, path, version, start_char, max_chars],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(map_sqlite_err)
+    }
+
     fn insert_file_new(
         &mut self,
         workspace_id: &str,
@@ -520,6 +552,10 @@ fn map_sqlite_err(err: rusqlite::Error) -> Error {
 }
 
 fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
+    i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
+}
+
+fn usize_to_i64(value: usize, field: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 

@@ -1,6 +1,8 @@
 use db_vfs_core::{Error, Result};
 
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
+const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
+const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct FileRecord {
@@ -60,6 +62,13 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineRangeData {
+    pub content: Option<String>,
+    pub bytes_read: u64,
+    pub total_lines: u64,
+}
+
 pub trait Store {
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>>;
 
@@ -69,6 +78,126 @@ pub trait Store {
         path: &str,
         version: u64,
     ) -> Result<Option<String>>;
+
+    /// Reads a character-bounded chunk of file content for ranged-read traversal.
+    ///
+    /// - `start_char` is 1-based and inclusive.
+    /// - `max_chars` bounds the number of Unicode scalar values returned.
+    /// - `None` indicates the `(workspace_id, path, version)` row no longer exists.
+    /// - `Some("")` indicates end-of-file once the row exists but `start_char` is past the end.
+    ///
+    /// Production stores should override this to avoid materializing whole-file content for
+    /// line-range reads. The default implementation preserves compatibility for legacy stores by
+    /// falling back to [`Store::get_content`].
+    fn get_content_chunk(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_char: u64,
+        max_chars: usize,
+    ) -> Result<Option<String>> {
+        if max_chars == 0 {
+            return Ok(Some(String::new()));
+        }
+
+        let Some(content) = self.get_content(workspace_id, path, version)? else {
+            return Ok(None);
+        };
+        if start_char <= 1 {
+            return Ok(Some(content.chars().take(max_chars).collect()));
+        }
+
+        let start_idx = usize::try_from(start_char.saturating_sub(1))
+            .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
+        Ok(Some(
+            content.chars().skip(start_idx).take(max_chars).collect(),
+        ))
+    }
+
+    /// Reads an inclusive line range without forcing the caller to load the entire file.
+    ///
+    /// The returned `content` is present only when the selected slice fits within `max_bytes`.
+    /// When the slice exceeds that budget, `bytes_read` still reports the exact size while
+    /// `content` stays `None` so the caller can fail without materializing the oversized range.
+    fn get_line_range(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_line: u64,
+        end_line: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LineRangeData>> {
+        let chunk_chars = range_read_chunk_chars(max_bytes);
+        let mut start_char = 1u64;
+        let mut current_line = 1u64;
+        let mut bytes_read = 0u64;
+        let mut content = String::new();
+        let mut saw_content = false;
+        let mut last_chunk_ended_with_newline = false;
+
+        loop {
+            let Some(chunk) =
+                self.get_content_chunk(workspace_id, path, version, start_char, chunk_chars)?
+            else {
+                return Ok(None);
+            };
+            if chunk.is_empty() {
+                let total_lines = if !saw_content {
+                    0
+                } else if last_chunk_ended_with_newline {
+                    current_line.saturating_sub(1)
+                } else {
+                    current_line
+                };
+                return Ok(Some(LineRangeData {
+                    content: (bytes_read <= max_bytes).then_some(content),
+                    bytes_read,
+                    total_lines,
+                }));
+            }
+
+            saw_content = true;
+            last_chunk_ended_with_newline = chunk.as_bytes().last() == Some(&b'\n');
+            let chunk_char_count = u64::try_from(chunk.chars().count())
+                .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
+            let mut segment_start = 0usize;
+
+            for newline_idx in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
+                let segment_end = newline_idx + 1;
+                if current_line >= start_line && current_line <= end_line {
+                    append_range_segment(
+                        &mut content,
+                        &mut bytes_read,
+                        max_bytes,
+                        &chunk[segment_start..segment_end],
+                    );
+                }
+                if current_line == end_line {
+                    return Ok(Some(LineRangeData {
+                        content: (bytes_read <= max_bytes).then_some(content),
+                        bytes_read,
+                        total_lines: end_line,
+                    }));
+                }
+                current_line = current_line.saturating_add(1);
+                segment_start = segment_end;
+            }
+
+            if segment_start < chunk.len() && current_line >= start_line && current_line <= end_line
+            {
+                append_range_segment(
+                    &mut content,
+                    &mut bytes_read,
+                    max_bytes,
+                    &chunk[segment_start..],
+                );
+            }
+
+            start_char = start_char.saturating_add(chunk_char_count);
+        }
+    }
 
     fn insert_file_new(
         &mut self,
@@ -161,6 +290,19 @@ pub trait Store {
             }
             fetch_limit = next;
         }
+    }
+}
+
+fn range_read_chunk_chars(max_bytes: u64) -> usize {
+    let budget_chars = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
+    budget_chars.clamp(DEFAULT_RANGE_READ_CHUNK_CHARS, MAX_RANGE_READ_CHUNK_CHARS)
+}
+
+fn append_range_segment(content: &mut String, bytes_read: &mut u64, max_bytes: u64, segment: &str) {
+    let segment_bytes = u64::try_from(segment.len()).unwrap_or(u64::MAX);
+    *bytes_read = bytes_read.saturating_add(segment_bytes);
+    if *bytes_read <= max_bytes {
+        content.push_str(segment);
     }
 }
 
