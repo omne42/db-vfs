@@ -113,8 +113,9 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 
 Line-range `read` still enforces `max_read_bytes` on the returned slice. Without secret redaction
 rules, the store can stop after the requested range instead of materializing the whole file. When
-secret redaction rules are active, the redacted whole-file intermediate must still fit within the
-same budget; otherwise the request fails with `file_too_large` before slice extraction.
+secret redaction rules are active, both the original file content and the redacted whole-file
+intermediate must still fit within the same budget; otherwise the request fails with
+`file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -156,6 +157,8 @@ Budget semantics:
 - Service startup DB migrations also reuse `max_io_ms` for connect/lock budgeting, so startup cannot hang indefinitely under backend contention.
 - SQLite `busy_timeout` and Postgres `statement_timeout`/`lock_timeout` follow the active request or startup migration budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
+- When secret redaction rules are configured, scan memory planning should assume up to two
+  `max_read_bytes` buffers per in-flight scan request: source content plus a bounded redacted copy.
 
 Secrets semantics:
 
@@ -355,6 +358,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/read+service/runtime: make redaction-enabled ranged `read` reject oversized raw files before whole-file loading, and count redaction copy amplification in scan in-flight memory warnings so configured scan budgets better match real peak memory.
+- store/pagination: make the legacy `list_metas_by_prefix_page` compatibility fallback emit a one-time explicit warning when it degrades into repeated prefix rescans, so third-party store implementations do not silently lose large-prefix scan-budget/performance guarantees.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
@@ -806,11 +811,16 @@ Budget semantics:
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
 - SQLite `busy_timeout` and Postgres `statement_timeout` / `lock_timeout` are reset to the active request or startup migration budget.
+- When `secrets.redact_regexes` is non-empty, size budgeting must account for both the original
+  scan input and a bounded redacted copy. Treat one in-flight redacted scan as up to
+  `2 * max_read_bytes` of content memory.
 
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
+- Ranged `read` with redaction enabled rejects files whose original content already exceeds
+  `max_read_bytes`, even if the requested line slice would be smaller after redaction.
 
 ## Audit behavior matrix
 
@@ -859,7 +869,7 @@ Request fields:
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
 | `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads still require any redacted whole-file intermediate to stay within budget |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the original file content and any redacted whole-file intermediate to stay within `max_read_bytes` before slicing |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -916,6 +926,8 @@ shape as `glob`).
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
 If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
 counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
+Operationally, scan memory planning should treat each in-flight redacted scan as up to two bounded
+buffers: raw content plus redacted content.
 
 ## Path normalization rules
 
