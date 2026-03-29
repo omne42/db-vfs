@@ -50,6 +50,20 @@ fn ensure_postgres_schema(url: &str) {
     }
 }
 
+fn generation_row_count(url: &str, workspace_id: &str, path: &str) -> i64 {
+    let mut client =
+        postgres::Client::connect(url, postgres::NoTls).expect("connect postgres client");
+    client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT
+             FROM file_generations
+             WHERE workspace_id = $1 AND path = $2",
+            &[&workspace_id, &path],
+        )
+        .expect("count generation rows")
+        .get::<_, i64>(0)
+}
+
 struct CleanupGuard {
     url: String,
     workspace_id: String,
@@ -253,6 +267,72 @@ fn postgres_update_distinguishes_conflict_and_not_found() {
         .update_file_cas(&ws, &path, "missing", version, now_ms())
         .expect_err("missing row should report not_found");
     assert_eq!(err.code(), "not_found");
+}
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_missing_update_does_not_create_generation_state() {
+    let url = postgres_url();
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url: url.clone(),
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let err = store
+        .update_file_cas(&ws, &path, "missing", 1, now_ms())
+        .expect_err("missing row should report not_found");
+    assert_eq!(err.code(), "not_found");
+    assert_eq!(generation_row_count(&url, &ws, &path), 0);
+
+    let inserted = store
+        .insert_file_new(&ws, &path, "hello", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(inserted, 1);
+}
+
+#[test]
+#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
+fn postgres_missing_delete_does_not_create_generation_state() {
+    let url = postgres_url();
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url: url.clone(),
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let outcome = store
+        .delete_file(&ws, &path, Some(1))
+        .unwrap_or_else(|err| panic!("delete_file failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(outcome, DeleteOutcome::NotFound);
+    assert_eq!(generation_row_count(&url, &ws, &path), 0);
+
+    let inserted = store
+        .insert_file_new(&ws, &path, "hello", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(inserted, 1);
 }
 
 #[test]
