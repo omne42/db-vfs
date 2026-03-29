@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
