@@ -206,18 +206,27 @@ fn max_body_bytes(policy: &VfsPolicy) -> usize {
     usize::try_from(max).unwrap_or(usize::MAX)
 }
 
+fn estimated_scan_inflight_bytes(policy: &VfsPolicy) -> u64 {
+    let per_request_bytes = if policy.secrets.redact_regexes.is_empty() {
+        policy.limits.max_read_bytes
+    } else {
+        // `grep` and redaction-enabled ranged `read` may need both the original text
+        // buffer and a bounded redacted copy in memory at the same time.
+        policy.limits.max_read_bytes.saturating_mul(2)
+    };
+    per_request_bytes.saturating_mul(policy.limits.max_concurrency_scan as u64)
+}
+
 fn prepare_state(
     mut policy: ValidatedVfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<PreparedState> {
-    let estimated_scan_inflight_bytes = policy
-        .limits
-        .max_read_bytes
-        .saturating_mul(policy.limits.max_concurrency_scan as u64);
+    let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&policy);
     if estimated_scan_inflight_bytes > RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES {
         tracing::warn!(
             max_read_bytes = policy.limits.max_read_bytes,
             max_concurrency_scan = policy.limits.max_concurrency_scan,
+            redaction_copies_input = !policy.secrets.redact_regexes.is_empty(),
             estimated_scan_inflight_bytes,
             recommended_max_scan_inflight_bytes = RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES,
             "scan memory budget is high; consider lowering limits.max_read_bytes or limits.max_concurrency_scan"
@@ -525,6 +534,25 @@ mod tests {
             max_body_bytes(&policy),
             (256 * 1024 * 1024 + 64 * 1024) as usize
         );
+    }
+
+    #[test]
+    fn estimated_scan_inflight_bytes_matches_single_buffer_without_redaction() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_read_bytes = 128;
+        policy.limits.max_concurrency_scan = 3;
+
+        assert_eq!(estimated_scan_inflight_bytes(&policy), 384);
+    }
+
+    #[test]
+    fn estimated_scan_inflight_bytes_accounts_for_redaction_copy() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_read_bytes = 128;
+        policy.limits.max_concurrency_scan = 3;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+
+        assert_eq!(estimated_scan_inflight_bytes(&policy), 768);
     }
 
     #[test]
