@@ -118,7 +118,8 @@ Budget semantics:
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
-- SQLite `busy_timeout` and Postgres `statement_timeout` follow the active request budget.
+- Service startup DB migrations also reuse `max_io_ms` for connect/lock budgeting, so startup cannot hang indefinitely under backend contention.
+- SQLite `busy_timeout` and Postgres `statement_timeout`/`lock_timeout` follow the active request or startup migration budget.
 - Scan requests still keep DB pool wait/connect bounded by `max_io_ms` even when `max_walk_ms = None`.
 
 Secrets semantics:

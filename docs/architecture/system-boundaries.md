@@ -9,9 +9,9 @@
 - `read`、`write`、`patch`、`delete`、`glob`、`grep` 的 VFS 语义
 - `db-vfs-core::policy::VfsPolicy` 及其校验
 - 路径合法性、traversal、secrets redaction、scan budgets
-  - `max_io_ms` 只约束非 scan 请求与对应的 DB 等待预算。
+  - `max_io_ms` 约束非 scan 请求、DB pool wait/connect，以及 service 启动 migration 的 connect/lock 预算。
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
-  - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` 跟随 scan runtime 预算。
+  - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` / `lock_timeout` 跟随当前请求预算。启动 migration 也必须复用有界预算，不能无限挂死在锁竞争上。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
