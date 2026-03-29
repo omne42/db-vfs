@@ -76,9 +76,10 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
-Line-range `read` still enforces `max_read_bytes` on the returned slice, but when secret
-redaction rules are active the redacted whole-file intermediate must also fit within the same
-budget; otherwise the request fails with `file_too_large` before slice extraction.
+Line-range `read` still enforces `max_read_bytes` on the returned slice. Without secret redaction
+rules, the store can stop after the requested range instead of materializing the whole file. When
+secret redaction rules are active, the redacted whole-file intermediate must still fit within the
+same budget; otherwise the request fails with `file_too_large` before slice extraction.
 
 `grep(regex = true)` applies the regex to each logical line independently. Patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
@@ -123,6 +124,7 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
+- `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
 
@@ -138,6 +140,9 @@ Secrets semantics:
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
+- Audit path redaction is conservative for malformed secret-ish inputs too; values such as
+  `.env/../visible.txt` or control-character variants are masked as `<secret>` instead of being
+  written through to JSONL.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
