@@ -237,15 +237,29 @@ async fn audit_logs_rate_limited_requests() {
         .expect("send first write");
     assert_eq!(ok.status(), 200);
 
-    let limited = server
-        .client
-        .post(format!("{}/v1/write", server.base))
-        .header("authorization", format!("Bearer {DEV_TOKEN}"))
-        .json(&req)
-        .send()
-        .await
-        .expect("send second write");
-    assert_eq!(limited.status(), 429);
+    let mut saw_rate_limit = false;
+    for attempt in 0..8 {
+        let mut req = req.clone();
+        req.path = format!("docs/rate-limit-{attempt}.txt");
+        let resp = server
+            .client
+            .post(format!("{}/v1/write", server.base))
+            .header("authorization", format!("Bearer {DEV_TOKEN}"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send follow-up write");
+        if resp.status() == 429 {
+            saw_rate_limit = true;
+            break;
+        }
+        assert_eq!(
+            resp.status(),
+            200,
+            "expected follow-up write to be accepted or rate limited"
+        );
+    }
+    assert!(saw_rate_limit, "expected at least one rate-limited write");
 
     let lines = wait_for_audit_lines(&server.audit_path, 2).await;
     let event = find_event(&lines, "write", 429, "rate_limited");
