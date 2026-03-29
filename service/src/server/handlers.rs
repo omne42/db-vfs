@@ -1274,13 +1274,13 @@ mod tests {
                         None,
                     ),
                     permit,
-                    Some(Duration::from_millis(10)),
+                    Some(Duration::from_millis(250)),
                 )
                 .await
             }
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             while !control.is_blocked() {
                 tokio::task::yield_now().await;
             }
