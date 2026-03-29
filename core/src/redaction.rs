@@ -15,6 +15,8 @@ const MAX_REDACT_REGEXES: usize = 128;
 const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
 const MAX_REDACT_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
+// Keep in sync with the corresponding `VfsPolicy::validate` bound.
+const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
 
 fn is_canonical_runtime_path(path: &str) -> bool {
     is_canonical_runtime_relative_path(path)
@@ -97,8 +99,26 @@ fn summarize_pattern_for_error(pattern: &str) -> String {
     format!("{}…", &pattern[..end])
 }
 
+fn validate_replacement(replacement: &str) -> Result<()> {
+    if replacement.len() > MAX_SECRET_REPLACEMENT_BYTES {
+        return Err(Error::InvalidPolicy(format!(
+            "secrets.replacement is too large ({} bytes; max {} bytes)",
+            replacement.len(),
+            MAX_SECRET_REPLACEMENT_BYTES
+        )));
+    }
+    if replacement.chars().any(char::is_control) {
+        return Err(Error::InvalidPolicy(
+            "secrets.replacement must not contain control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl SecretRedactor {
     pub fn from_rules(rules: &SecretRules) -> Result<Self> {
+        validate_replacement(&rules.replacement)?;
+
         let mut deny_builder = GlobSetBuilder::new();
         let source = SecretRulesSource {
             deny_globs: rules.deny_globs.clone(),
@@ -389,6 +409,30 @@ mod tests {
             ..SecretRules::default()
         };
         assert!(SecretRedactor::from_rules(&rules).is_err());
+    }
+
+    #[test]
+    fn replacement_rejects_control_characters() {
+        let rules = SecretRules {
+            replacement: "line1\nline2".to_string(),
+            ..SecretRules::default()
+        };
+        let err = SecretRedactor::from_rules(&rules).expect_err("control chars should fail");
+        assert!(
+            err.to_string()
+                .contains("must not contain control characters")
+        );
+    }
+
+    #[test]
+    fn replacement_rejects_oversized_value() {
+        let rules = SecretRules {
+            replacement: "x".repeat(MAX_SECRET_REPLACEMENT_BYTES + 1),
+            ..SecretRules::default()
+        };
+        let err =
+            SecretRedactor::from_rules(&rules).expect_err("oversized replacement should fail");
+        assert!(err.to_string().contains("secrets.replacement is too large"));
     }
 
     #[test]
