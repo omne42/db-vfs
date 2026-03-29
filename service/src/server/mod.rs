@@ -157,7 +157,6 @@ const CODE_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const CODE_TIMEOUT: &str = "timeout";
 const CODE_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 const RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
-const SQLITE_DEFAULT_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
 
 fn status_for_error_code(code: &str) -> StatusCode {
     match code {
@@ -335,14 +334,21 @@ fn sqlite_uses_in_memory_pool(db_path: &std::path::Path) -> bool {
     db_path == std::path::Path::new(":memory:")
 }
 
-fn sqlite_connection_manager(db_path: &std::path::Path) -> r2d2_sqlite::SqliteConnectionManager {
+fn startup_migration_timeout(policy: &VfsPolicy) -> Duration {
+    Duration::from_millis(policy.limits.max_io_ms)
+}
+
+fn sqlite_connection_manager(
+    db_path: &std::path::Path,
+    startup_busy_timeout: Duration,
+) -> r2d2_sqlite::SqliteConnectionManager {
     let manager = if sqlite_uses_in_memory_pool(db_path) {
         r2d2_sqlite::SqliteConnectionManager::memory()
     } else {
         r2d2_sqlite::SqliteConnectionManager::file(db_path)
     };
     manager.with_init(move |conn| {
-        conn.busy_timeout(Duration::from_millis(SQLITE_DEFAULT_BUSY_TIMEOUT_MS))?;
+        conn.busy_timeout(startup_busy_timeout)?;
         Ok(())
     })
 }
@@ -362,7 +368,8 @@ pub fn build_app_sqlite(
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
-    let manager = sqlite_connection_manager(&db_path);
+    let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
+    let manager = sqlite_connection_manager(&db_path, migration_timeout);
     let max_pool_size = sqlite_pool_max_size(&db_path, prepared.policy.limits.max_db_connections);
     if max_pool_size != prepared.policy.limits.max_db_connections {
         tracing::warn!(
@@ -373,7 +380,7 @@ pub fn build_app_sqlite(
     }
     let pool = r2d2::Pool::builder()
         .max_size(max_pool_size)
-        .connection_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms))
+        .connection_timeout(migration_timeout)
         .build(manager)
         .map_err(anyhow::Error::msg)?;
     {
@@ -394,12 +401,15 @@ pub fn build_app_postgres(
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
+    let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
 
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
-    config.connect_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms));
+    config.connect_timeout(migration_timeout);
 
     {
         let mut client = config.connect(r2d2_postgres::postgres::NoTls)?;
+        backend::configure_postgres_session_timeouts(&mut client, Some(migration_timeout))
+            .map_err(anyhow::Error::msg)?;
         db_vfs::migrations::migrate_postgres(&mut client).map_err(anyhow::Error::msg)?;
     }
 
@@ -407,7 +417,7 @@ pub fn build_app_postgres(
         r2d2_postgres::PostgresConnectionManager::new(config, r2d2_postgres::postgres::NoTls);
     let pool = r2d2::Pool::builder()
         .max_size(prepared.policy.limits.max_db_connections)
-        .connection_timeout(Duration::from_millis(prepared.policy.limits.max_io_ms))
+        .connection_timeout(migration_timeout)
         .build(manager)?;
 
     let (state, body_limit) = build_state(backend::Backend::Postgres { pool }, prepared);
@@ -535,7 +545,10 @@ mod tests {
 
     #[test]
     fn sqlite_memory_pool_reuses_the_single_migrated_connection() {
-        let manager = sqlite_connection_manager(std::path::Path::new(":memory:"));
+        let manager = sqlite_connection_manager(
+            std::path::Path::new(":memory:"),
+            startup_migration_timeout(&VfsPolicy::default()),
+        );
         let pool = r2d2::Pool::builder()
             .max_size(1)
             .build(manager)
@@ -565,11 +578,30 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_default_busy_timeout_is_effectively_unbounded() {
+    fn startup_migration_timeout_tracks_io_budget() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = 1450;
         assert_eq!(
-            Duration::from_millis(SQLITE_DEFAULT_BUSY_TIMEOUT_MS),
-            Duration::from_millis(i32::MAX as u64)
+            startup_migration_timeout(&policy),
+            Duration::from_millis(1450)
         );
+    }
+
+    #[test]
+    fn sqlite_connection_manager_applies_startup_busy_timeout_budget() {
+        let manager = sqlite_connection_manager(
+            std::path::Path::new(":memory:"),
+            Duration::from_millis(1450),
+        );
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let conn = pool.get().expect("pooled sqlite connection");
+        let busy_timeout_ms: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("query busy_timeout");
+        assert_eq!(busy_timeout_ms, 1450);
     }
 
     #[tokio::test]
