@@ -85,6 +85,8 @@ before slice extraction.
 `grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
 literal queries containing `\n` or `\r` short-circuit to no matches without forcing content loads.
+Within that contract, `\r\n` is treated as a single line boundary rather than two independent
+breaks, so CRLF files keep stable line numbering.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file

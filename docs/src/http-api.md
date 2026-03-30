@@ -69,6 +69,7 @@ Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`
 consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
 not part of this endpoint contract. Literal queries containing `\n` or `\r` are treated as
 impossible line-spanning literals and return no matches without loading file contents.
+Files using `\r\n` are still counted as one line break per record, not two.
 
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).
