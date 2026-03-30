@@ -18,6 +18,7 @@ const MAX_REDACT_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_REDACT_REGEX_NEST_LIMIT: u32 = 128;
 // Keep in sync with the corresponding `VfsPolicy::validate` bound.
 const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
+pub const AUDIT_SECRET_PLACEHOLDER: &str = "<secret>";
 const AUDIT_DESCENDANT_PROBE_SEGMENT: &str = "__db_vfs_audit_probe__";
 const MAX_AUDIT_DENY_PROBES: usize = 128;
 
@@ -259,6 +260,33 @@ impl SecretRedactor {
                     glob.is_match(Path::new(&prefixed))
                 })
         })
+    }
+
+    pub fn redact_audit_path(&self, path: &str) -> String {
+        if self.path_or_any_descendant_is_denied(path) {
+            AUDIT_SECRET_PLACEHOLDER.to_string()
+        } else {
+            path.to_string()
+        }
+    }
+
+    pub fn redact_audit_path_pair(&self, requested_path: &str, path: &str) -> (String, String) {
+        if requested_path == path {
+            let redacted = self.redact_audit_path(requested_path);
+            return (redacted.clone(), redacted);
+        }
+        (
+            self.redact_audit_path(requested_path),
+            self.redact_audit_path(path),
+        )
+    }
+
+    pub fn redact_audit_glob_pattern(&self, pattern: &str) -> String {
+        if self.glob_may_match_denied_path(pattern) {
+            AUDIT_SECRET_PLACEHOLDER.to_string()
+        } else {
+            pattern.to_string()
+        }
     }
 
     pub fn redact_text(&self, input: &str) -> String {
@@ -813,6 +841,84 @@ mod tests {
         assert!(redactor.glob_may_match_denied_path(".{envrc,netrc}"));
         assert!(redactor.glob_may_match_denied_path("docs/**/.env*"));
         assert!(!redactor.glob_may_match_denied_path("docs/*.txt"));
+    }
+
+    #[test]
+    fn redact_audit_path_conservatively_masks_secretish_malformed_inputs() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert_eq!(redactor.redact_audit_path(".git"), AUDIT_SECRET_PLACEHOLDER);
+        assert_eq!(
+            redactor.redact_audit_path(".git/"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_path(".env/../visible.txt"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_path("docs/.git/\u{0000}config"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_path("docs/../visible.txt"),
+            "docs/../visible.txt"
+        );
+    }
+
+    #[test]
+    fn redact_audit_path_pair_reuses_single_redaction_result() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert_eq!(
+            redactor.redact_audit_path_pair(".git", ".git"),
+            (
+                AUDIT_SECRET_PLACEHOLDER.to_string(),
+                AUDIT_SECRET_PLACEHOLDER.to_string()
+            )
+        );
+        assert_eq!(
+            redactor.redact_audit_path_pair("docs/a.txt", "docs/a.txt"),
+            ("docs/a.txt".to_string(), "docs/a.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn redact_audit_glob_pattern_masks_secretish_patterns() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(".[en]nv"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(".git"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(".env*"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern("docs/**/.env*"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(".{envrc,netrc}"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern("**/{.envrc,.netrc}"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern("docs/*.txt"),
+            "docs/*.txt"
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern("docs/{readme,license}.md"),
+            "docs/{readme,license}.md"
+        );
     }
 
     #[test]

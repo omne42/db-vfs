@@ -9,7 +9,7 @@
 - `core/src/traversal.rs` / `core/src/glob_utils.rs`
   - 扫描与匹配的低层规则。
 - `core/src/redaction.rs`
-  - secrets redaction 相关能力。
+  - secrets redaction 相关能力，以及 audit path/glob 字段的保守遮蔽辅助。
 - `core/src/error.rs`
   - core 领域错误。
 
@@ -36,6 +36,7 @@
   - 审计事件落盘与 required-audit ack 协调。
 - `service/src/server/handlers.rs` / `layers.rs` / `runner.rs` / `mod.rs`
   - HTTP handlers、middleware、请求预算/permit 生命周期和服务装配。
+  - handlers 只负责把审计字段映射到 `core::redaction` 的窄 API，不再本地重写 deny-glob/path probe 语义。
 
 ## Data And Migrations
 

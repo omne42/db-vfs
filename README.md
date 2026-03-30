@@ -160,7 +160,9 @@ Secrets semantics:
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
 - Audit path/glob redaction is conservative for malformed or pattern-based secret-ish inputs too;
   values such as `.env/../visible.txt`, `".[en]nv"`, or control-character variants are masked as
-  `<secret>` instead of being written through to JSONL.
+  `<secret>` instead of being written through to JSONL. That masking is derived from the same
+  policy-backed `core::redaction` matcher semantics used by runtime secret denial, so service-layer
+  audit fields do not maintain a separate guessing rule set.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
