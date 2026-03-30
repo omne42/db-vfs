@@ -5,6 +5,8 @@ use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
 use db_vfs_core::{Error, Result};
 use regex_syntax::hir::{Class, Hir, HirKind};
 
+use crate::text_lines::line_spans;
+
 use super::util::{
     compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
     u64_decimal_len,
@@ -460,13 +462,14 @@ pub(super) fn grep<S: crate::store::Store>(
             {
                 continue;
             }
-            let mut line_no: u64 = 1;
-            for line in searchable_content.lines() {
+            for (idx, span) in line_spans(searchable_content).enumerate() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                     scan_limit_reached = true;
                     scan_limit_reason = Some(ScanLimitReason::Time);
                     break 'scan;
                 }
+                let line_no = u64::try_from(idx + 1).unwrap_or(u64::MAX);
+                let line = span.content;
 
                 let ok = match &regex {
                     Some(regex) => regex.is_match(line),
@@ -475,7 +478,6 @@ pub(super) fn grep<S: crate::store::Store>(
                         .is_some_and(|finder| finder.find(line.as_bytes()).is_some()),
                 };
                 if !ok {
-                    line_no = line_no.saturating_add(1);
                     continue;
                 }
 
@@ -504,7 +506,6 @@ pub(super) fn grep<S: crate::store::Store>(
                     text: line_slice.to_string(),
                     line_truncated,
                 });
-                line_no = line_no.saturating_add(1);
 
                 if matches.len() >= vfs.policy.limits.max_results {
                     scan_limit_reached = true;
@@ -830,6 +831,72 @@ mod tests {
     }
 
     #[test]
+    fn grep_treats_cr_only_text_as_line_oriented() {
+        let content = "alpha\rbeta\rgamma";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "beta".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 2);
+        assert_eq!(resp.matches[0].text, "beta");
+    }
+
+    #[test]
+    fn grep_treats_crlf_as_single_line_boundary() {
+        let content = "alpha\r\nbeta\r\ngamma";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "gamma".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 3);
+        assert_eq!(resp.matches[0].text, "gamma");
+    }
+
+    #[test]
     fn grep_uses_line_preserving_redaction_for_multiline_secret_matches() {
         let content = "BEGIN\nsecret\nEND\npublic\n";
         let store = SingleFileStore {
@@ -911,6 +978,39 @@ mod tests {
     #[test]
     fn grep_regex_matches_are_evaluated_per_line() {
         let content = "foo\nbar\nbaz\n";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "^bar$".to_string(),
+                regex: true,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 2);
+        assert_eq!(resp.matches[0].text, "bar");
+    }
+
+    #[test]
+    fn grep_regex_matches_are_evaluated_per_cr_only_lines() {
+        let content = "foo\rbar\rbaz\r";
         let store = SingleFileStore {
             meta: FileMeta {
                 path: "a".to_string(),
@@ -1200,6 +1300,39 @@ mod tests {
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
         assert_eq!(vfs.store_mut().content_calls, 0);
+    }
+
+    #[test]
+    fn grep_reports_cr_only_line_numbers() {
+        let content = "alpha\rbeta\rgamma";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "gamma".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].line, 3);
+        assert_eq!(resp.matches[0].text, "gamma");
     }
 
     #[test]

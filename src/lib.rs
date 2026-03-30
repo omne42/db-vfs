@@ -8,6 +8,7 @@
 
 pub mod migrations;
 pub mod store;
+pub(crate) mod text_lines;
 pub mod vfs;
 
 pub use db_vfs_core::{Error, Result};

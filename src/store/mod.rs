@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use db_vfs_core::{Error, Result};
 
+#[cfg(test)]
+use crate::text_lines::line_spans;
+
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
 const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
@@ -147,7 +150,8 @@ pub trait Store {
         let mut bytes_read = 0u64;
         let mut content = String::new();
         let mut saw_content = false;
-        let mut last_chunk_ended_with_newline = false;
+        let mut line_buffer = String::new();
+        let mut pending_cr = false;
 
         loop {
             let Some(chunk) =
@@ -156,12 +160,26 @@ pub trait Store {
                 return Ok(None);
             };
             if chunk.is_empty() {
-                let total_lines = if !saw_content {
-                    0
-                } else if last_chunk_ended_with_newline {
+                if !line_buffer.is_empty() {
+                    if current_line >= start_line && current_line <= end_line {
+                        append_range_segment(
+                            &mut content,
+                            &mut bytes_read,
+                            max_bytes,
+                            &line_buffer,
+                        );
+                    }
+                    let total_lines = current_line;
+                    return Ok(Some(LineRangeData {
+                        content: (bytes_read <= max_bytes).then_some(content),
+                        bytes_read,
+                        total_lines,
+                    }));
+                }
+                let total_lines = if saw_content {
                     current_line.saturating_sub(1)
                 } else {
-                    current_line
+                    0
                 };
                 return Ok(Some(LineRangeData {
                     content: (bytes_read <= max_bytes).then_some(content),
@@ -171,20 +189,15 @@ pub trait Store {
             }
 
             saw_content = true;
-            last_chunk_ended_with_newline = chunk.as_bytes().last() == Some(&b'\n');
             let chunk_char_count = u64::try_from(chunk.chars().count())
                 .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
-            let mut segment_start = 0usize;
 
-            for newline_idx in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
-                let segment_end = newline_idx + 1;
+            let bytes = chunk.as_bytes();
+            let mut pos = 0usize;
+            if pending_cr && bytes.first() == Some(&b'\n') {
+                line_buffer.push('\n');
                 if current_line >= start_line && current_line <= end_line {
-                    append_range_segment(
-                        &mut content,
-                        &mut bytes_read,
-                        max_bytes,
-                        &chunk[segment_start..segment_end],
-                    );
+                    append_range_segment(&mut content, &mut bytes_read, max_bytes, &line_buffer);
                 }
                 if current_line == end_line {
                     return Ok(Some(LineRangeData {
@@ -193,18 +206,48 @@ pub trait Store {
                         total_lines: end_line,
                     }));
                 }
+                line_buffer.clear();
                 current_line = current_line.saturating_add(1);
-                segment_start = segment_end;
+                pos = 1;
             }
-            if segment_start < chunk.len() && current_line >= start_line && current_line <= end_line
-            {
-                append_range_segment(
-                    &mut content,
-                    &mut bytes_read,
-                    max_bytes,
-                    &chunk[segment_start..],
-                );
+            pending_cr = false;
+
+            while pos < chunk.len() {
+                let Some(rel_break) = bytes[pos..]
+                    .iter()
+                    .position(|byte| matches!(byte, b'\n' | b'\r'))
+                else {
+                    line_buffer.push_str(&chunk[pos..]);
+                    break;
+                };
+                let break_idx = pos + rel_break;
+
+                if bytes[break_idx] == b'\r' && break_idx + 1 == chunk.len() {
+                    line_buffer.push_str(&chunk[pos..]);
+                    pending_cr = true;
+                    break;
+                }
+
+                let mut end = break_idx + 1;
+                if bytes[break_idx] == b'\r' && bytes.get(break_idx + 1) == Some(&b'\n') {
+                    end += 1;
+                }
+                line_buffer.push_str(&chunk[pos..end]);
+                if current_line >= start_line && current_line <= end_line {
+                    append_range_segment(&mut content, &mut bytes_read, max_bytes, &line_buffer);
+                }
+                if current_line == end_line {
+                    return Ok(Some(LineRangeData {
+                        content: (bytes_read <= max_bytes).then_some(content),
+                        bytes_read,
+                        total_lines: end_line,
+                    }));
+                }
+                line_buffer.clear();
+                current_line = current_line.saturating_add(1);
+                pos = end;
             }
+
             start_char = start_char.saturating_add(chunk_char_count);
         }
     }
@@ -396,6 +439,8 @@ pub mod sqlite;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::text_lines::LineSpan;
 
     #[test]
     fn next_version_increments() {
@@ -700,5 +745,109 @@ mod tests {
             .expect("second fallback page");
 
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn line_spans_count_cr_only_and_crlf_boundaries() {
+        assert_eq!(
+            line_spans("a\rb\r\nc")
+                .map(|span| LineSpan {
+                    content: span.content,
+                    full: span.full,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                LineSpan {
+                    content: "a",
+                    full: "a\r",
+                },
+                LineSpan {
+                    content: "b",
+                    full: "b\r\n",
+                },
+                LineSpan {
+                    content: "c",
+                    full: "c",
+                },
+            ]
+        );
+    }
+
+    struct ContentStore {
+        content: String,
+    }
+
+    impl Store for ContentStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(Some(self.content.clone()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn default_line_range_supports_cr_only_and_crlf() {
+        let mut store = ContentStore {
+            content: "a\rb\r\nc".to_string(),
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 3, 32)
+            .expect("line range")
+            .expect("line range data");
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("b\r\nc".to_string()),
+                bytes_read: 4,
+                total_lines: 3,
+            }
+        );
     }
 }
