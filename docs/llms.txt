@@ -117,8 +117,9 @@ secret redaction rules are active, both the raw backing file and the redacted wh
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
 before slice extraction.
 
-`grep(regex = true)` applies the regex to each logical line independently. Patterns that can
-consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
+`grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
+consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
+literal queries containing `\n` or `\r` short-circuit to no matches without forcing content loads.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
@@ -360,6 +361,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
+- vfs/grep+service/handlers+docs: treat literal `\r` queries the same as `\n` for line-oriented grep short-circuiting so CRLF inputs no longer do useless content work or return silent false negatives, and rename the internal permit helper to reflect its immediate `503 busy` semantics.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
@@ -910,9 +912,10 @@ kept internal/audit-only and are not serialized in the public response.
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
 
-When `regex = true`, the pattern is evaluated against each logical line independently. Patterns
-that can consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex
-matching is not part of this endpoint contract.
+`grep` is line-oriented for both literal and regex queries. When `regex = true`, patterns that can
+consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
+not part of this endpoint contract. Literal queries containing `\n` or `\r` are treated as
+impossible line-spanning literals and return no matches without loading file contents.
 
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).

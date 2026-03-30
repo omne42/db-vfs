@@ -82,8 +82,9 @@ secret redaction rules are active, both the raw backing file and the redacted wh
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
 before slice extraction.
 
-`grep(regex = true)` applies the regex to each logical line independently. Patterns that can
-consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search.
+`grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
+consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
+literal queries containing `\n` or `\r` short-circuit to no matches without forcing content loads.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file

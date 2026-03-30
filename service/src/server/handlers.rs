@@ -411,7 +411,7 @@ fn map_json_rejection(err: JsonRejection) -> (StatusCode, Json<super::ErrorBody>
     }
 }
 
-async fn acquire_permit_with_budget(
+async fn try_acquire_permit(
     semaphore: Arc<tokio::sync::Semaphore>,
     budget: Option<Duration>,
 ) -> Result<
@@ -440,7 +440,7 @@ where
     Ok(Json::<Req>::from_request(request, state).await?.0)
 }
 
-async fn acquire_permit_then_parse_json<Req, S>(
+async fn try_acquire_permit_then_parse_json<Req, S>(
     semaphore: Arc<tokio::sync::Semaphore>,
     budget: Option<Duration>,
     request: Request,
@@ -453,7 +453,7 @@ where
     Req: DeserializeOwned,
     S: Send + Sync,
 {
-    let (permit, remaining) = acquire_permit_with_budget(semaphore, budget).await?;
+    let (permit, remaining) = try_acquire_permit(semaphore, budget).await?;
     let req = parse_json_payload::<Req, S>(request, state)
         .await
         .map_err(map_json_rejection)?;
@@ -728,31 +728,29 @@ where
         err: audit_err,
     } = hooks;
 
-    let (permit, remaining, req) =
-        match acquire_permit_then_parse_json::<Req, _>(semaphore, budget, request, &state).await {
-            Ok(value) => value,
-            Err((status, Json(body))) => {
-                if let Some(audit) = state.inner.audit.as_ref() {
-                    let audit_req = AuditRequest {
-                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                        requested_path: None,
-                        path_prefix: None,
-                        glob_pattern: None,
-                        grep_regex: None,
-                        grep_query_len: None,
-                    };
-                    let event = audit_req.into_event(
-                        request_id,
-                        peer,
-                        op,
-                        status,
-                        Some(body.code.to_string()),
-                    );
-                    super::log_audit_event(audit, event).await?;
-                }
-                return Err((status, Json(body)));
+    let (permit, remaining, req) = match try_acquire_permit_then_parse_json::<Req, _>(
+        semaphore, budget, request, &state,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err((status, Json(body))) => {
+            if let Some(audit) = state.inner.audit.as_ref() {
+                let audit_req = AuditRequest {
+                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                    requested_path: None,
+                    path_prefix: None,
+                    glob_pattern: None,
+                    grep_regex: None,
+                    grep_query_len: None,
+                };
+                let event =
+                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                super::log_audit_event(audit, event).await?;
             }
-        };
+            return Err((status, Json(body)));
+        }
+    };
     let audit_req = build_audit_req(&req);
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
@@ -986,9 +984,8 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_permit_then_parse_json, acquire_permit_with_budget, audit_preview,
-        glob_redaction_probes, path_redaction_probes, redact_glob_pattern, redact_path,
-        redact_path_pair,
+        audit_preview, glob_redaction_probes, path_redaction_probes, redact_glob_pattern,
+        redact_path, redact_path_pair, try_acquire_permit, try_acquire_permit_then_parse_json,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -1073,9 +1070,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquire_permit_times_out_before_execution_when_budget_is_exhausted() {
+    async fn try_acquire_permit_times_out_before_execution_when_budget_is_exhausted() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let (status, body) = acquire_permit_with_budget(semaphore, Some(Duration::ZERO))
+        let (status, body) = try_acquire_permit(semaphore, Some(Duration::ZERO))
             .await
             .expect_err("zero budget should time out");
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
@@ -1083,16 +1080,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquire_permit_preserves_large_budget_when_slot_is_available() {
+    async fn try_acquire_permit_preserves_large_budget_when_slot_is_available() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let (_permit, remaining) = acquire_permit_with_budget(semaphore, Some(Duration::MAX))
+        let (_permit, remaining) = try_acquire_permit(semaphore, Some(Duration::MAX))
             .await
             .expect("large budget should not block immediate acquisition");
         assert_eq!(remaining, Some(Duration::MAX));
     }
 
     #[tokio::test]
-    async fn acquire_permit_returns_busy_when_all_slots_are_in_use() {
+    async fn try_acquire_permit_returns_busy_when_all_slots_are_in_use() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let held_permit = semaphore
             .clone()
@@ -1100,7 +1097,7 @@ mod tests {
             .await
             .expect("acquire initial permit");
 
-        let (status, body) = acquire_permit_with_budget(semaphore, Some(Duration::from_millis(10)))
+        let (status, body) = try_acquire_permit(semaphore, Some(Duration::from_millis(10)))
             .await
             .expect_err("saturated semaphore should return busy");
         drop(held_permit);
@@ -1110,7 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquire_permit_then_parse_json_returns_busy_before_invalid_json() {
+    async fn try_acquire_permit_then_parse_json_returns_busy_before_invalid_json() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let held_permit = semaphore
             .clone()
@@ -1125,7 +1122,7 @@ mod tests {
             .expect("request");
 
         let (status, body) =
-            acquire_permit_then_parse_json::<WriteRequest, _>(semaphore, None, request, &())
+            try_acquire_permit_then_parse_json::<WriteRequest, _>(semaphore, None, request, &())
                 .await
                 .expect_err("saturated semaphore should short-circuit before JSON parsing");
         drop(held_permit);
@@ -1135,7 +1132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acquire_permit_then_parse_json_surfaces_json_errors_after_permit() {
+    async fn try_acquire_permit_then_parse_json_surfaces_json_errors_after_permit() {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/write")
@@ -1143,7 +1140,7 @@ mod tests {
             .body(Body::from("{"))
             .expect("request");
 
-        let (status, body) = acquire_permit_then_parse_json::<WriteRequest, _>(
+        let (status, body) = try_acquire_permit_then_parse_json::<WriteRequest, _>(
             Arc::new(tokio::sync::Semaphore::new(1)),
             None,
             request,
