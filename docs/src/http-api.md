@@ -65,9 +65,10 @@ kept internal/audit-only and are not serialized in the public response.
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
 
-When `regex = true`, the pattern is evaluated against each logical line independently. Patterns
-that can consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex
-matching is not part of this endpoint contract.
+`grep` is line-oriented for both literal and regex queries. When `regex = true`, patterns that can
+consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
+not part of this endpoint contract. Literal queries containing `\n` or `\r` are treated as
+impossible line-spanning literals and return no matches without loading file contents.
 
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).
