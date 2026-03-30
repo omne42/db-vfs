@@ -107,6 +107,9 @@ Common codes:
 `audit_unavailable` means required audit append/flush failed after request handling started. The
 operation may already have completed, so callers should verify state before replaying writes. This
 also covers required-audit waits that overrun the originating request's remaining runtime budget.
+Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
+or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
+finishes.
 
 `busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending

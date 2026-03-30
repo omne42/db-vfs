@@ -143,12 +143,16 @@ Secrets semantics:
   wait finishes, and uses the same request runtime budget for the required audit wait; worker loss
   or audit-budget exhaustion turns audited traffic into a visible availability failure instead of
   silently dropping events.
+- The same fail-closed permit retention also applies to early rejects that already consumed a
+  request slot (for example invalid content type / JSON / schema, invalid `workspace_id`, or a
+  disallowed workspace), so audited rejection paths cannot free concurrency before append+flush
+  finishes.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
-- Audit path redaction is conservative for malformed secret-ish inputs too; values such as
-  `.env/../visible.txt` or control-character variants are masked as `<secret>` instead of being
-  written through to JSONL.
+- Audit path/glob redaction is conservative for malformed or pattern-based secret-ish inputs too;
+  values such as `.env/../visible.txt`, `".[en]nv"`, or control-character variants are masked as
+  `<secret>` instead of being written through to JSONL.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
