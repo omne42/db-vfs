@@ -77,6 +77,7 @@ Budget semantics:
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
+- The same permit retention applies to early rejects that already acquired a request slot, including invalid content type / JSON / schema, invalid `workspace_id`, and token-authorized requests whose workspace is still denied by `allowed_workspaces`.
 - SQLite `busy_timeout` and Postgres `statement_timeout` / `lock_timeout` are reset to the active request or startup migration budget.
 - Capacity planning for scan workloads should budget up to `2 * max_read_bytes` per in-flight scan when `secrets.redact_regexes` is enabled, because the service may need to hold both the original content and a bounded redacted copy at once.
 
