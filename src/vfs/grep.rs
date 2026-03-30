@@ -1068,6 +1068,38 @@ mod tests {
     }
 
     #[test]
+    fn grep_literal_query_spanning_carriage_return_skips_content_load() {
+        let store = NewlineLiteralNoContentStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 4,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content_calls: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "x\ry".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.scanned_files, 1);
+        assert_eq!(vfs.store_mut().content_calls, 0);
+    }
+
+    #[test]
     fn grep_literal_query_spanning_newline_does_not_count_oversized_files() {
         let store = NewlineLiteralNoContentStore {
             meta: FileMeta {
