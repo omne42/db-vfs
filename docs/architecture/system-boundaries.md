@@ -57,6 +57,8 @@
 
 - `service/src/policy_io.rs`
   - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML 识别与解析。
+  - policy loader 只接受 regular file；env interpolation 只作用于解析后的字符串值，
+    不把注释或非字符串字段当模板系统处理。
   - 当前这里没有接入 YAML。
 - `service/src/server/auth.rs`
   - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验、摘要匹配和 workspace allowlist 约束。
