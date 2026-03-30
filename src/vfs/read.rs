@@ -4,6 +4,8 @@ use std::time::Duration;
 use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
+use crate::store::line_segments;
+
 use super::DbVfs;
 
 const MAX_CONTENT_LOAD_ATTEMPTS: usize = 8;
@@ -330,49 +332,42 @@ fn extract_line_range(
     _file_size_bytes: u64,
     path: &str,
 ) -> Result<String> {
-    let bytes = content.as_bytes();
-    let mut pos: usize = 0;
-    let mut current_line: u64 = 0;
+    let mut current_line = 0u64;
+    let mut slice = None;
 
-    let mut start_pos: Option<usize> = None;
-    let mut end_pos: Option<usize> = None;
-
-    while pos < bytes.len() {
-        let next = match memchr::memchr(b'\n', &bytes[pos..]) {
-            Some(offset) => pos + offset + 1, // include newline
-            None => bytes.len(),
-        };
-
-        current_line += 1;
+    for segment in line_segments(content) {
+        current_line = current_line.saturating_add(1);
         if current_line == start_line {
-            start_pos = Some(pos);
+            slice = Some(String::new());
+        }
+        if let Some(buffer) = slice.as_mut()
+            && current_line >= start_line
+            && current_line <= end_line
+        {
+            buffer.push_str(segment.full);
         }
         if current_line == end_line {
-            end_pos = Some(next);
             break;
         }
-
-        pos = next;
     }
 
-    let Some(start_pos) = start_pos else {
+    if current_line < start_line || current_line < end_line {
         return Err(line_range_out_of_bounds_error(
             path,
             start_line,
             end_line,
             current_line,
         ));
-    };
-    let Some(end_pos) = end_pos else {
-        return Err(line_range_out_of_bounds_error(
-            path,
-            start_line,
-            end_line,
-            current_line,
-        ));
-    };
+    }
 
-    let slice = &content[start_pos..end_pos];
+    let Some(slice) = slice else {
+        return Err(line_range_out_of_bounds_error(
+            path,
+            start_line,
+            end_line,
+            current_line,
+        ));
+    };
     let slice_size_bytes = u64::try_from(slice.len()).unwrap_or(u64::MAX);
     if slice_size_bytes > max_read_bytes {
         return Err(Error::FileTooLarge {
@@ -381,7 +376,7 @@ fn extract_line_range(
             max_bytes: max_read_bytes,
         });
     }
-    Ok(slice.to_string())
+    Ok(slice)
 }
 
 #[cfg(test)]
@@ -904,6 +899,22 @@ mod tests {
     }
 
     #[test]
+    fn extract_line_range_treats_cr_only_as_line_break() {
+        let content = "a\rb\rc";
+        let out = extract_line_range(content, 2, 2, 1024, content.len() as u64, "a.txt")
+            .expect("line range");
+        assert_eq!(out, "b\r");
+    }
+
+    #[test]
+    fn extract_line_range_preserves_crlf_boundaries() {
+        let content = "a\r\nb\r\nc";
+        let out = extract_line_range(content, 2, 2, 1024, content.len() as u64, "a.txt")
+            .expect("line range");
+        assert_eq!(out, "b\r\n");
+    }
+
+    #[test]
     fn extract_line_range_rejects_out_of_bounds() {
         let err = extract_line_range("a\n", 2, 2, 1024, 2, "a.txt").expect_err("out of bounds");
         assert_eq!(err.code(), "invalid_path");
@@ -968,6 +979,38 @@ mod tests {
             })
             .expect("ranged read");
         assert_eq!(resp.content, "line-2\n");
+        assert!(vfs.store_mut().chunk_reads > 1);
+    }
+
+    #[test]
+    fn ranged_read_with_chunked_store_handles_crlf_split_across_chunks() {
+        let content = "line-1\r\nline-2\r\nline-3\r\n".to_string();
+        let store = ChunkOnlyStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content,
+            chunk_chars: 4,
+            chunk_reads: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 16;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(2),
+            })
+            .expect("ranged read");
+        assert_eq!(resp.content, "line-2\r\n");
         assert!(vfs.store_mut().chunk_reads > 1);
     }
 

@@ -86,6 +86,98 @@ pub struct LineRangeData {
     pub total_lines: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LineSegment<'a> {
+    pub text: &'a str,
+    pub full: &'a str,
+    pub terminated: bool,
+}
+
+fn next_line_segment_from(
+    input: &str,
+    start: usize,
+    trailing_cr_is_terminator: bool,
+) -> Option<(usize, LineSegment<'_>)> {
+    if start >= input.len() {
+        return None;
+    }
+
+    let bytes = input.as_bytes();
+    let mut idx = start;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'\n' => {
+                return Some((
+                    idx + 1,
+                    LineSegment {
+                        text: &input[start..idx],
+                        full: &input[start..idx + 1],
+                        terminated: true,
+                    },
+                ));
+            }
+            b'\r' => {
+                if idx + 1 < bytes.len() && bytes[idx + 1] == b'\n' {
+                    return Some((
+                        idx + 2,
+                        LineSegment {
+                            text: &input[start..idx],
+                            full: &input[start..idx + 2],
+                            terminated: true,
+                        },
+                    ));
+                }
+                if idx + 1 < bytes.len() || trailing_cr_is_terminator {
+                    return Some((
+                        idx + 1,
+                        LineSegment {
+                            text: &input[start..idx],
+                            full: &input[start..idx + 1],
+                            terminated: true,
+                        },
+                    ));
+                }
+                break;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    Some((
+        input.len(),
+        LineSegment {
+            text: &input[start..],
+            full: &input[start..],
+            terminated: false,
+        },
+    ))
+}
+
+pub(crate) struct LineSegments<'a> {
+    input: &'a str,
+    pos: usize,
+    trailing_cr_is_terminator: bool,
+}
+
+impl<'a> Iterator for LineSegments<'a> {
+    type Item = LineSegment<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (next_pos, segment) =
+            next_line_segment_from(self.input, self.pos, self.trailing_cr_is_terminator)?;
+        self.pos = next_pos;
+        Some(segment)
+    }
+}
+
+pub(crate) fn line_segments(input: &str) -> LineSegments<'_> {
+    LineSegments {
+        input,
+        pos: 0,
+        trailing_cr_is_terminator: true,
+    }
+}
+
 pub trait Store {
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>>;
 
@@ -154,6 +246,7 @@ pub trait Store {
         let mut bytes_read = 0u64;
         let mut content = String::new();
         let mut saw_content = false;
+        let mut carry = String::new();
         let mut last_chunk_ended_with_newline = false;
 
         loop {
@@ -163,6 +256,30 @@ pub trait Store {
                 return Ok(None);
             };
             if chunk.is_empty() {
+                let mut pos = 0usize;
+                while let Some((next_pos, segment)) = next_line_segment_from(&carry, pos, true) {
+                    if current_line >= start_line && current_line <= end_line {
+                        append_range_segment(
+                            &mut content,
+                            &mut bytes_read,
+                            max_bytes,
+                            segment.full,
+                        );
+                    }
+                    last_chunk_ended_with_newline = segment.terminated;
+                    if current_line == end_line {
+                        return Ok(Some(LineRangeData {
+                            content: (bytes_read <= max_bytes).then_some(content),
+                            bytes_read,
+                            total_lines: end_line,
+                        }));
+                    }
+                    if !segment.terminated {
+                        break;
+                    }
+                    current_line = current_line.saturating_add(1);
+                    pos = next_pos;
+                }
                 let total_lines = if !saw_content {
                     0
                 } else if last_chunk_ended_with_newline {
@@ -178,21 +295,22 @@ pub trait Store {
             }
 
             saw_content = true;
-            last_chunk_ended_with_newline = chunk.as_bytes().last() == Some(&b'\n');
             let chunk_char_count = u64::try_from(chunk.chars().count())
                 .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
-            let mut segment_start = 0usize;
+            carry.push_str(&chunk);
 
-            for newline_idx in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
-                let segment_end = newline_idx + 1;
-                if current_line >= start_line && current_line <= end_line {
-                    append_range_segment(
-                        &mut content,
-                        &mut bytes_read,
-                        max_bytes,
-                        &chunk[segment_start..segment_end],
-                    );
+            let mut consumed = 0usize;
+            let mut pos = 0usize;
+            while let Some((next_pos, segment)) = next_line_segment_from(&carry, pos, false) {
+                if !segment.terminated {
+                    last_chunk_ended_with_newline = false;
+                    break;
                 }
+
+                if current_line >= start_line && current_line <= end_line {
+                    append_range_segment(&mut content, &mut bytes_read, max_bytes, segment.full);
+                }
+                last_chunk_ended_with_newline = true;
                 if current_line == end_line {
                     return Ok(Some(LineRangeData {
                         content: (bytes_read <= max_bytes).then_some(content),
@@ -201,16 +319,11 @@ pub trait Store {
                     }));
                 }
                 current_line = current_line.saturating_add(1);
-                segment_start = segment_end;
+                consumed = next_pos;
+                pos = next_pos;
             }
-            if segment_start < chunk.len() && current_line >= start_line && current_line <= end_line
-            {
-                append_range_segment(
-                    &mut content,
-                    &mut bytes_read,
-                    max_bytes,
-                    &chunk[segment_start..],
-                );
+            if consumed > 0 {
+                carry.drain(..consumed);
             }
             start_char = start_char.saturating_add(chunk_char_count);
         }
@@ -833,5 +946,145 @@ mod tests {
             .expect("second line range");
 
         assert_eq!(legacy_range_read_fallback_warn_count_for_test(), 1);
+    }
+
+    struct ChunkOnlyStore {
+        content: String,
+        chunk_chars: usize,
+    }
+
+    impl Store for ChunkOnlyStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            panic!("chunked range read should not fall back to get_content");
+        }
+
+        fn get_content_chunk(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+            start_char: u64,
+            max_chars: usize,
+        ) -> Result<Option<String>> {
+            let take = max_chars.min(self.chunk_chars);
+            let start_idx = usize::try_from(start_char.saturating_sub(1))
+                .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
+            Ok(Some(
+                self.content.chars().skip(start_idx).take(take).collect(),
+            ))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn default_range_read_impl_treats_cr_only_as_line_break() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ContentOnlyStore {
+            content: "line1\rline2\rline3".to_string(),
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 128)
+            .expect("load line range")
+            .expect("range data");
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("line2\r".to_string()),
+                bytes_read: 6,
+                total_lines: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn default_range_read_impl_does_not_duplicate_unterminated_lines_across_chunks() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ChunkOnlyStore {
+            content: "line1\r\nline2\r\n".to_string(),
+            chunk_chars: 4,
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 128)
+            .expect("load line range")
+            .expect("range data");
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("line2\r\n".to_string()),
+                bytes_read: 7,
+                total_lines: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn line_segments_treat_cr_only_and_crlf_as_single_line_breaks() {
+        let segments = line_segments("a\rb\r\nc\n")
+            .map(|segment| (segment.text.to_string(), segment.full.to_string()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            segments,
+            vec![
+                ("a".to_string(), "a\r".to_string()),
+                ("b".to_string(), "b\r\n".to_string()),
+                ("c".to_string(), "c\n".to_string()),
+            ]
+        );
     }
 }
