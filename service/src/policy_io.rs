@@ -29,8 +29,11 @@ pub fn load_policy(
 }
 
 fn read_policy_file(path: &Path) -> anyhow::Result<String> {
-    let meta = std::fs::metadata(path)
+    let meta = std::fs::symlink_metadata(path)
         .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("policy path must not be a symlink: {}", path.display());
+    }
     if !meta.is_file() {
         anyhow::bail!("policy path is not a regular file: {}", path.display());
     }
@@ -454,6 +457,20 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
             err.to_string()
                 .contains("policy path is not a regular file")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_policy_file_rejects_symlinks_without_following_them() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("policy.toml");
+        std::fs::write(&target, "[permissions]\nread = true\n").expect("write target policy");
+
+        let link = dir.path().join("policy-link.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let err = read_policy_file(&link).unwrap_err();
+        assert!(err.to_string().contains("must not be a symlink"));
     }
 
     #[cfg(unix)]

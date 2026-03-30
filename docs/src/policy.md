@@ -4,9 +4,9 @@ Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`
 
 Start from [`policy.example.toml`](policy.example.toml).
 
-Policy files must be regular files. The loader rejects directories, FIFOs, device nodes, and
-other non-regular paths before opening them, so startup cannot block indefinitely on a special
-file.
+Policy files must be direct regular files. The loader rejects symlinks, directories, FIFOs,
+device nodes, and other non-regular paths before opening them, so startup cannot block
+indefinitely on a special file or silently follow an unexpected link target.
 
 When `trust_mode=trusted`, env interpolation is applied only inside parsed JSON/TOML string
 values. Comments and non-string fields are not treated as template input. When
