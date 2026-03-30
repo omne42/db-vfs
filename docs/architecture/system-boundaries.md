@@ -56,6 +56,8 @@
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
     glob/pattern 审计字段也必须按真实 deny-glob 语义保守遮蔽，不能靠一套会漂移的本地猜测规则。
+  - `service` 层只能调用 `core::redaction` 暴露的 audit redaction helper；secret-ish
+    path/glob 的 probe 与遮蔽语义属于 policy-derived matcher 边界，不能在 handlers 里复制一套。
 - 面向运维和集成者的 API / policy / security 文档
 
 ## 当前仍在本仓本地实现的通用能力

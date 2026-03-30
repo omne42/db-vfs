@@ -53,43 +53,6 @@ fn audit_preview(input: &str, max_bytes: usize) -> String {
     out
 }
 
-fn is_path_or_descendant_denied(
-    redactor: &db_vfs_core::redaction::SecretRedactor,
-    path: &str,
-) -> bool {
-    redactor.path_or_any_descendant_is_denied(path)
-}
-
-fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) -> String {
-    if is_path_or_descendant_denied(redactor, path) {
-        "<secret>".to_string()
-    } else {
-        path.to_string()
-    }
-}
-
-fn redact_path_pair(
-    redactor: &db_vfs_core::redaction::SecretRedactor,
-    requested_path: &str,
-    path: &str,
-) -> (String, String) {
-    if requested_path == path {
-        let redacted = redact_path(redactor, requested_path);
-        return (redacted.clone(), redacted);
-    }
-    (
-        redact_path(redactor, requested_path),
-        redact_path(redactor, path),
-    )
-}
-
-fn redact_glob_pattern(redactor: &db_vfs_core::redaction::SecretRedactor, pattern: &str) -> String {
-    if redactor.glob_may_match_denied_path(pattern) {
-        return "<secret>".to_string();
-    }
-    pattern.to_string()
-}
-
 fn audit_event_base(
     request_id: String,
     peer: Option<SocketAddr>,
@@ -355,16 +318,18 @@ fn audit_err_hide_secret_path(
 ) {
     match (event.requested_path.take(), event.path.take()) {
         (Some(requested_path), Some(path)) => {
-            let (requested_path, path) =
-                redact_path_pair(&state.inner.redactor, &requested_path, &path);
+            let (requested_path, path) = state
+                .inner
+                .redactor
+                .redact_audit_path_pair(&requested_path, &path);
             event.requested_path = Some(requested_path);
             event.path = Some(path);
         }
         (Some(requested_path), None) => {
-            event.requested_path = Some(redact_path(&state.inner.redactor, &requested_path));
+            event.requested_path = Some(state.inner.redactor.redact_audit_path(&requested_path));
         }
         (None, Some(path)) => {
-            event.path = Some(redact_path(&state.inner.redactor, &path));
+            event.path = Some(state.inner.redactor.redact_audit_path(&path));
         }
         (None, None) => {}
     }
@@ -375,8 +340,10 @@ fn audit_err_hide_secret_path(
 }
 
 fn audit_ok_read(state: &super::AppState, event: &mut AuditEvent, resp: &ReadResponse) {
-    let (requested_path, path) =
-        redact_path_pair(&state.inner.redactor, &resp.requested_path, &resp.path);
+    let (requested_path, path) = state
+        .inner
+        .redactor
+        .redact_audit_path_pair(&resp.requested_path, &resp.path);
     event.requested_path = Some(requested_path);
     event.path = Some(path);
     event.bytes_read = Some(resp.bytes_read);
@@ -384,8 +351,10 @@ fn audit_ok_read(state: &super::AppState, event: &mut AuditEvent, resp: &ReadRes
 }
 
 fn audit_ok_write(state: &super::AppState, event: &mut AuditEvent, resp: &WriteResponse) {
-    let (requested_path, path) =
-        redact_path_pair(&state.inner.redactor, &resp.requested_path, &resp.path);
+    let (requested_path, path) = state
+        .inner
+        .redactor
+        .redact_audit_path_pair(&resp.requested_path, &resp.path);
     event.requested_path = Some(requested_path);
     event.path = Some(path);
     event.bytes_written = Some(resp.bytes_written);
@@ -394,8 +363,10 @@ fn audit_ok_write(state: &super::AppState, event: &mut AuditEvent, resp: &WriteR
 }
 
 fn audit_ok_patch(state: &super::AppState, event: &mut AuditEvent, resp: &PatchResponse) {
-    let (requested_path, path) =
-        redact_path_pair(&state.inner.redactor, &resp.requested_path, &resp.path);
+    let (requested_path, path) = state
+        .inner
+        .redactor
+        .redact_audit_path_pair(&resp.requested_path, &resp.path);
     event.requested_path = Some(requested_path);
     event.path = Some(path);
     event.bytes_written = Some(resp.bytes_written);
@@ -403,8 +374,10 @@ fn audit_ok_patch(state: &super::AppState, event: &mut AuditEvent, resp: &PatchR
 }
 
 fn audit_ok_delete(state: &super::AppState, event: &mut AuditEvent, resp: &DeleteResponse) {
-    let (requested_path, path) =
-        redact_path_pair(&state.inner.redactor, &resp.requested_path, &resp.path);
+    let (requested_path, path) = state
+        .inner
+        .redactor
+        .redact_audit_path_pair(&resp.requested_path, &resp.path);
     event.requested_path = Some(requested_path);
     event.path = Some(path);
     event.deleted = Some(resp.deleted);
@@ -412,10 +385,10 @@ fn audit_ok_delete(state: &super::AppState, event: &mut AuditEvent, resp: &Delet
 
 fn audit_redact_scan_fields(state: &super::AppState, event: &mut AuditEvent) {
     if let Some(prefix) = event.path_prefix.take() {
-        event.path_prefix = Some(redact_path(&state.inner.redactor, &prefix));
+        event.path_prefix = Some(state.inner.redactor.redact_audit_path(&prefix));
     }
     if let Some(pattern) = event.glob_pattern.take() {
-        event.glob_pattern = Some(redact_glob_pattern(&state.inner.redactor, &pattern));
+        event.glob_pattern = Some(state.inner.redactor.redact_audit_glob_pattern(&pattern));
     }
 }
 
@@ -886,14 +859,14 @@ pub(super) async fn grep(
 mod tests {
     use super::{
         AuditEventContext, AuditHooks, AuditRequest, PermitThenParseJson, VfsLimits, audit_preview,
-        handle_vfs_request, io_limits, redact_glob_pattern, redact_path, redact_path_pair,
-        request_ctx, try_acquire_permit, try_acquire_permit_then_parse_json,
+        handle_vfs_request, io_limits, request_ctx, try_acquire_permit,
+        try_acquire_permit_then_parse_json,
     };
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
     use db_vfs::vfs::{DbVfs, WriteRequest};
-    use db_vfs_core::policy::{SecretRules, ValidatedVfsPolicy, VfsPolicy};
+    use db_vfs_core::policy::{ValidatedVfsPolicy, VfsPolicy};
     use db_vfs_core::redaction::SecretRedactor;
     use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
@@ -939,57 +912,6 @@ mod tests {
             allowed_workspaces: Arc::from(vec![super::super::auth::WorkspacePattern::Any]),
             audit_subject: audit_subject.map(Arc::<str>::from),
         }
-    }
-
-    #[test]
-    fn redact_path_hides_denied_prefix_root_paths() {
-        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
-
-        assert_eq!(redact_path(&redactor, ".git"), "<secret>");
-        assert_eq!(redact_path(&redactor, ".git/"), "<secret>");
-        assert_eq!(redact_path(&redactor, ".git"), "<secret>");
-        assert_eq!(redact_glob_pattern(&redactor, ".[en]nv"), "<secret>");
-        assert_eq!(redact_glob_pattern(&redactor, ".git"), "<secret>");
-        assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
-        assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
-        assert_eq!(redact_glob_pattern(&redactor, ".{envrc,netrc}"), "<secret>");
-        assert_eq!(
-            redact_glob_pattern(&redactor, "**/{.envrc,.netrc}"),
-            "<secret>"
-        );
-        assert_eq!(redact_glob_pattern(&redactor, "docs/*.txt"), "docs/*.txt");
-        assert_eq!(
-            redact_glob_pattern(&redactor, "docs/{readme,license}.md"),
-            "docs/{readme,license}.md"
-        );
-        assert_eq!(redact_path(&redactor, "docs"), "docs");
-    }
-
-    #[test]
-    fn redact_path_pair_matches_single_field_redaction_behavior() {
-        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
-        let (requested_path, path) = redact_path_pair(&redactor, ".git", ".git");
-        assert_eq!(requested_path, "<secret>");
-        assert_eq!(path, "<secret>");
-
-        let (requested_path, path) = redact_path_pair(&redactor, "docs/a.txt", "docs/a.txt");
-        assert_eq!(requested_path, "docs/a.txt");
-        assert_eq!(path, "docs/a.txt");
-    }
-
-    #[test]
-    fn redact_path_hides_secretish_malformed_paths() {
-        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
-
-        assert_eq!(redact_path(&redactor, ".env/../visible.txt"), "<secret>");
-        assert_eq!(
-            redact_path(&redactor, "docs/.git/\u{0000}config"),
-            "<secret>"
-        );
-        assert_eq!(
-            redact_path(&redactor, "docs/../visible.txt"),
-            "docs/../visible.txt"
-        );
     }
 
     #[tokio::test]
