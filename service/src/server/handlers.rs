@@ -57,38 +57,7 @@ fn is_path_or_descendant_denied(
     redactor: &db_vfs_core::redaction::SecretRedactor,
     path: &str,
 ) -> bool {
-    if redactor.is_path_denied(path) {
-        return true;
-    }
-
-    let trimmed = path.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    let mut descendant_probe = String::with_capacity(trimmed.len().saturating_add(24));
-    descendant_probe.push_str(trimmed);
-    descendant_probe.push('/');
-    descendant_probe.push_str("__db_vfs_audit_probe__");
-    if redactor.is_path_denied(&descendant_probe) {
-        return true;
-    }
-
-    for probe in path_redaction_probes(path) {
-        if redactor.is_path_denied(&probe) {
-            return true;
-        }
-
-        let mut descendant_probe = String::with_capacity(probe.len().saturating_add(24));
-        descendant_probe.push_str(&probe);
-        descendant_probe.push('/');
-        descendant_probe.push_str("__db_vfs_audit_probe__");
-        if redactor.is_path_denied(&descendant_probe) {
-            return true;
-        }
-    }
-
-    false
+    redactor.path_or_any_descendant_is_denied(path)
 }
 
 fn redact_path(redactor: &db_vfs_core::redaction::SecretRedactor, path: &str) -> String {
@@ -115,206 +84,10 @@ fn redact_path_pair(
 }
 
 fn redact_glob_pattern(redactor: &db_vfs_core::redaction::SecretRedactor, pattern: &str) -> String {
-    if is_path_or_descendant_denied(redactor, pattern) {
+    if redactor.glob_may_match_denied_path(pattern) {
         return "<secret>".to_string();
     }
-
-    for probe in glob_redaction_probes(pattern) {
-        if is_path_or_descendant_denied(redactor, &probe) {
-            return "<secret>".to_string();
-        }
-    }
-
     pattern.to_string()
-}
-
-fn glob_redaction_probes(pattern: &str) -> Vec<String> {
-    const MAX_GLOB_PROBES: usize = 64;
-    let normalized = db_vfs_core::glob_utils::normalize_glob_pattern_for_matching(pattern);
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let mut probes = Vec::new();
-    let mut active = vec![String::new()];
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-
-        let variants = glob_segment_probe_variants(segment);
-        if variants.is_empty() {
-            active.clear();
-            active.push(String::new());
-            continue;
-        }
-
-        let mut next = Vec::new();
-        for base in &active {
-            for variant in &variants {
-                let candidate = if base.is_empty() {
-                    variant.clone()
-                } else {
-                    format!("{base}/{variant}")
-                };
-                push_unique(&mut probes, candidate.clone(), MAX_GLOB_PROBES);
-                push_unique(&mut next, candidate, MAX_GLOB_PROBES);
-                if probes.len() >= MAX_GLOB_PROBES && next.len() >= MAX_GLOB_PROBES {
-                    break;
-                }
-            }
-            if probes.len() >= MAX_GLOB_PROBES && next.len() >= MAX_GLOB_PROBES {
-                break;
-            }
-        }
-        active = if next.is_empty() {
-            vec![String::new()]
-        } else {
-            next
-        };
-        if probes.len() >= MAX_GLOB_PROBES {
-            break;
-        }
-    }
-
-    probes
-}
-
-fn path_redaction_probes(path: &str) -> Vec<String> {
-    const MAX_PATH_PROBES: usize = 64;
-
-    let normalized = path.trim().replace('\\', "/");
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-
-    let mut probes = Vec::new();
-    let mut current = String::new();
-    for segment in normalized
-        .split('/')
-        .map(sanitize_path_probe_segment)
-        .filter(|segment| !segment.is_empty())
-    {
-        if segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            current.clear();
-            continue;
-        }
-
-        push_unique(&mut probes, segment.clone(), MAX_PATH_PROBES);
-        let joined = if current.is_empty() {
-            segment
-        } else {
-            format!("{current}/{segment}")
-        };
-        push_unique(&mut probes, joined.clone(), MAX_PATH_PROBES);
-        current = joined;
-        if probes.len() >= MAX_PATH_PROBES {
-            break;
-        }
-    }
-
-    probes
-}
-
-fn sanitize_path_probe_segment(segment: &str) -> String {
-    segment
-        .trim()
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect()
-}
-
-fn glob_segment_probe_variants(segment: &str) -> Vec<String> {
-    const MAX_SEGMENT_VARIANTS: usize = 16;
-    let expanded = expand_brace_variants(segment, MAX_SEGMENT_VARIANTS)
-        .unwrap_or_else(|| vec![segment.to_string()]);
-    let mut probes = Vec::new();
-    for variant in expanded {
-        for probe in sanitize_glob_probe_variant(&variant) {
-            push_unique(&mut probes, probe, MAX_SEGMENT_VARIANTS);
-        }
-    }
-    probes
-}
-
-fn expand_brace_variants(segment: &str, limit: usize) -> Option<Vec<String>> {
-    let Some(open) = segment.find('{') else {
-        return Some(vec![segment.to_string()]);
-    };
-
-    let mut depth = 0usize;
-    let mut close = None;
-    let mut split_points = Vec::new();
-    for (idx, ch) in segment[open..].char_indices() {
-        let absolute = open + idx;
-        match ch {
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    close = Some(absolute);
-                    break;
-                }
-            }
-            ',' if depth == 1 => split_points.push(absolute),
-            _ => {}
-        }
-    }
-    let close = close?;
-
-    let prefix = &segment[..open];
-    let suffix = &segment[close + 1..];
-    let mut start = open + 1;
-    let mut arms = Vec::new();
-    for split in split_points {
-        arms.push(&segment[start..split]);
-        start = split + 1;
-    }
-    arms.push(&segment[start..close]);
-
-    let mut expanded = Vec::new();
-    for arm in arms {
-        let nested = format!("{prefix}{arm}{suffix}");
-        for variant in expand_brace_variants(&nested, limit)? {
-            push_unique(&mut expanded, variant, limit);
-        }
-        if expanded.len() >= limit {
-            break;
-        }
-    }
-    Some(expanded)
-}
-
-fn sanitize_glob_probe_variant(segment: &str) -> Vec<String> {
-    let mut collapsed = String::with_capacity(segment.len());
-    for ch in segment.chars() {
-        if matches!(ch, '*' | '?' | '[' | ']' | '!') {
-            continue;
-        }
-        collapsed.push(ch);
-    }
-
-    let collapsed = collapsed.trim_matches('/').to_string();
-    if collapsed.is_empty() {
-        return Vec::new();
-    }
-
-    let mut probes = vec![collapsed.clone()];
-    let trimmed = collapsed.trim_end_matches(['.', '-', '_']);
-    if !trimmed.is_empty() && trimmed != collapsed {
-        probes.push(trimmed.to_string());
-    }
-    probes
-}
-
-fn push_unique(values: &mut Vec<String>, candidate: String, limit: usize) {
-    if values.len() >= limit || values.iter().any(|value| value == &candidate) {
-        return;
-    }
-    values.push(candidate);
 }
 
 fn audit_event_base(
@@ -440,24 +213,48 @@ where
     Ok(Json::<Req>::from_request(request, state).await?.0)
 }
 
+#[derive(Debug)]
+enum PermitThenParseJson<Req> {
+    Parsed {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        remaining: Option<Duration>,
+        req: Req,
+    },
+    Rejected {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        remaining: Option<Duration>,
+        status: StatusCode,
+        body: super::ErrorBody,
+    },
+}
+
 async fn try_acquire_permit_then_parse_json<Req, S>(
     semaphore: Arc<tokio::sync::Semaphore>,
     budget: Option<Duration>,
     request: Request,
     state: &S,
-) -> Result<
-    (tokio::sync::OwnedSemaphorePermit, Option<Duration>, Req),
-    (StatusCode, Json<super::ErrorBody>),
->
+) -> Result<PermitThenParseJson<Req>, (StatusCode, Json<super::ErrorBody>)>
 where
     Req: DeserializeOwned,
     S: Send + Sync,
 {
     let (permit, remaining) = try_acquire_permit(semaphore, budget).await?;
-    let req = parse_json_payload::<Req, S>(request, state)
-        .await
-        .map_err(map_json_rejection)?;
-    Ok((permit, remaining, req))
+    match parse_json_payload::<Req, S>(request, state).await {
+        Ok(req) => Ok(PermitThenParseJson::Parsed {
+            permit,
+            remaining,
+            req,
+        }),
+        Err(err) => {
+            let (status, Json(body)) = map_json_rejection(err);
+            Ok(PermitThenParseJson::Rejected {
+                permit,
+                remaining,
+                status,
+                body,
+            })
+        }
+    }
 }
 
 trait HasWorkspaceId {
@@ -626,6 +423,8 @@ fn audit_err_redact_scan_fields(
     audit_redact_scan_fields(state, event);
 }
 
+fn audit_err_noop(_state: &super::AppState, _event: &mut AuditEvent, _body: &super::ErrorBody) {}
+
 fn audit_ok_glob(state: &super::AppState, event: &mut AuditEvent, resp: &GlobResponse) {
     audit_redact_scan_fields(state, event);
     event.matches = Some(resp.matches.len());
@@ -667,6 +466,46 @@ struct VfsLimits {
 struct AuditHooks<Resp> {
     ok: fn(&super::AppState, &mut AuditEvent, &Resp),
     err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
+}
+
+struct RejectionAuditContext<'a> {
+    state: &'a super::AppState,
+    request_id: String,
+    peer: Option<SocketAddr>,
+    op: &'static str,
+    audit_err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
+}
+
+async fn log_request_rejection_audit(
+    ctx: RejectionAuditContext<'_>,
+    audit_req: AuditRequest,
+    status: StatusCode,
+    body: &super::ErrorBody,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    remaining: Option<Duration>,
+) -> Result<(), (StatusCode, Json<super::ErrorBody>)> {
+    let RejectionAuditContext {
+        state,
+        request_id,
+        peer,
+        op,
+        audit_err,
+    } = ctx;
+
+    if let Some(audit) = state.inner.audit.as_ref() {
+        let mut event =
+            audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+        audit_err(state, &mut event, body);
+        if let Some(permit) = permit {
+            super::log_audit_event_with_permit(audit, event, permit, remaining).await?;
+        } else {
+            super::log_audit_event(audit, event).await?;
+        }
+    } else if let Some(permit) = permit {
+        drop(permit);
+    }
+
+    Ok(())
 }
 
 fn request_ctx(
@@ -733,34 +572,62 @@ where
     )
     .await
     {
-        Ok(value) => value,
-        Err((status, Json(body))) => {
-            if let Some(audit) = state.inner.audit.as_ref() {
-                let audit_req = AuditRequest {
+        Ok(PermitThenParseJson::Parsed {
+            permit,
+            remaining,
+            req,
+        }) => (permit, remaining, req),
+        Ok(PermitThenParseJson::Rejected {
+            permit,
+            remaining,
+            status,
+            body,
+        }) => {
+            log_request_rejection_audit(
+                RejectionAuditContext {
+                    state: &state,
+                    request_id,
+                    peer,
+                    op,
+                    audit_err: audit_err_noop,
+                },
+                AuditRequest {
                     workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
                     requested_path: None,
                     path_prefix: None,
                     glob_pattern: None,
                     grep_regex: None,
                     grep_query_len: None,
-                };
-                let event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                super::log_audit_event(audit, event).await?;
-            }
+                },
+                status,
+                &body,
+                Some(permit),
+                remaining,
+            )
+            .await?;
             return Err((status, Json(body)));
         }
+        Err((status, Json(body))) => return Err((status, Json(body))),
     };
     let audit_req = build_audit_req(&req);
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
-        if let Some(audit) = state.inner.audit.as_ref() {
-            let mut event =
-                audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-            audit_err(&state, &mut event, &body);
-            super::log_audit_event(audit, event).await?;
-        }
+        log_request_rejection_audit(
+            RejectionAuditContext {
+                state: &state,
+                request_id,
+                peer,
+                op,
+                audit_err,
+            },
+            audit_req,
+            status,
+            &body,
+            Some(permit),
+            remaining,
+        )
+        .await?;
         return Err((status, Json(body)));
     }
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, req.workspace_id()) {
@@ -769,12 +636,21 @@ where
             super::CODE_NOT_PERMITTED,
             "workspace is not allowed for this token",
         );
-        if let Some(audit) = state.inner.audit.as_ref() {
-            let mut event =
-                audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-            audit_err(&state, &mut event, &body);
-            super::log_audit_event(audit, event).await?;
-        }
+        log_request_rejection_audit(
+            RejectionAuditContext {
+                state: &state,
+                request_id,
+                peer,
+                op,
+                audit_err,
+            },
+            audit_req,
+            status,
+            &body,
+            Some(permit),
+            remaining,
+        )
+        .await?;
         return Err((status, Json(body)));
     }
 
@@ -984,17 +860,56 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        audit_preview, glob_redaction_probes, path_redaction_probes, redact_glob_pattern,
-        redact_path, redact_path_pair, try_acquire_permit, try_acquire_permit_then_parse_json,
+        AuditHooks, PermitThenParseJson, audit_preview, handle_vfs_request, io_limits,
+        redact_glob_pattern, redact_path, redact_path_pair, request_ctx, try_acquire_permit,
+        try_acquire_permit_then_parse_json,
     };
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
-    use db_vfs::vfs::WriteRequest;
-    use db_vfs_core::policy::SecretRules;
+    use db_vfs::vfs::{DbVfs, WriteRequest};
+    use db_vfs_core::policy::{SecretRules, ValidatedVfsPolicy, VfsPolicy};
     use db_vfs_core::redaction::SecretRedactor;
+    use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
     use std::time::Duration;
+
+    fn test_state_with_audit(
+        audit: Option<super::super::audit::AuditLogger>,
+    ) -> super::super::AppState {
+        let policy = Arc::new(ValidatedVfsPolicy::new(VfsPolicy::default()).expect("policy"));
+        let redactor = Arc::new(SecretRedactor::from_rules(&policy.secrets).expect("redactor"));
+        let traversal =
+            Arc::new(TraversalSkipper::from_rules(&policy.traversal).expect("traversal"));
+        let manager = super::super::sqlite_connection_manager(
+            std::path::Path::new(":memory:"),
+            Duration::from_millis(50),
+        );
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+
+        super::super::AppState {
+            inner: Arc::new(super::super::AppInner {
+                backend: super::super::backend::Backend::Sqlite { pool },
+                policy: policy.clone(),
+                redactor,
+                traversal,
+                audit,
+                auth: super::super::auth::AuthMode::Disabled,
+                rate_limiter: super::super::rate_limiter::RateLimiter::new(policy.as_ref()),
+                io_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
+                scan_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
+            }),
+        }
+    }
+
+    fn allow_all_auth_ctx() -> super::super::auth::AuthContext {
+        super::super::auth::AuthContext {
+            allowed_workspaces: Arc::from(vec![super::super::auth::WorkspacePattern::Any]),
+        }
+    }
 
     #[test]
     fn redact_path_hides_denied_prefix_root_paths() {
@@ -1003,6 +918,7 @@ mod tests {
         assert_eq!(redact_path(&redactor, ".git"), "<secret>");
         assert_eq!(redact_path(&redactor, ".git/"), "<secret>");
         assert_eq!(redact_path(&redactor, ".git"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, ".[en]nv"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".git"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
@@ -1017,18 +933,6 @@ mod tests {
             "docs/{readme,license}.md"
         );
         assert_eq!(redact_path(&redactor, "docs"), "docs");
-    }
-
-    #[test]
-    fn glob_redaction_probes_expand_brace_literals_without_collapsing_them_together() {
-        let probes = glob_redaction_probes(".{envrc,netrc}");
-        assert!(probes.iter().any(|probe| probe == ".envrc"));
-        assert!(probes.iter().any(|probe| probe == ".netrc"));
-        assert!(!probes.iter().any(|probe| probe.contains(".envrcnetrc")));
-
-        let probes = glob_redaction_probes("**/{.envrc,.netrc}");
-        assert!(probes.iter().any(|probe| probe == ".envrc"));
-        assert!(probes.iter().any(|probe| probe == ".netrc"));
     }
 
     #[test]
@@ -1056,17 +960,6 @@ mod tests {
             redact_path(&redactor, "docs/../visible.txt"),
             "docs/../visible.txt"
         );
-    }
-
-    #[test]
-    fn path_redaction_probes_keep_secret_segments_from_malformed_paths() {
-        let probes = path_redaction_probes(".env/../visible.txt");
-        assert!(probes.iter().any(|probe| probe == ".env"));
-        assert!(probes.iter().any(|probe| probe == "visible.txt"));
-
-        let probes = path_redaction_probes("docs/.git/\u{0000}config");
-        assert!(probes.iter().any(|probe| probe == ".git"));
-        assert!(probes.iter().any(|probe| probe == "docs/.git"));
     }
 
     #[tokio::test]
@@ -1132,7 +1025,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_acquire_permit_then_parse_json_surfaces_json_errors_after_permit() {
+    async fn try_acquire_permit_then_parse_json_returns_rejected_json_errors_with_permit() {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/write")
@@ -1140,17 +1033,158 @@ mod tests {
             .body(Body::from("{"))
             .expect("request");
 
-        let (status, body) = try_acquire_permit_then_parse_json::<WriteRequest, _>(
+        let outcome = try_acquire_permit_then_parse_json::<WriteRequest, _>(
             Arc::new(tokio::sync::Semaphore::new(1)),
             None,
             request,
             &(),
         )
         .await
-        .expect_err("invalid JSON should still be reported once a permit is held");
+        .expect("invalid JSON should still be reported once a permit is held");
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body.0.code, "invalid_json_syntax");
+        match outcome {
+            PermitThenParseJson::Rejected {
+                permit,
+                status,
+                body,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(body.code, "invalid_json_syntax");
+                drop(permit);
+            }
+            PermitThenParseJson::Parsed { .. } => panic!("invalid JSON should not parse"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_vfs_request_keeps_io_permit_during_required_audit_for_json_rejects() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let state = test_state_with_audit(Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .expect("request");
+
+        let task = tokio::spawn({
+            let state = state.clone();
+            async move {
+                handle_vfs_request(
+                    request_ctx(
+                        None,
+                        state.clone(),
+                        "req-invalid-json".to_string(),
+                        allow_all_auth_ctx(),
+                        "write",
+                    ),
+                    request,
+                    io_limits(&state),
+                    |req: &WriteRequest| {
+                        super::build_path_audit_req(req.workspace_id.as_str(), &req.path)
+                    },
+                    DbVfs::write,
+                    AuditHooks {
+                        ok: super::audit_ok_write,
+                        err: super::audit_err_hide_secret_path,
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("required audit should block");
+        assert!(
+            state
+                .inner
+                .io_concurrency
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "required audit should keep the original IO permit on JSON rejects"
+        );
+
+        control.release_success();
+        let err = task
+            .await
+            .expect("join invalid JSON task")
+            .expect_err("invalid JSON should be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1.0.code, "invalid_json_syntax");
+    }
+
+    #[tokio::test]
+    async fn handle_vfs_request_keeps_io_permit_during_required_audit_for_workspace_rejects() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let state = test_state_with_audit(Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"bad*ws","path":"docs/a.txt","content":"x","expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let task = tokio::spawn({
+            let state = state.clone();
+            async move {
+                handle_vfs_request(
+                    request_ctx(
+                        None,
+                        state.clone(),
+                        "req-invalid-workspace".to_string(),
+                        allow_all_auth_ctx(),
+                        "write",
+                    ),
+                    request,
+                    io_limits(&state),
+                    |req: &WriteRequest| {
+                        super::build_path_audit_req(req.workspace_id.as_str(), &req.path)
+                    },
+                    DbVfs::write,
+                    AuditHooks {
+                        ok: super::audit_ok_write,
+                        err: super::audit_err_hide_secret_path,
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("required audit should block");
+        assert!(
+            state
+                .inner
+                .io_concurrency
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "required audit should keep the original IO permit on workspace rejects"
+        );
+
+        control.release_success();
+        let err = task
+            .await
+            .expect("join invalid workspace task")
+            .expect_err("invalid workspace should be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1.0.code, "invalid_path");
     }
 
     #[test]

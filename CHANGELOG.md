@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/path-policy: tighten workspace/path validation (control chars, wildcard constraints, oversized inputs).
 - migrations: add DB-level integrity checks for version/timestamp/path/content-size consistency.
 - service/audit-runtime: keep required-audit waits under the originating request's concurrency slot and remaining runtime budget so slow audit sinks cannot free execution capacity before the response can legally return.
+- service/audit-runtime+core/redaction: make early-reject paths keep their original concurrency permit through required audit append+flush, and match audited glob/pattern redaction against real secret deny semantics so values like `".[en]nv"` are masked instead of leaking to JSONL.
 
 ### Changed
 
@@ -44,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
 - service/auth+audit+sqlite: reject plaintext env-backed tokens that violate HTTP Bearer token syntax, reject literal `sha256:<hex>` values in `token_env_var` instead of treating them as pre-hashed secrets, return stable `503 audit_unavailable` errors when required audit append/flush fails, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 - service/policy: stat policy paths before open so non-regular files fail fast, and scope env interpolation to parsed JSON/TOML string values so comments and non-string fields are not treated as template input.
+- service/audit-handlers+core/redaction: keep the original concurrency permit held through required-audit waits for JSON/workspace early rejects too, and drive audit glob redaction from real deny-glob matching so secret patterns like `.[en]nv` no longer leak into JSONL.
 - core/policy+vfs: make `ValidatedVfsPolicy::new()` prove policy-derived matcher construction up front, so validated-policy constructor families no longer carry a reachable matcher fallback panic path.
 - service/audit-redaction: conservatively mask malformed secret-ish request paths in audit fields, so inputs like `.env/../visible.txt` or control-character variants do not leak denied roots into JSONL.
 - store/vfs/read: finish the chunked no-redaction ranged-read path across the `Store` trait plus SQLite/Postgres backends, so narrow line-range reads no longer require whole-file materialization.
