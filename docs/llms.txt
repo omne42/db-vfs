@@ -115,11 +115,14 @@ Line-range `read` still enforces `max_read_bytes` on the returned slice. Without
 rules, the store can stop after the requested range instead of materializing the whole file. When
 secret redaction rules are active, both the raw backing file and the redacted whole-file
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
-before slice extraction.
+before slice extraction. Line-oriented reads treat `\n`, `\r\n`, and lone `\r` as line
+boundaries.
 
 `grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
 literal queries containing `\n` or `\r` short-circuit to no matches without forcing content loads.
+Line numbering and `matches[].text` follow the same `\n` / `\r\n` / lone `\r` line-boundary
+semantics.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
@@ -370,6 +373,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - vfs/grep+service/handlers+docs: treat literal `\r` queries the same as `\n` for line-oriented grep short-circuiting so CRLF inputs no longer do useless content work or return silent false negatives, and rename the internal permit helper to reflect its immediate `503 busy` semantics.
 - vfs/grep+docs: evaluate grep matches against the redacted line view whenever secret redaction is active, so masked secrets no longer remain discoverable via match/no-match behavior.
+- store/vfs/read+grep+docs: treat lone `\r` as a real line boundary alongside `\n`/`\r\n`, fixing CR-only ranged reads, grep line numbering, and legacy store line-range fallback semantics.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
@@ -888,7 +892,7 @@ Request fields:
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
 | `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the raw file and any redacted whole-file intermediate to stay within `max_read_bytes` |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the raw file and any redacted whole-file intermediate to stay within `max_read_bytes`. Line boundaries treat `\n`, `\r\n`, and lone `\r` equivalently |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -938,6 +942,7 @@ Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`
 consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
 not part of this endpoint contract. Literal queries containing `\n` or `\r` are treated as
 impossible line-spanning literals and return no matches without loading file contents.
+Line numbering and emitted `matches[].text` use the same `\n` / `\r\n` / lone `\r` boundary rules.
 
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).
