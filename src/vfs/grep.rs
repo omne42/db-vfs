@@ -308,7 +308,12 @@ pub(super) fn grep<S: crate::store::Store>(
     } else {
         Some(memchr::memmem::Finder::new(request.query.as_bytes()))
     };
-    let literal_query_spans_lines = !request.regex && request.query.as_bytes().contains(&b'\n');
+    let literal_query_spans_lines = !request.regex
+        && request
+            .query
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(byte, b'\n' | b'\r'));
 
     let max_scan_entries = vfs.policy.limits.max_walk_entries.max(1);
     let max_scan_files = vfs.policy.limits.max_walk_files.max(1);
@@ -413,7 +418,7 @@ pub(super) fn grep<S: crate::store::Store>(
             scanned_files = scanned_files.saturating_add(1);
 
             if literal_query_spans_lines {
-                // Literal queries containing '\n' cannot match line-delimited scans.
+                // Literal queries containing line terminators cannot match line-delimited scans.
                 // Skip content-size/content-load work while keeping scan counters accurate.
                 continue;
             }
@@ -1093,6 +1098,69 @@ mod tests {
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
         assert_eq!(resp.skipped_too_large_files, 0);
+        assert_eq!(vfs.store_mut().content_calls, 0);
+    }
+
+    #[test]
+    fn grep_literal_query_containing_carriage_return_does_not_match_crlf_lines() {
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 6,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "ab\r\ncd".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "b\r".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.scanned_files, 1);
+    }
+
+    #[test]
+    fn grep_literal_query_containing_carriage_return_skips_content_load() {
+        let store = NewlineLiteralNoContentStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content_calls: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "x\r".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert!(resp.matches.is_empty());
+        assert_eq!(resp.scanned_files, 1);
         assert_eq!(vfs.store_mut().content_calls, 0);
     }
 
