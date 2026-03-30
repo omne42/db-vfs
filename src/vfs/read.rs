@@ -333,22 +333,21 @@ fn extract_line_range(
     path: &str,
 ) -> Result<String> {
     let mut current_line = 0u64;
-    let mut slice = None;
+    let mut start_pos = None;
+    let mut end_pos = None;
+    let mut pos = 0usize;
 
     for segment in line_segments(content) {
         current_line = current_line.saturating_add(1);
+        let next_pos = pos.saturating_add(segment.full.len());
         if current_line == start_line {
-            slice = Some(String::new());
-        }
-        if let Some(buffer) = slice.as_mut()
-            && current_line >= start_line
-            && current_line <= end_line
-        {
-            buffer.push_str(segment.full);
+            start_pos = Some(pos);
         }
         if current_line == end_line {
+            end_pos = Some(next_pos);
             break;
         }
+        pos = next_pos;
     }
 
     if current_line < start_line || current_line < end_line {
@@ -360,7 +359,7 @@ fn extract_line_range(
         ));
     }
 
-    let Some(slice) = slice else {
+    let (Some(start_pos), Some(end_pos)) = (start_pos, end_pos) else {
         return Err(line_range_out_of_bounds_error(
             path,
             start_line,
@@ -368,6 +367,7 @@ fn extract_line_range(
             current_line,
         ));
     };
+    let slice = &content[start_pos..end_pos];
     let slice_size_bytes = u64::try_from(slice.len()).unwrap_or(u64::MAX);
     if slice_size_bytes > max_read_bytes {
         return Err(Error::FileTooLarge {
@@ -376,7 +376,7 @@ fn extract_line_range(
             max_bytes: max_read_bytes,
         });
     }
-    Ok(slice)
+    Ok(slice.to_string())
 }
 
 #[cfg(test)]
@@ -912,6 +912,14 @@ mod tests {
         let out = extract_line_range(content, 2, 2, 1024, content.len() as u64, "a.txt")
             .expect("line range");
         assert_eq!(out, "b\r\n");
+    }
+
+    #[test]
+    fn extract_line_range_handles_mixed_line_endings() {
+        let content = "a\rb\nc\r\nd";
+        let out = extract_line_range(content, 2, 3, 1024, content.len() as u64, "a.txt")
+            .expect("line range");
+        assert_eq!(out, "b\nc\r\n");
     }
 
     #[test]
