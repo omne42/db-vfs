@@ -134,6 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
 - tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
+- tests/service-policy: add an explicit FIFO regression test so policy loading keeps rejecting special files before `open`, instead of only covering generic non-regular paths.
 - tests: add regression coverage to ensure audit worker keeps provided event timestamps unchanged.
 - tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
 - tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.

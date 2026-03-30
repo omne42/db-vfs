@@ -343,6 +343,9 @@ fn validate_trust_mode(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::process::Command;
+
     use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions};
     use tempfile::tempdir;
 
@@ -447,6 +450,24 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
     fn read_policy_file_rejects_non_regular_paths() {
         let dir = tempdir().expect("tempdir");
         let err = read_policy_file(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("policy path is not a regular file")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_policy_file_rejects_fifo_without_opening_it() {
+        let dir = tempdir().expect("tempdir");
+        let fifo = dir.path().join("policy.fifo");
+        let status = Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo command");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let err = read_policy_file(&fifo).unwrap_err();
         assert!(
             err.to_string()
                 .contains("policy path is not a regular file")
