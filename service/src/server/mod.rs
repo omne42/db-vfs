@@ -121,7 +121,7 @@ async fn log_audit_event_with_permit(
     let audit = audit.clone();
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
-        let _ = result_tx.send(audit.try_log(event));
+        drop(result_tx.send(audit.try_log(event)));
     });
 
     let wait_for_result = async {
