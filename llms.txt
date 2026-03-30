@@ -166,6 +166,7 @@ Secrets semantics:
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
+- When redaction rules are active, `grep` evaluates literal/regex matches against that redacted line view instead of the hidden raw secret text, so masked content cannot still act as a match oracle.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
 
 ## Observability / Audit
@@ -362,6 +363,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
 - vfs/grep+service/handlers+docs: treat literal `\r` queries the same as `\n` for line-oriented grep short-circuiting so CRLF inputs no longer do useless content work or return silent false negatives, and rename the internal permit helper to reflect its immediate `503 busy` semantics.
+- vfs/grep+docs: evaluate grep matches against the redacted line view whenever secret redaction is active, so masked secrets no longer remain discoverable via match/no-match behavior.
 - core/redaction+vfs/read+grep: make `SecretRedactor::from_rules()` enforce replacement size/control-character invariants itself, and budget redaction-expanded intermediates against `max_read_bytes` so ranged `read` / `grep` fail or skip with `file_too_large` instead of allocating unbounded whole-file redacted buffers.
 - vfs/grep+docs: make `regex=true` explicitly line-oriented and reject patterns that can consume `\n`/`\r`, so multi-line regex requests fail clearly instead of silently returning misleading no-match results.
 - vfs/core: reject or neutralize caller-supplied `SecretRedactor` / `TraversalSkipper` values that diverge from the active policy so public constructors cannot bypass `secrets.deny_globs` or `traversal.skip_globs`.
@@ -922,6 +924,8 @@ shape as `glob`).
 
 `matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
+When redaction rules are active, `grep` also evaluates literal/regex matches against that
+redacted line view, so hidden secrets do not remain discoverable through match/no-match behavior.
 If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
 counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
 

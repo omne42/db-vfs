@@ -630,6 +630,44 @@ fn grep_keeps_scanning_when_denied_entries_precede_visible_files() {
 }
 
 #[test]
+fn grep_matches_against_redacted_view_instead_of_hidden_secret_text() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .insert_file_new("ws", "docs/a.txt", "secret\npublic\n", now_ms())
+        .unwrap();
+
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.secrets.redact_regexes = vec!["secret".to_string()];
+    policy.secrets.replacement = "REDACTED".to_string();
+    let mut vfs = DbVfs::new(store, policy).unwrap();
+
+    let hidden = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "secret".to_string(),
+            regex: false,
+            glob: None,
+            path_prefix: Some("docs/".to_string()),
+        })
+        .unwrap();
+    assert!(hidden.matches.is_empty());
+
+    let visible = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "REDACTED".to_string(),
+            regex: false,
+            glob: None,
+            path_prefix: Some("docs/".to_string()),
+        })
+        .unwrap();
+    assert_eq!(visible.matches.len(), 1);
+    assert_eq!(visible.matches[0].path, "docs/a.txt");
+    assert_eq!(visible.matches[0].text, "REDACTED");
+}
+
+#[test]
 fn deny_globs_hide_descendants_under_dir_star() {
     let mut store = SqliteStore::open_in_memory().unwrap();
     store
