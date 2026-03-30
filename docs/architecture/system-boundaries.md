@@ -34,6 +34,8 @@
     坏配置不应先对后端产生副作用。
   - `max_concurrency_io` / `max_concurrency_scan` 的 permit 必须在 JSON body buffering / decode
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
+  - JSON body buffering / decode 本身也必须吃掉 frontdoor `max_io_ms` 预算；scan 端点即使
+    `max_walk_ms = None`，也不能把 body parse 变成无界等待。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `auth.tokens[*].token_env_var` 只承载明文 bearer token；预哈希输入只允许放在
@@ -47,9 +49,15 @@
   - 这个 required-audit permit 保持语义同样适用于已经拿到并发槽位的 early-reject 分支，
     包括 JSON/content-type/schema 校验失败、非法 `workspace_id` 以及 token 已通过但
     workspace 仍未授权的请求。
+  - 同样地，落在 VFS 路径上的 `401 unauthorized` 与 `429 rate_limited` 这种 frontdoor
+    拒绝，只要 `audit.required = true` 且服务还能判定对应 request class，就必须先拿到
+    对应 `max_concurrency_*` permit，再等待 audit append+flush 成功后返回，不能在
+    “已拒绝但未完成审计”时提前释放并发槽位。
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - scan 请求即使配置 `max_walk_ms = None`，backend DB pool wait/connect 和 frontdoor
+    reject/audit wait 仍必须保持 `max_io_ms` 有界；只有 scan runtime 本身可以不设上限。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
     `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
     panic，也不需要把这类状态延后到运行期才暴露；但 compatibility fallback 命中时必须

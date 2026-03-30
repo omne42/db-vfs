@@ -255,6 +255,10 @@ impl AuditLogger {
         Ok(())
     }
 
+    pub(super) fn is_required(&self) -> bool {
+        self.required
+    }
+
     #[cfg(test)]
     pub(super) fn broken_required_logger_for_test() -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);

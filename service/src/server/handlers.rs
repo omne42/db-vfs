@@ -204,7 +204,41 @@ where
     S: Send + Sync,
 {
     let (permit, remaining) = try_acquire_permit(semaphore, budget).await?;
-    match parse_json_payload::<Req, S>(request, state).await {
+    let started = Instant::now();
+    let parsed = if let Some(timeout) = remaining {
+        if timeout.is_zero() {
+            return Ok(PermitThenParseJson::Rejected {
+                permit,
+                remaining: Some(Duration::ZERO),
+                status: StatusCode::REQUEST_TIMEOUT,
+                body: super::ErrorBody {
+                    code: super::CODE_TIMEOUT,
+                    message: "request timed out while buffering or decoding JSON body".to_string(),
+                },
+            });
+        }
+
+        match tokio::time::timeout(timeout, parse_json_payload::<Req, S>(request, state)).await {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(PermitThenParseJson::Rejected {
+                    permit,
+                    remaining: Some(Duration::ZERO),
+                    status: StatusCode::REQUEST_TIMEOUT,
+                    body: super::ErrorBody {
+                        code: super::CODE_TIMEOUT,
+                        message: "request timed out while buffering or decoding JSON body"
+                            .to_string(),
+                    },
+                });
+            }
+        }
+    } else {
+        parse_json_payload::<Req, S>(request, state).await
+    };
+    let remaining = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
+
+    match parsed {
         Ok(req) => Ok(PermitThenParseJson::Parsed {
             permit,
             remaining,
@@ -437,7 +471,8 @@ struct RequestContext {
 
 struct VfsLimits {
     semaphore: Arc<tokio::sync::Semaphore>,
-    budget: Option<Duration>,
+    parse_budget: Option<Duration>,
+    runtime_budget: Option<Duration>,
 }
 
 struct AuditHooks<Resp> {
@@ -525,15 +560,27 @@ fn request_ctx(
 fn io_limits(state: &super::AppState) -> VfsLimits {
     VfsLimits {
         semaphore: state.inner.io_concurrency.clone(),
-        budget: Some(super::runner::io_timeout(&state.inner.policy)),
+        parse_budget: Some(super::runner::io_timeout(&state.inner.policy)),
+        runtime_budget: Some(super::runner::io_timeout(&state.inner.policy)),
     }
 }
 
 fn scan_limits(state: &super::AppState) -> VfsLimits {
     VfsLimits {
         semaphore: state.inner.scan_concurrency.clone(),
-        budget: super::runner::scan_timeout(&state.inner.policy),
+        parse_budget: Some(super::runner::io_timeout(&state.inner.policy)),
+        runtime_budget: super::runner::scan_timeout(&state.inner.policy),
     }
+}
+
+fn audit_budget_after_execution(
+    state: &super::AppState,
+    runtime_budget: Option<Duration>,
+    started: Instant,
+) -> Option<Duration> {
+    runtime_budget
+        .map(|budget| budget.saturating_sub(started.elapsed()))
+        .or_else(|| Some(super::runner::io_timeout(&state.inner.policy)))
 }
 
 async fn handle_vfs_request<Req, Resp, BuildAuditReq, Run>(
@@ -559,7 +606,11 @@ where
         auth,
         op,
     } = ctx;
-    let VfsLimits { semaphore, budget } = limits;
+    let VfsLimits {
+        semaphore,
+        parse_budget,
+        runtime_budget,
+    } = limits;
     let AuditHooks {
         ok: audit_ok,
         err: audit_err,
@@ -572,7 +623,10 @@ where
     };
 
     let (permit, remaining, req) = match try_acquire_permit_then_parse_json::<Req, _>(
-        semaphore, budget, request, &state,
+        semaphore,
+        parse_budget,
+        request,
+        &state,
     )
     .await
     {
@@ -654,15 +708,17 @@ where
 
     let state_for_run = state.clone();
     let started = Instant::now();
-    let result =
-        super::runner::run_vfs(state_for_run, permit, remaining, move |vfs| run(vfs, req)).await;
+    let result = super::runner::run_vfs(state_for_run, permit, runtime_budget, move |vfs| {
+        run(vfs, req)
+    })
+    .await;
 
     match (result, audit_req) {
         (Ok((Ok(resp), permit)), audit_req) => {
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event = audit_event_ctx.build_event(audit_req, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
-                let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
+                let audit_budget = audit_budget_after_execution(&state, runtime_budget, started);
                 super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
             } else {
                 drop(permit);
@@ -675,20 +731,27 @@ where
                 let mut event =
                     audit_event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
-                let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
+                let audit_budget = audit_budget_after_execution(&state, runtime_budget, started);
                 super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
             } else {
                 drop(permit);
             }
             Err((status, Json(body)))
         }
-        (Err((status, Json(body))), audit_req) => {
-            if let Some(audit) = state.inner.audit.as_ref() {
-                let mut event =
-                    audit_event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
-                audit_err(&state, &mut event, &body);
-                super::log_audit_event(audit, event).await?;
-            }
+        (Err((permit, status, Json(body))), audit_req) => {
+            log_request_rejection_audit(
+                RejectionAuditContext {
+                    state: &state,
+                    event_ctx: audit_event_ctx,
+                    audit_err,
+                },
+                audit_req,
+                status,
+                &body,
+                Some(permit),
+                audit_budget_after_execution(&state, runtime_budget, started),
+            )
+            .await?;
             Err((status, Json(body)))
         }
     }
@@ -1168,7 +1231,8 @@ mod tests {
             request,
             VfsLimits {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-                budget: None,
+                parse_budget: None,
+                runtime_budget: None,
             },
             |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
             DbVfs::write,
@@ -1333,7 +1397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn log_audit_event_with_permit_times_out_without_releasing_slot_early() {
+    async fn log_audit_event_with_permit_times_out_and_releases_slot() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
@@ -1375,22 +1439,12 @@ mod tests {
             .expect_err("audit timeout should fail closed");
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.code, "audit_unavailable");
-        assert!(
-            semaphore.clone().try_acquire_owned().is_err(),
-            "timed-out audit should keep the semaphore slot until the worker actually unwinds"
-        );
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("timed-out audit should release the semaphore slot")
+            .expect("acquire permit after timed-out audit");
+        drop(permit);
 
         control.release_success();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    drop(permit);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("permit should be released after delayed audit completion");
     }
 }

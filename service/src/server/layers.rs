@@ -58,19 +58,29 @@ pub(super) async fn rate_limit_middleware(
                 .extensions()
                 .get::<RequestId>()
                 .map_or_else(generate_request_id, |value| value.0.clone());
-            if let Err((status, body)) = super::log_audit_event(
-                audit,
-                super::audit::minimal_event(
-                    request_id,
-                    peer_ip,
-                    op,
-                    StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                    Some("rate_limited"),
-                ),
-            )
-            .await
-            {
-                return (status, body).into_response();
+            let event = super::audit::minimal_event(
+                request_id,
+                peer_ip,
+                op,
+                StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                Some("rate_limited"),
+            );
+            match super::try_acquire_required_audit_gate_for_path(&state, req.uri().path()).await {
+                Ok(Some(super::RequiredAuditGate { permit, budget })) => {
+                    if let Err((status, body)) =
+                        super::log_audit_event_with_permit(audit, event, permit, budget).await
+                    {
+                        return (status, body).into_response();
+                    }
+                }
+                Ok(None) => {
+                    if let Err((status, body)) = super::log_audit_event(audit, event).await {
+                        return (status, body).into_response();
+                    }
+                }
+                Err((status, body)) => {
+                    return (status, body).into_response();
+                }
             }
         }
         return super::err_response(
@@ -124,6 +134,12 @@ fn generate_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::routing::post;
+    use db_vfs_core::policy::{AuditPolicy, Limits, VfsPolicy};
+    use std::time::Duration;
+    use tower::ServiceExt;
 
     #[test]
     fn request_id_validation_accepts_whitelisted_characters() {
@@ -150,5 +166,70 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn rate_limit_middleware_keeps_io_permit_while_required_audit_blocks() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let policy = VfsPolicy {
+            limits: Limits {
+                max_requests_per_ip_per_sec: 1,
+                max_requests_burst_per_ip: 1,
+                max_rate_limit_ips: 16,
+                ..Limits::default()
+            },
+            audit: AuditPolicy {
+                required: true,
+                ..AuditPolicy::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
+
+        let app = Router::new()
+            .route("/v1/read", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::rate_limit_middleware,
+            ))
+            .with_state(state.clone());
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("first request");
+        let first_resp = app.clone().oneshot(first).await.expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("second request");
+        let task = tokio::spawn(async move { app.oneshot(second).await.expect("second response") });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("required audit should block rate-limited response");
+
+        assert!(
+            state
+                .inner
+                .io_concurrency
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "rate-limited required-audit path should hold the IO permit until audit wait ends"
+        );
+
+        control.release_success();
+        let resp = task.await.expect("join rate-limited task");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
