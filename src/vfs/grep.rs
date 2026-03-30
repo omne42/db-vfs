@@ -440,12 +440,6 @@ pub(super) fn grep<S: crate::store::Store>(
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
                 continue;
             }
-            if let Some(finder) = literal_finder.as_ref()
-                && finder.find(content.as_bytes()).is_none()
-            {
-                continue;
-            }
-
             let redacted_content = if has_redaction_rules {
                 match vfs
                     .redactor
@@ -460,11 +454,14 @@ pub(super) fn grep<S: crate::store::Store>(
             } else {
                 None
             };
-            let mut redacted_lines = redacted_content
-                .as_ref()
-                .map(|redacted| redacted.as_ref().lines());
+            let searchable_content = redacted_content.as_deref().unwrap_or(content.as_str());
+            if let Some(finder) = literal_finder.as_ref()
+                && finder.find(searchable_content.as_bytes()).is_none()
+            {
+                continue;
+            }
             let mut line_no: u64 = 1;
-            for line in content.lines() {
+            for line in searchable_content.lines() {
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                     scan_limit_reached = true;
                     scan_limit_reason = Some(ScanLimitReason::Time);
@@ -477,17 +474,13 @@ pub(super) fn grep<S: crate::store::Store>(
                         .as_ref()
                         .is_some_and(|finder| finder.find(line.as_bytes()).is_some()),
                 };
-                let redacted_line = redacted_lines
-                    .as_mut()
-                    .and_then(|lines| lines.next())
-                    .unwrap_or(line);
                 if !ok {
                     line_no = line_no.saturating_add(1);
                     continue;
                 }
 
-                let line_slice = clamp_char_boundary(redacted_line, max_line_bytes);
-                let line_truncated = line_slice.len() < redacted_line.len();
+                let line_slice = clamp_char_boundary(line, max_line_bytes);
+                let line_truncated = line_slice.len() < line.len();
                 let path_json_escaped_len =
                     *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
                 // Budget against JSON-encoded output size (escaped strings + object structure).
@@ -792,7 +785,7 @@ mod tests {
         let resp = vfs
             .grep(GrepRequest {
                 workspace_id: "ws".to_string(),
-                query: "a".to_string(),
+                query: "X".to_string(),
                 regex: false,
                 glob: None,
                 path_prefix: Some("".to_string()),
@@ -859,7 +852,7 @@ mod tests {
         let resp = vfs
             .grep(GrepRequest {
                 workspace_id: "ws".to_string(),
-                query: "BEGIN".to_string(),
+                query: "REDACTED".to_string(),
                 regex: false,
                 glob: None,
                 path_prefix: Some("".to_string()),
@@ -869,6 +862,50 @@ mod tests {
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].line, 1);
         assert_eq!(resp.matches[0].text, "REDACTED");
+    }
+
+    #[test]
+    fn grep_does_not_match_literals_hidden_by_redaction() {
+        let content = "secret\npublic\n";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+        policy.secrets.replacement = "REDACTED".to_string();
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let hidden = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "secret".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+        assert!(hidden.matches.is_empty());
+
+        let visible = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "REDACTED".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+        assert_eq!(visible.matches.len(), 1);
+        assert_eq!(visible.matches[0].text, "REDACTED");
     }
 
     #[test]

@@ -75,6 +75,8 @@ shape as `glob`).
 
 `matches[].text` remains single-line. `secrets.replacement` cannot contain control characters, and
 multi-line secret redaction preserves original line boundaries before per-line results are emitted.
+When redaction rules are active, `grep` also evaluates literal/regex matches against that
+redacted line view, so hidden secrets do not remain discoverable through match/no-match behavior.
 If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
 counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
 

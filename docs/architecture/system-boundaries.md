@@ -17,6 +17,8 @@
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
+  - 启用 redaction 规则时，`grep` 的 literal/regex 匹配必须基于 redacted line view，而不是
+    hidden raw content；被遮蔽的 secret 不能继续通过 match/no-match 语义泄漏存在性。
   - redaction 路径的原始输入和中间结果都必须受 `max_read_bytes` 约束；当 ranged `read`
     或 `grep` 需要 whole-file redaction 时，raw content 和 redacted whole-file intermediate
     任何一侧超出预算都必须显式失败/跳过，而不是继续无界分配。

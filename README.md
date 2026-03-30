@@ -131,6 +131,7 @@ Secrets semantics:
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
+- When redaction rules are active, `grep` evaluates literal/regex matches against that redacted line view instead of the hidden raw secret text, so masked content cannot still act as a match oracle.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
 
 ## Observability / Audit
