@@ -43,6 +43,9 @@
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
     append+flush 成功才返回；对应的 `max_concurrency_*` permit 会一直持有到 audit wait
     结束，避免请求在“已执行但未完成审计”时提前把并发槽位还回去。
+  - 这个 required-audit permit 保持语义同样适用于已经拿到并发槽位的 early-reject 分支，
+    包括 JSON/content-type/schema 校验失败、非法 `workspace_id` 以及 token 已通过但
+    workspace 仍未授权的请求。
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
@@ -51,6 +54,7 @@
     panic，也不需要把这类状态延后到运行期才暴露。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
+    glob/pattern 审计字段也必须按真实 deny-glob 语义保守遮蔽，不能靠一套会漂移的本地猜测规则。
 - 面向运维和集成者的 API / policy / security 文档
 
 ## 当前仍在本仓本地实现的通用能力
