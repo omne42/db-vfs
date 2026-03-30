@@ -3,6 +3,8 @@ use std::time::Duration;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -48,6 +50,7 @@ struct DeleteBody {
 
 struct TestServer {
     _db: tempfile::NamedTempFile,
+    addr: SocketAddr,
     base: String,
     client: reqwest::Client,
     handle: tokio::task::JoinHandle<()>,
@@ -126,8 +129,12 @@ async fn wait_until_ready(client: &reqwest::Client, base: &str) {
 }
 
 async fn setup() -> Option<TestServer> {
+    setup_with_policy(policy_allow_all()).await
+}
+
+async fn setup_with_policy(policy: VfsPolicy) -> Option<TestServer> {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), false)
+    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy, false)
         .expect("build app");
     let (addr, handle) = match serve(app).await {
         Ok(server) => server,
@@ -143,6 +150,7 @@ async fn setup() -> Option<TestServer> {
 
     Some(TestServer {
         _db: db,
+        addr,
         base,
         client,
         handle,
@@ -202,22 +210,26 @@ async fn workspace_id_with_wildcard_is_rejected() {
 }
 
 #[cfg(feature = "postgres")]
-fn postgres_test_url() -> String {
-    let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(
-        "DB_VFS_TEST_POSTGRES_URL is required when running ignored postgres integration tests",
-    );
+fn postgres_test_url() -> Option<String> {
+    let raw = match std::env::var("DB_VFS_TEST_POSTGRES_URL") {
+        Ok(raw) => raw,
+        Err(_) => return None,
+    };
     let url = raw.trim().to_string();
-    assert!(
-        !url.is_empty(),
-        "DB_VFS_TEST_POSTGRES_URL must be non-empty when running ignored postgres integration tests"
-    );
-    url
+    if url.is_empty() {
+        return None;
+    }
+    Some(url)
 }
 
 #[cfg(feature = "postgres")]
 async fn setup_postgres() -> Option<(String, reqwest::Client, tokio::task::JoinHandle<()>)> {
-    let app = tokio::task::spawn_blocking(|| {
-        db_vfs_service::server::build_app_postgres(postgres_test_url(), policy_allow_all(), false)
+    let Some(url) = postgres_test_url() else {
+        eprintln!("skipping postgres http_smoke test: DB_VFS_TEST_POSTGRES_URL unset");
+        return None;
+    };
+    let app = tokio::task::spawn_blocking(move || {
+        db_vfs_service::server::build_app_postgres(url, policy_allow_all(), false)
     })
     .await
     .expect("join postgres app builder")
@@ -397,6 +409,47 @@ async fn missing_content_type_returns_json_error_body() {
 }
 
 #[tokio::test]
+async fn slow_request_body_times_out_before_json_decode() {
+    let mut policy = policy_allow_all();
+    policy.limits.max_io_ms = 1_000;
+    let Some(server) = setup_with_policy(policy).await else {
+        return;
+    };
+
+    let mut stream = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect raw tcp stream");
+    let headers = concat!(
+        "POST /v1/write HTTP/1.1\r\n",
+        "Host: 127.0.0.1\r\n",
+        "Authorization: Bearer dev-token\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: 79\r\n",
+        "\r\n"
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .expect("write request headers");
+
+    tokio::time::sleep(Duration::from_millis(1_250)).await;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+        .await
+        .expect("read timed-out body response")
+        .expect("read response");
+    let response = String::from_utf8(response).expect("response utf8");
+    assert!(
+        response.starts_with("HTTP/1.1 408"),
+        "expected a timeout response, got: {response}"
+    );
+    assert!(
+        response.contains("\"code\":\"timeout\""),
+        "expected timeout error code, got: {response}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_request_fields_are_rejected_as_invalid_json_schema() {
     let Some(server) = setup().await else {
         return;
@@ -443,6 +496,42 @@ async fn workspace_allowlist_rejections_return_not_permitted_code() {
 }
 
 #[tokio::test]
+async fn rate_limited_requests_return_rate_limited_code() {
+    let mut policy = policy_allow_all();
+    policy.limits.max_requests_per_ip_per_sec = 1;
+    policy.limits.max_requests_burst_per_ip = 1;
+    policy.limits.max_rate_limit_ips = 16;
+    let Some(server) = setup_with_policy(policy).await else {
+        return;
+    };
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let first = server
+        .client
+        .post(format!("{}/v1/read", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("send first request");
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+
+    let second = server
+        .client
+        .post(format!("{}/v1/read", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("send second request");
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = second.json::<ErrorBody>().await.expect("error json");
+    assert_eq!(body.code, "rate_limited");
+}
+
+#[tokio::test]
 async fn delete_ignore_missing_returns_deleted_false() {
     let Some(server) = setup().await else {
         return;
@@ -468,7 +557,6 @@ async fn delete_ignore_missing_returns_deleted_false() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 async fn write_then_read_postgres() {
     let Some((base, client, handle)) = setup_postgres().await else {
         return;

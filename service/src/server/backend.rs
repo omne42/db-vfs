@@ -359,16 +359,16 @@ mod postgres_tests {
     }
 
     #[cfg(feature = "postgres")]
-    fn postgres_test_url() -> String {
-        let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(
-            "DB_VFS_TEST_POSTGRES_URL is required when running ignored postgres integration tests",
-        );
+    fn postgres_test_url() -> Option<String> {
+        let raw = match std::env::var("DB_VFS_TEST_POSTGRES_URL") {
+            Ok(raw) => raw,
+            Err(_) => return None,
+        };
         let url = raw.trim().to_string();
-        assert!(
-            !url.is_empty(),
-            "DB_VFS_TEST_POSTGRES_URL must be non-empty when running ignored postgres integration tests"
-        );
-        url
+        if url.is_empty() {
+            return None;
+        }
+        Some(url)
     }
 
     #[cfg(feature = "postgres")]
@@ -394,9 +394,11 @@ mod postgres_tests {
 
     #[cfg(feature = "postgres")]
     #[test]
-    #[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
     fn configure_postgres_session_timeouts_track_request_budget() {
-        let url = postgres_test_url();
+        let Some(url) = postgres_test_url() else {
+            eprintln!("skipping postgres timeout integration test: DB_VFS_TEST_POSTGRES_URL unset");
+            return;
+        };
         let mut client =
             r2d2_postgres::postgres::Client::connect(&url, NoTls).expect("connect postgres");
 

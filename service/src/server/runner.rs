@@ -26,6 +26,13 @@ pub(super) fn db_pool_timeout(policy: &VfsPolicy) -> Duration {
     io_timeout(policy)
 }
 
+pub(super) fn backend_operation_timeout(
+    policy: &VfsPolicy,
+    request_timeout: Option<Duration>,
+) -> Option<Duration> {
+    request_timeout.or(Some(db_pool_timeout(policy)))
+}
+
 struct CancelState {
     requested: AtomicBool,
     handle: Mutex<Option<super::backend::CancelHandle>>,
@@ -76,45 +83,18 @@ async fn run_blocking<T>(
     f: impl FnOnce() -> db_vfs::Result<T> + Send + 'static,
 ) -> Result<
     (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
-    (StatusCode, Json<super::ErrorBody>),
+    (
+        tokio::sync::OwnedSemaphorePermit,
+        StatusCode,
+        Json<super::ErrorBody>,
+    ),
 >
 where
     T: Send + 'static,
 {
-    let timed_out = timeout.map(|_| Arc::new(AtomicBool::new(false)));
-    let timed_out_for_worker = timed_out.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
-        let permit = permit;
         let started = Instant::now();
-        let result = f();
-        if let Some(timed_out) = timed_out_for_worker
-            && timed_out.load(Ordering::Acquire)
-        {
-            let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            if elapsed_ms >= TIMEOUT_COMPLETED_LONG_MS {
-                let long_count = TIMEOUT_COMPLETED_LONG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                if long_count == 1 || long_count.is_multiple_of(50) {
-                    tracing::warn!(
-                        elapsed_ms,
-                        long_count,
-                        threshold_ms = TIMEOUT_COMPLETED_LONG_MS,
-                        "db-vfs timed-out request worker ran for too long in background"
-                    );
-                }
-            }
-            let completed = TIMEOUT_COMPLETED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            let total_ms =
-                TIMEOUT_COMPLETED_TOTAL_MS.fetch_add(elapsed_ms, Ordering::Relaxed) + elapsed_ms;
-            if completed == 1 || completed.is_multiple_of(100) {
-                tracing::warn!(
-                    elapsed_ms,
-                    timed_out_worker_count = completed,
-                    timed_out_worker_avg_elapsed_ms = total_ms / completed,
-                    "db-vfs timed-out request finished in background"
-                );
-            }
-        }
-        (result, permit)
+        (f(), started.elapsed())
     });
     let join = if let Some(timeout) = timeout {
         let sleep = tokio::time::sleep(timeout);
@@ -123,13 +103,20 @@ where
             biased;
             res = &mut handle => res,
             _ = &mut sleep => {
-                if let Some(timed_out) = timed_out.as_ref() {
-                    timed_out.store(true, Ordering::Release);
-                }
                 if let Some(cancel) = cancel {
                     cancel.request_cancel();
                 }
-                handle.abort();
+                tokio::spawn(async move {
+                    match handle.await {
+                        Ok((_result, elapsed)) => record_timed_out_worker_completion(elapsed),
+                        Err(err) => {
+                            tracing::warn!(
+                                err = %err,
+                                "timed-out db-vfs worker failed before reporting completion"
+                            );
+                        }
+                    }
+                });
                 let timeout_count = TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                 if timeout_count == 1 || timeout_count.is_multiple_of(100) {
                     tracing::warn!(
@@ -138,18 +125,51 @@ where
                         "db-vfs request timed out"
                     );
                 }
-                return Err(super::err(
+                let (status, body) = super::err(
                     StatusCode::REQUEST_TIMEOUT,
                     "timeout",
                     "request timed out; operation status is unknown and may still complete",
-                ));
+                );
+                return Err((permit, status, body));
             }
         }
     } else {
         handle.await
     };
 
-    join.map_err(|err| super::map_err(db_vfs_core::Error::Db(err.to_string())))
+    let (result, _elapsed) = match join {
+        Ok(result) => result,
+        Err(err) => {
+            let (status, body) = super::map_err(db_vfs_core::Error::Db(err.to_string()));
+            return Err((permit, status, body));
+        }
+    };
+    Ok((result, permit))
+}
+
+fn record_timed_out_worker_completion(elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+    if elapsed_ms >= TIMEOUT_COMPLETED_LONG_MS {
+        let long_count = TIMEOUT_COMPLETED_LONG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if long_count == 1 || long_count.is_multiple_of(50) {
+            tracing::warn!(
+                elapsed_ms,
+                long_count,
+                threshold_ms = TIMEOUT_COMPLETED_LONG_MS,
+                "db-vfs timed-out request worker ran for too long in background"
+            );
+        }
+    }
+    let completed = TIMEOUT_COMPLETED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let total_ms = TIMEOUT_COMPLETED_TOTAL_MS.fetch_add(elapsed_ms, Ordering::Relaxed) + elapsed_ms;
+    if completed == 1 || completed.is_multiple_of(100) {
+        tracing::warn!(
+            elapsed_ms,
+            timed_out_worker_count = completed,
+            timed_out_worker_avg_elapsed_ms = total_ms / completed,
+            "db-vfs timed-out request finished in background"
+        );
+    }
 }
 
 pub(super) async fn run_vfs<T>(
@@ -159,7 +179,11 @@ pub(super) async fn run_vfs<T>(
     op: impl FnOnce(&mut DbVfs<super::backend::BackendStore>) -> db_vfs::Result<T> + Send + 'static,
 ) -> Result<
     (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
-    (StatusCode, Json<super::ErrorBody>),
+    (
+        tokio::sync::OwnedSemaphorePermit,
+        StatusCode,
+        Json<super::ErrorBody>,
+    ),
 >
 where
     T: Send + 'static,
@@ -169,6 +193,7 @@ where
     let redactor = state.inner.redactor.clone();
     let traversal = state.inner.traversal.clone();
     let pool_timeout = Some(db_pool_timeout(policy.as_ref()));
+    let operation_timeout = backend_operation_timeout(policy.as_ref(), timeout);
 
     let cancel = timeout.map(|_| Arc::new(CancelState::new()));
     let cancel_for_timeout = cancel.clone();
@@ -180,7 +205,7 @@ where
         cancel_for_timeout,
         move || -> db_vfs::Result<T> {
             let (store, cancel_handle) =
-                super::backend::BackendStore::open(backend, pool_timeout, timeout)?;
+                super::backend::BackendStore::open(backend, pool_timeout, operation_timeout)?;
             if let Some(cancel) = cancel_for_worker.as_ref() {
                 cancel.set_handle(cancel_handle);
             }
@@ -221,8 +246,19 @@ mod tests {
         assert_eq!(db_pool_timeout(&policy), Duration::from_millis(700));
     }
 
+    #[test]
+    fn backend_operation_timeout_falls_back_to_io_budget_for_unbounded_scan_runtime() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = 700;
+        policy.limits.max_walk_ms = None;
+        assert_eq!(
+            backend_operation_timeout(&policy, scan_timeout(&policy)),
+            Some(Duration::from_millis(700))
+        );
+    }
+
     #[tokio::test]
-    async fn timeout_keeps_permit_until_worker_finishes() {
+    async fn timeout_releases_permit_when_request_wait_ends() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
             .clone()
@@ -250,34 +286,22 @@ mod tests {
             .expect("worker started")
             .expect("start signal");
         let result = run.await.expect("run task join");
-        let err = result.expect_err("request should time out");
-        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(err.1.0.code, "timeout");
+        let (permit, status, body) = result.expect_err("request should time out");
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.0.code, "timeout");
         assert!(
-            err.1.0.message.contains("status is unknown"),
+            body.0.message.contains("status is unknown"),
             "timeout message should describe unknown completion semantics"
         );
+        drop(permit);
 
-        let immediate =
-            tokio::time::timeout(Duration::from_millis(10), semaphore.clone().acquire_owned())
-                .await;
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned()).await;
         assert!(
-            immediate.is_err(),
-            "permit should still be held by timed-out worker"
+            permit.is_ok(),
+            "timed-out request should release permit promptly"
         );
+        drop(permit.expect("acquire result").expect("acquire permit"));
 
-        let eventual = tokio::time::timeout(Duration::from_secs(1), async move {
-            loop {
-                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    return permit;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await;
-        assert!(
-            eventual.is_ok(),
-            "permit should be released after worker exits"
-        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }

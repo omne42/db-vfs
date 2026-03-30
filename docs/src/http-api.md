@@ -7,6 +7,9 @@ All endpoints are `POST` JSON.
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
   - `<token>` must satisfy HTTP Bearer `token68` syntax; whitespace-bearing or malformed tokens are rejected before auth matching.
+- The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
+  parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
+  therefore fail with `408 timeout` before VFS execution starts.
 
 ## Endpoint contracts
 
@@ -112,6 +115,10 @@ also covers required-audit waits that overrun the originating request's remainin
 Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
 or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
 finishes.
+
+The same required-audit fail-closed rule applies to VFS-path `401 unauthorized` and
+`429 rate_limited` responses: once the service can classify the request as IO vs scan work, it
+holds the matching `max_concurrency_*` slot until the audit append+flush succeeds or fails.
 
 `busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending

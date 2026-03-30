@@ -25,7 +25,7 @@ use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
 
 #[derive(Clone)]
-struct AppState {
+pub(in crate::server) struct AppState {
     inner: Arc<AppInner>,
 }
 
@@ -51,6 +51,17 @@ struct PreparedState {
     io_concurrency: usize,
     scan_concurrency: usize,
     body_limit: usize,
+}
+
+struct RequiredAuditGate {
+    permit: tokio::sync::OwnedSemaphorePermit,
+    budget: Option<Duration>,
+}
+
+#[derive(Clone, Copy)]
+enum RequestClass {
+    Io,
+    Scan,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -108,39 +119,42 @@ async fn log_audit_event_with_permit(
     budget: Option<Duration>,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     let audit = audit.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        audit.try_log(event)
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = result_tx.send(audit.try_log(event));
     });
+
+    let wait_for_result = async {
+        result_rx.await.map_err(|_| {
+            audit_failure_response(audit::AuditFailure::new(
+                "audit wait task dropped before returning a result",
+            ))
+        })
+    };
 
     let result = if let Some(timeout) = budget {
         if timeout.is_zero() {
-            handle.abort();
+            drop(permit);
             return Err(audit_failure_response(audit::AuditFailure::new(
                 "audit wait budget exhausted before append+flush completed",
             )));
         }
 
-        match tokio::time::timeout(timeout, &mut handle).await {
-            Ok(join) => join,
+        match tokio::time::timeout(timeout, wait_for_result).await {
+            Ok(result) => result?,
             Err(_) => {
-                handle.abort();
+                drop(permit);
                 return Err(audit_failure_response(audit::AuditFailure::new(format!(
                     "audit append+flush exceeded the remaining request budget ({timeout:?})"
                 ))));
             }
         }
     } else {
-        handle.await
+        wait_for_result.await?
     };
 
-    result
-        .map_err(|err| {
-            audit_failure_response(audit::AuditFailure::new(format!(
-                "audit wait task failed: {err}"
-            )))
-        })?
-        .map_err(audit_failure_response)
+    drop(permit);
+    result.map_err(audit_failure_response)
 }
 
 const CODE_NOT_PERMITTED: &str = "not_permitted";
@@ -215,6 +229,45 @@ fn estimated_scan_inflight_bytes(policy: &VfsPolicy) -> u64 {
         policy.limits.max_read_bytes.saturating_mul(2)
     };
     per_request_bytes.saturating_mul(policy.limits.max_concurrency_scan as u64)
+}
+
+fn request_class_for_path(path: &str) -> Option<RequestClass> {
+    match path {
+        "/v1/read" | "/v1/write" | "/v1/patch" | "/v1/delete" => Some(RequestClass::Io),
+        "/v1/glob" | "/v1/grep" => Some(RequestClass::Scan),
+        _ => None,
+    }
+}
+
+fn frontdoor_budget(policy: &ValidatedVfsPolicy) -> Option<Duration> {
+    Some(runner::io_timeout(policy))
+}
+
+async fn try_acquire_required_audit_gate_for_path(
+    state: &AppState,
+    path: &str,
+) -> Result<Option<RequiredAuditGate>, (StatusCode, Json<ErrorBody>)> {
+    let Some(audit) = state.inner.audit.as_ref() else {
+        return Ok(None);
+    };
+    if !audit.is_required() {
+        return Ok(None);
+    }
+
+    let Some(class) = request_class_for_path(path) else {
+        return Ok(None);
+    };
+    let semaphore = match class {
+        RequestClass::Io => state.inner.io_concurrency.clone(),
+        RequestClass::Scan => state.inner.scan_concurrency.clone(),
+    };
+    let permit = semaphore
+        .try_acquire_owned()
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "server is busy"))?;
+    Ok(Some(RequiredAuditGate {
+        permit,
+        budget: frontdoor_budget(&state.inner.policy),
+    }))
 }
 
 fn prepare_state(
@@ -368,6 +421,53 @@ fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
     } else {
         configured
     }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn test_state_with_policy_audit_and_auth(
+    policy: VfsPolicy,
+    audit: Option<audit::AuditLogger>,
+    unsafe_no_auth: bool,
+) -> AppState {
+    let auth_mode = auth::build_auth_mode(&policy, unsafe_no_auth).expect("auth mode");
+    let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
+    let manager = sqlite_connection_manager(
+        std::path::Path::new(":memory:"),
+        startup_migration_timeout(policy.as_ref()),
+    );
+    let pool = r2d2::Pool::builder()
+        .max_size(1)
+        .build(manager)
+        .expect("sqlite pool");
+
+    AppState {
+        inner: Arc::new(AppInner {
+            backend: backend::Backend::Sqlite { pool },
+            policy: policy.clone(),
+            redactor: Arc::new(SecretRedactor::from_rules(&policy.secrets).expect("redactor")),
+            traversal: Arc::new(
+                TraversalSkipper::from_rules(&policy.traversal).expect("traversal skipper"),
+            ),
+            audit,
+            auth: auth_mode,
+            rate_limiter: rate_limiter::RateLimiter::new(policy.as_ref()),
+            io_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
+            scan_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
+        }),
+    }
+}
+
+#[cfg(test)]
+pub(in crate::server) fn test_state_with_audit(audit: Option<audit::AuditLogger>) -> AppState {
+    test_state_with_policy_audit_and_auth(VfsPolicy::default(), audit, true)
+}
+
+#[cfg(test)]
+pub(in crate::server) fn test_state_with_policy_and_audit(
+    policy: VfsPolicy,
+    audit: Option<audit::AuditLogger>,
+) -> AppState {
+    test_state_with_policy_audit_and_auth(policy, audit, true)
 }
 
 pub fn build_app_sqlite(
@@ -684,7 +784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_audit_timeout_keeps_permit_until_worker_exits() {
+    async fn required_audit_timeout_releases_permit_when_wait_budget_expires() {
         let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
@@ -719,28 +819,13 @@ mod tests {
             .expect_err("audit wait should time out");
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.code, "audit_unavailable");
-
-        let immediate =
-            tokio::time::timeout(Duration::from_millis(20), semaphore.clone().acquire_owned())
-                .await;
-        assert!(
-            immediate.is_err(),
-            "timed-out audit wait should still hold the permit until the worker exits"
-        );
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("timed-out audit wait should release the originating permit")
+            .expect("acquire permit after timed-out audit");
+        drop(permit);
 
         control.release_success();
-
-        let eventual = tokio::time::timeout(Duration::from_secs(1), async move {
-            loop {
-                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    return permit;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("permit should be released once timed-out audit worker finishes");
-        drop(eventual);
     }
 
     #[tokio::test]

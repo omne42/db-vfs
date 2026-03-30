@@ -71,6 +71,8 @@ Critical bounded fields include:
 Budget semantics:
 
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
+- JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
+  `grep` requests before scan execution starts.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
@@ -78,6 +80,8 @@ Budget semantics:
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
 - The same permit retention applies to early rejects that already acquired a request slot, including invalid content type / JSON / schema, invalid `workspace_id`, and token-authorized requests whose workspace is still denied by `allowed_workspaces`.
+- Required audit permit retention also applies to VFS-path `401 unauthorized` and `429 rate_limited`
+  responses once the service can classify the path as IO vs scan work.
 - SQLite `busy_timeout` and Postgres `statement_timeout` / `lock_timeout` are reset to the active request or startup migration budget.
 - Capacity planning for scan workloads should budget up to `2 * max_read_bytes` per in-flight scan when `secrets.redact_regexes` is enabled, because the service may need to hold both the original content and a bounded redacted copy at once.
 

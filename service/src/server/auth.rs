@@ -222,13 +222,17 @@ fn match_token<'a>(rules: &'a [AuthRule], token: &str) -> Option<&'a AuthRule> {
 }
 
 async fn log_unauthorized(
-    audit: Option<&super::audit::AuditLogger>,
+    state: &super::AppState,
     request_id: Option<String>,
     peer_ip: Option<std::net::IpAddr>,
-    op: Option<&'static str>,
+    path: &str,
     auth_subject: Option<Arc<str>>,
 ) -> Result<(), Response> {
-    if let (Some(audit), Some(request_id), Some(op)) = (audit, request_id, op) {
+    if let (Some(audit), Some(request_id), Some(op)) = (
+        state.inner.audit.as_ref(),
+        request_id,
+        super::audit::op_from_path(path),
+    ) {
         let mut event = super::audit::minimal_event(
             request_id,
             peer_ip,
@@ -237,9 +241,19 @@ async fn log_unauthorized(
             Some("unauthorized"),
         );
         event.auth_subject = auth_subject.map(|subject| subject.to_string());
-        super::log_audit_event(audit, event)
-            .await
-            .map_err(IntoResponse::into_response)?;
+        if let Some(super::RequiredAuditGate { permit, budget }) =
+            super::try_acquire_required_audit_gate_for_path(state, path)
+                .await
+                .map_err(IntoResponse::into_response)?
+        {
+            super::log_audit_event_with_permit(audit, event, permit, budget)
+                .await
+                .map_err(IntoResponse::into_response)?;
+        } else {
+            super::log_audit_event(audit, event)
+                .await
+                .map_err(IntoResponse::into_response)?;
+        }
     }
     Ok(())
 }
@@ -249,16 +263,15 @@ pub(super) async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let path = req.uri().path().to_string();
     let peer_ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| addr.ip());
-    let audit = state.inner.audit.as_ref();
     let request_id = req
         .extensions()
         .get::<super::layers::RequestId>()
         .map(|v| v.0.clone());
-    let op = super::audit::op_from_path(req.uri().path());
 
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
@@ -268,7 +281,7 @@ pub(super) async fn auth_middleware(
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
                 if let Err(resp) =
-                    log_unauthorized(audit, request_id.clone(), peer_ip, op, None).await
+                    log_unauthorized(&state, request_id.clone(), peer_ip, &path, None).await
                 {
                     return resp;
                 }
@@ -281,10 +294,10 @@ pub(super) async fn auth_middleware(
 
             let Some(rule) = match_token(rules, token) else {
                 if let Err(resp) = log_unauthorized(
-                    audit,
+                    &state,
                     request_id,
                     peer_ip,
-                    op,
+                    &path,
                     Some(audit_subject_for_presented_token(token)),
                 )
                 .await
@@ -313,10 +326,13 @@ pub(super) async fn auth_middleware(
 mod tests {
     use super::*;
 
+    use axum::Router;
     use axum::http::HeaderValue;
+    use axum::routing::post;
     use db_vfs_core::policy::AuthToken;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
+    use tower::ServiceExt;
 
     #[test]
     fn bearer_token_parsing_is_case_insensitive_and_strict() {
@@ -548,12 +564,13 @@ mod tests {
         let path = dir.path().join("audit.jsonl");
         let audit = super::super::audit::AuditLogger::new(&path, true, 1, Duration::from_millis(1))
             .expect("audit logger");
+        let state = super::super::test_state_with_audit(Some(audit.clone()));
 
         log_unauthorized(
-            Some(&audit),
+            &state,
             Some("req-unauthorized".to_string()),
             Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            Some("read"),
+            "/v1/read",
             Some(audit_subject_for_presented_token("dev-token")),
         )
         .await
@@ -567,5 +584,68 @@ mod tests {
             Some("sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712")
         );
         assert_eq!(parsed["error_code"].as_str(), Some("unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_keeps_io_permit_while_required_audit_blocks() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+
+        let mut policy = VfsPolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(dev_token_sha256_for_test()),
+            token_env_var: None,
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+        policy.audit.required = true;
+        let state = super::super::test_state_with_policy_audit_and_auth(policy, Some(audit), false);
+
+        let app = Router::new()
+            .route("/v1/read", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::auth_middleware,
+            ))
+            .with_state(state.clone());
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        let mut request = request;
+        request
+            .extensions_mut()
+            .insert(super::super::layers::RequestId(
+                "req-auth-unauthorized".to_string(),
+            ));
+
+        let task = tokio::spawn(async move { app.oneshot(request).await.expect("response") });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("required audit should block unauthorized response");
+
+        assert!(
+            state
+                .inner
+                .io_concurrency
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "unauthorized required-audit path should hold the IO permit until audit wait ends"
+        );
+
+        control.release_success();
+        let resp = task.await.expect("join auth middleware task");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn dev_token_sha256_for_test() -> String {
+        format!("sha256:{}", hex::encode(hash_token_sha256("dev-token")))
     }
 }
