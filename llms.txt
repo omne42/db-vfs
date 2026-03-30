@@ -165,6 +165,7 @@ Secrets semantics:
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
+- `DbVfs::try_new_with_matchers_validated()` is the strict validated-matcher constructor; the older compatibility constructor still rebuilds policy-derived matchers on mismatch, but now emits a one-time warning instead of failing silently.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
 - When redaction rules are active, `grep` evaluates literal/regex matches against that redacted line view instead of the hidden raw secret text, so masked content cannot still act as a match oracle.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
@@ -457,6 +458,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-redaction: apply descendant-aware secret masking to audited `glob_pattern` values so protected roots (for example `.git`) are redacted consistently.
 - vfs/grep: defer escaped-path JSON-size accounting until a file produces a match, avoiding unnecessary per-file escape work for non-matching content.
 - vfs/grep+patch: replace remaining lossy `usize -> u64` casts in input-size error accounting with checked/saturating conversions to avoid theoretical truncation on wide-pointer targets.
+- vfs/store/docs: keep validated-matcher and ranged-read compatibility paths backward-compatible but no longer silent by emitting one-time warnings when policy/matcher rebuild fallback or whole-file ranged-read fallback is used.
 
 ### Internal
 
@@ -1072,7 +1074,7 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；不一致的 matcher 会被拒绝或回退成 policy 编译结果。
+- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，compatibility 构造器会回退成 policy 编译结果并发出一次显式告警。
 
 ## Untrusted mode checklist
 
