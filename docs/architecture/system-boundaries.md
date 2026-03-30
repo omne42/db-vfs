@@ -48,7 +48,8 @@
     panic/连接级失败。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
     `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
-    panic，也不需要把这类状态延后到运行期才暴露。
+    panic，也不需要把这类状态延后到运行期才暴露；但 compatibility fallback 命中时必须
+    发出显式告警，不能把 policy/matcher 不一致继续做成静默“自动修复”。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
 - 面向运维和集成者的 API / policy / security 文档
@@ -63,6 +64,9 @@
 - `src/store/mod.rs`
   - 仍保留 legacy `list_metas_by_prefix_page` compatibility fallback，但它只保证正确性，
     不保证大前缀 scan budget / 性能语义；fallback 命中时现在会显式告警，不再静默退化。
+  - ranged-read 的 `get_content_chunk` legacy compatibility fallback 也只保证正确性，不再
+    静默 materialize whole-file content；fallback 命中时会显式告警，提示 store 实现方补齐
+    chunked line-range 边界。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 

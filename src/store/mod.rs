@@ -11,10 +11,15 @@ const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
 
 static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static LEGACY_RANGE_READ_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
+static LEGACY_RANGE_READ_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
 static LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static LEGACY_RANGE_READ_FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone)]
 pub struct FileRecord {
@@ -100,7 +105,8 @@ pub trait Store {
     ///
     /// Production stores should override this to avoid materializing whole-file content for
     /// line-range reads. The default implementation preserves compatibility for legacy stores by
-    /// falling back to [`Store::get_content`].
+    /// falling back to [`Store::get_content`], and emits a one-time warning so this degraded
+    /// compatibility path is visible instead of silent.
     fn get_content_chunk(
         &mut self,
         workspace_id: &str,
@@ -113,6 +119,7 @@ pub trait Store {
             return Ok(Some(String::new()));
         }
 
+        warn_legacy_range_read_fallback::<Self>();
         let Some(content) = self.get_content(workspace_id, path, version)? else {
             return Ok(None);
         };
@@ -317,6 +324,17 @@ fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
     }
 }
 
+fn warn_legacy_range_read_fallback<S: ?Sized>() {
+    if !LEGACY_RANGE_READ_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+        #[cfg(test)]
+        LEGACY_RANGE_READ_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+        log::warn!(
+            "Store::get_content_chunk is using the legacy compatibility fallback for {}; ranged reads will materialize whole-file content via get_content; implement get_content_chunk or get_line_range to preserve line-range boundary and performance semantics",
+            std::any::type_name::<S>()
+        );
+    }
+}
+
 #[cfg(test)]
 fn reset_legacy_prefix_page_fallback_warning_for_test() {
     LEGACY_PREFIX_PAGE_FALLBACK_WARNED.store(false, Ordering::Release);
@@ -326,6 +344,17 @@ fn reset_legacy_prefix_page_fallback_warning_for_test() {
 #[cfg(test)]
 fn legacy_prefix_page_fallback_warn_count_for_test() -> usize {
     LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn reset_legacy_range_read_fallback_warning_for_test() {
+    LEGACY_RANGE_READ_FALLBACK_WARNED.store(false, Ordering::Release);
+    LEGACY_RANGE_READ_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+fn legacy_range_read_fallback_warn_count_for_test() -> usize {
+    LEGACY_RANGE_READ_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
 }
 
 fn range_read_chunk_chars(max_bytes: u64) -> usize {
@@ -700,5 +729,109 @@ mod tests {
             .expect("second fallback page");
 
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[derive(Default)]
+    struct ContentOnlyStore {
+        content: String,
+    }
+
+    impl Store for ContentOnlyStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(Some(self.content.clone()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn default_range_read_impl_warns_for_legacy_chunk_fallback() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ContentOnlyStore {
+            content: "line1\nline2\n".to_string(),
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 128)
+            .expect("load line range")
+            .expect("range data");
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("line2\n".to_string()),
+                bytes_read: 6,
+                total_lines: 2,
+            }
+        );
+        assert_eq!(legacy_range_read_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_range_read_impl_warns_only_once_for_repeated_legacy_fallbacks() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ContentOnlyStore {
+            content: "line1\nline2\nline3\n".to_string(),
+        };
+
+        store
+            .get_line_range("ws", "docs/a.txt", 1, 1, 1, 128)
+            .expect("first line range");
+        store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 128)
+            .expect("second line range");
+
+        assert_eq!(legacy_range_read_fallback_warn_count_for_test(), 1);
     }
 }
