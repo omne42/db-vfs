@@ -30,11 +30,13 @@ pub(super) enum AuthMode {
 pub(super) struct AuthRule {
     token_sha256: [u8; 32],
     allowed_workspaces: Arc<[WorkspacePattern]>,
+    audit_subject: Arc<str>,
 }
 
 #[derive(Clone)]
 pub(super) struct AuthContext {
     pub(super) allowed_workspaces: Arc<[WorkspacePattern]>,
+    pub(super) audit_subject: Option<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -102,6 +104,7 @@ pub(super) fn build_auth_mode(
         rules.push(AuthRule {
             token_sha256,
             allowed_workspaces: compile_workspace_patterns(&rule.allowed_workspaces)?,
+            audit_subject: format_token_audit_subject(&token_sha256),
         });
     }
 
@@ -142,6 +145,14 @@ pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &st
 fn hash_token_sha256(token: &str) -> [u8; 32] {
     let digest = Sha256::digest(token.as_bytes());
     digest.into()
+}
+
+fn format_token_audit_subject(token_sha256: &[u8; 32]) -> Arc<str> {
+    Arc::<str>::from(format!("sha256:{}", hex::encode(token_sha256)))
+}
+
+fn audit_subject_for_presented_token(token: &str) -> Arc<str> {
+    format_token_audit_subject(&hash_token_sha256(token))
 }
 
 fn is_valid_bearer_token(token: &str) -> bool {
@@ -215,20 +226,20 @@ async fn log_unauthorized(
     request_id: Option<String>,
     peer_ip: Option<std::net::IpAddr>,
     op: Option<&'static str>,
+    auth_subject: Option<Arc<str>>,
 ) -> Result<(), Response> {
     if let (Some(audit), Some(request_id), Some(op)) = (audit, request_id, op) {
-        super::log_audit_event(
-            audit,
-            super::audit::minimal_event(
-                request_id,
-                peer_ip,
-                op,
-                StatusCode::UNAUTHORIZED.as_u16(),
-                Some("unauthorized"),
-            ),
-        )
-        .await
-        .map_err(IntoResponse::into_response)?;
+        let mut event = super::audit::minimal_event(
+            request_id,
+            peer_ip,
+            op,
+            StatusCode::UNAUTHORIZED.as_u16(),
+            Some("unauthorized"),
+        );
+        event.auth_subject = auth_subject.map(|subject| subject.to_string());
+        super::log_audit_event(audit, event)
+            .await
+            .map_err(IntoResponse::into_response)?;
     }
     Ok(())
 }
@@ -252,10 +263,13 @@ pub(super) async fn auth_middleware(
     let ctx = match &state.inner.auth {
         AuthMode::Disabled => AuthContext {
             allowed_workspaces: allow_all_workspaces(),
+            audit_subject: None,
         },
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
-                if let Err(resp) = log_unauthorized(audit, request_id.clone(), peer_ip, op).await {
+                if let Err(resp) =
+                    log_unauthorized(audit, request_id.clone(), peer_ip, op, None).await
+                {
                     return resp;
                 }
                 return super::err_response(
@@ -266,7 +280,15 @@ pub(super) async fn auth_middleware(
             };
 
             let Some(rule) = match_token(rules, token) else {
-                if let Err(resp) = log_unauthorized(audit, request_id, peer_ip, op).await {
+                if let Err(resp) = log_unauthorized(
+                    audit,
+                    request_id,
+                    peer_ip,
+                    op,
+                    Some(audit_subject_for_presented_token(token)),
+                )
+                .await
+                {
                     return resp;
                 }
                 return super::err_response(
@@ -278,6 +300,7 @@ pub(super) async fn auth_middleware(
 
             AuthContext {
                 allowed_workspaces: rule.allowed_workspaces.clone(),
+                audit_subject: Some(rule.audit_subject.clone()),
             }
         }
     };
@@ -292,6 +315,8 @@ mod tests {
 
     use axum::http::HeaderValue;
     use db_vfs_core::policy::AuthToken;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     #[test]
     fn bearer_token_parsing_is_case_insensitive_and_strict() {
@@ -483,6 +508,7 @@ mod tests {
             &rules[0].token_sha256,
             &parse_token_sha256(&digest).unwrap()
         ));
+        assert_eq!(rules[0].audit_subject.as_ref(), digest);
     }
 
     #[test]
@@ -506,5 +532,40 @@ mod tests {
         unsafe { std::env::remove_var(&var) };
 
         assert!(err.to_string().contains("valid HTTP Bearer token"));
+    }
+
+    #[test]
+    fn audit_subject_uses_token_sha256_fingerprint() {
+        assert_eq!(
+            audit_subject_for_presented_token("dev-token").as_ref(),
+            "sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712"
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_audit_records_presented_token_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let audit = super::super::audit::AuditLogger::new(&path, true, 1, Duration::from_millis(1))
+            .expect("audit logger");
+
+        log_unauthorized(
+            Some(&audit),
+            Some("req-unauthorized".to_string()),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            Some("read"),
+            Some(audit_subject_for_presented_token("dev-token")),
+        )
+        .await
+        .expect("log unauthorized");
+
+        let raw = std::fs::read_to_string(&path).expect("read audit log");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.lines().next().expect("audit line")).expect("parse json");
+        assert_eq!(
+            parsed["auth_subject"].as_str(),
+            Some("sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712")
+        );
+        assert_eq!(parsed["error_code"].as_str(), Some("unauthorized"));
     }
 }

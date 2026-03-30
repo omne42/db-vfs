@@ -117,6 +117,11 @@ permit before buffering and decoding the body, so saturated servers fail fast in
 CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
 until any required audit append+flush completes.
 
+When JSONL audit is enabled, the side-channel audit record also carries `auth_subject` whenever the
+service can derive a stable bearer-token fingerprint (`sha256:<64 hex>`) for the caller. This
+applies to successful requests, post-auth request rejections, and syntactically valid unauthorized
+token attempts without persisting the raw credential.
+
 ## Retry guidance
 
 - `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).

@@ -142,6 +142,10 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
+- Audit records include `auth_subject="sha256:<64 hex>"` whenever the service can derive a stable
+  bearer-token fingerprint from the request, so successful requests, post-auth rejects, and
+  syntactically valid unauthorized attempts can still be tied back to the same caller identity
+  without writing raw tokens to disk.
 - With `audit.required = true`, audit runs fail-closed after startup: each request waits for its
   audit record to append+flush successfully, keeps its originating concurrency slot until that
   wait finishes, and uses the same request runtime budget for the required audit wait; worker loss

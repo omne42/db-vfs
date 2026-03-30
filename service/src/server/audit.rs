@@ -80,6 +80,7 @@ pub(super) fn minimal_event(
         peer_ip: peer_ip.map(|ip| ip.to_string()),
         op,
         workspace_id: UNKNOWN_WORKSPACE_ID.to_string(),
+        auth_subject: None,
         requested_path: None,
         path: None,
         path_prefix: None,
@@ -114,6 +115,8 @@ pub(super) struct AuditEvent {
     pub peer_ip: Option<String>,
     pub op: &'static str,
     pub workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_subject: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_path: Option<String>,
@@ -669,6 +672,20 @@ mod tests {
         let line = raw.lines().next().expect("audit line");
         let parsed: serde_json::Value = serde_json::from_str(line).expect("parse json");
         assert_eq!(parsed["ts_ms"].as_u64(), Some(42));
+    }
+
+    #[test]
+    fn audit_event_serialization_omits_auth_subject_when_absent() {
+        let json = serde_json::to_value(super::minimal_event(
+            "req-1".to_string(),
+            None,
+            "read",
+            200,
+            None,
+        ))
+        .expect("serialize event");
+
+        assert!(json.get("auth_subject").is_none());
     }
 
     #[test]

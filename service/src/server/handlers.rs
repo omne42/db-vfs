@@ -95,6 +95,7 @@ fn audit_event_base(
     peer: Option<SocketAddr>,
     op: &'static str,
     workspace_id: String,
+    auth_subject: Option<&str>,
     status: u16,
     error_code: Option<String>,
 ) -> AuditEvent {
@@ -104,6 +105,7 @@ fn audit_event_base(
         peer_ip: peer.map(|addr| addr.ip().to_string()),
         op,
         workspace_id,
+        auth_subject: auth_subject.map(ToOwned::to_owned),
         requested_path: None,
         path: None,
         path_prefix: None,
@@ -313,6 +315,7 @@ impl AuditRequest {
         request_id: String,
         peer: Option<SocketAddr>,
         op: &'static str,
+        auth_subject: Option<&str>,
         status: StatusCode,
         error_code: Option<String>,
     ) -> AuditEvent {
@@ -321,6 +324,7 @@ impl AuditRequest {
             peer,
             op,
             self.workspace_id,
+            auth_subject,
             status.as_u16(),
             error_code,
         );
@@ -468,11 +472,35 @@ struct AuditHooks<Resp> {
     err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
 }
 
-struct RejectionAuditContext<'a> {
-    state: &'a super::AppState,
-    request_id: String,
+#[derive(Clone, Copy)]
+struct AuditEventContext<'a> {
+    request_id: &'a str,
     peer: Option<SocketAddr>,
     op: &'static str,
+    auth_subject: Option<&'a str>,
+}
+
+impl AuditEventContext<'_> {
+    fn build_event(
+        self,
+        audit_req: AuditRequest,
+        status: StatusCode,
+        error_code: Option<String>,
+    ) -> AuditEvent {
+        audit_req.into_event(
+            self.request_id.to_string(),
+            self.peer,
+            self.op,
+            self.auth_subject,
+            status,
+            error_code,
+        )
+    }
+}
+
+struct RejectionAuditContext<'a> {
+    state: &'a super::AppState,
+    event_ctx: AuditEventContext<'a>,
     audit_err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
 }
 
@@ -486,15 +514,12 @@ async fn log_request_rejection_audit(
 ) -> Result<(), (StatusCode, Json<super::ErrorBody>)> {
     let RejectionAuditContext {
         state,
-        request_id,
-        peer,
-        op,
+        event_ctx,
         audit_err,
     } = ctx;
 
     if let Some(audit) = state.inner.audit.as_ref() {
-        let mut event =
-            audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+        let mut event = event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
         audit_err(state, &mut event, body);
         if let Some(permit) = permit {
             super::log_audit_event_with_permit(audit, event, permit, remaining).await?;
@@ -566,6 +591,12 @@ where
         ok: audit_ok,
         err: audit_err,
     } = hooks;
+    let audit_event_ctx = AuditEventContext {
+        request_id: &request_id,
+        peer,
+        op,
+        auth_subject: auth.audit_subject.as_deref(),
+    };
 
     let (permit, remaining, req) = match try_acquire_permit_then_parse_json::<Req, _>(
         semaphore, budget, request, &state,
@@ -586,9 +617,7 @@ where
             log_request_rejection_audit(
                 RejectionAuditContext {
                     state: &state,
-                    request_id,
-                    peer,
-                    op,
+                    event_ctx: audit_event_ctx,
                     audit_err: audit_err_noop,
                 },
                 AuditRequest {
@@ -616,9 +645,7 @@ where
         log_request_rejection_audit(
             RejectionAuditContext {
                 state: &state,
-                request_id,
-                peer,
-                op,
+                event_ctx: audit_event_ctx,
                 audit_err,
             },
             audit_req,
@@ -639,9 +666,7 @@ where
         log_request_rejection_audit(
             RejectionAuditContext {
                 state: &state,
-                request_id,
-                peer,
-                op,
+                event_ctx: audit_event_ctx,
                 audit_err,
             },
             audit_req,
@@ -659,10 +684,10 @@ where
     let result =
         super::runner::run_vfs(state_for_run, permit, remaining, move |vfs| run(vfs, req)).await;
 
-    match (result, request_id, audit_req) {
-        (Ok((Ok(resp), permit)), request_id, audit_req) => {
+    match (result, audit_req) {
+        (Ok((Ok(resp), permit)), audit_req) => {
             if let Some(audit) = state.inner.audit.as_ref() {
-                let mut event = audit_req.into_event(request_id, peer, op, StatusCode::OK, None);
+                let mut event = audit_event_ctx.build_event(audit_req, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
                 let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
                 super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
@@ -671,11 +696,11 @@ where
             }
             Ok(Json(resp))
         }
-        (Ok((Err(err), permit)), request_id, audit_req) => {
+        (Ok((Err(err), permit)), audit_req) => {
             let (status, Json(body)) = super::map_err(err);
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                    audit_event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
                 let audit_budget = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
                 super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
@@ -684,10 +709,10 @@ where
             }
             Err((status, Json(body)))
         }
-        (Err((status, Json(body))), request_id, audit_req) => {
+        (Err((status, Json(body))), audit_req) => {
             if let Some(audit) = state.inner.audit.as_ref() {
                 let mut event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
+                    audit_event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
                 super::log_audit_event(audit, event).await?;
             }
@@ -860,9 +885,9 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditHooks, PermitThenParseJson, audit_preview, handle_vfs_request, io_limits,
-        redact_glob_pattern, redact_path, redact_path_pair, request_ctx, try_acquire_permit,
-        try_acquire_permit_then_parse_json,
+        AuditEventContext, AuditHooks, AuditRequest, PermitThenParseJson, VfsLimits, audit_preview,
+        handle_vfs_request, io_limits, redact_glob_pattern, redact_path, redact_path_pair,
+        request_ctx, try_acquire_permit, try_acquire_permit_then_parse_json,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -906,8 +931,13 @@ mod tests {
     }
 
     fn allow_all_auth_ctx() -> super::super::auth::AuthContext {
+        auth_ctx_with_subject(None)
+    }
+
+    fn auth_ctx_with_subject(audit_subject: Option<&str>) -> super::super::auth::AuthContext {
         super::super::auth::AuthContext {
             allowed_workspaces: Arc::from(vec![super::super::auth::WorkspacePattern::Any]),
+            audit_subject: audit_subject.map(Arc::<str>::from),
         }
     }
 
@@ -1185,6 +1215,105 @@ mod tests {
             .expect_err("invalid workspace should be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert_eq!(err.1.0.code, "invalid_path");
+    }
+
+    #[tokio::test]
+    async fn handle_vfs_request_audit_includes_auth_subject_on_rejection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let audit = super::super::audit::AuditLogger::new(&path, true, 1, Duration::from_millis(1))
+            .expect("audit logger");
+        let state = test_state_with_audit(Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"bad*ws","path":"docs/a.txt","content":"x","expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state,
+                "req-invalid-workspace".to_string(),
+                auth_ctx_with_subject(Some(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                )),
+                "write",
+            ),
+            request,
+            VfsLimits {
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                budget: None,
+            },
+            |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
+            DbVfs::write,
+            AuditHooks {
+                ok: super::audit_ok_write,
+                err: super::audit_err_hide_secret_path,
+            },
+        )
+        .await
+        .expect_err("invalid workspace should be rejected");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let raw = std::fs::read_to_string(&path).expect("read audit log");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.lines().next().expect("audit line")).expect("parse json");
+        assert_eq!(
+            parsed["auth_subject"].as_str(),
+            Some("sha256:1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        assert_eq!(parsed["error_code"].as_str(), Some("invalid_path"));
+    }
+
+    #[test]
+    fn audit_event_context_applies_auth_subject_to_all_event_builds() {
+        let event_ctx = AuditEventContext {
+            request_id: "req-1",
+            peer: None,
+            op: "write",
+            auth_subject: Some(
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            ),
+        };
+
+        let ok_event = event_ctx.build_event(
+            AuditRequest {
+                workspace_id: "ws".to_string(),
+                requested_path: Some("docs/a.txt".to_string()),
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            },
+            StatusCode::OK,
+            None,
+        );
+        assert_eq!(
+            ok_event.auth_subject.as_deref(),
+            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+        );
+
+        let err_event = event_ctx.build_event(
+            AuditRequest {
+                workspace_id: "ws".to_string(),
+                requested_path: None,
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            },
+            StatusCode::FORBIDDEN,
+            Some("not_permitted".to_string()),
+        );
+        assert_eq!(
+            err_event.auth_subject.as_deref(),
+            Some("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+        );
+        assert_eq!(err_event.error_code.as_deref(), Some("not_permitted"));
     }
 
     #[test]

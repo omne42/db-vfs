@@ -13,7 +13,7 @@
 Sample line:
 
 ```json
-{"ts_ms":1738828800000,"request_id":"...","op":"write","status":200,"workspace_id":"w1","peer_ip":"127.0.0.1"}
+{"ts_ms":1738828800000,"request_id":"...","op":"write","status":200,"workspace_id":"w1","auth_subject":"sha256:...","peer_ip":"127.0.0.1"}
 ```
 
 Core fields:
@@ -25,8 +25,13 @@ Core fields:
 | `op` | string | yes | `read/write/patch/delete/glob/grep` |
 | `status` | u16 | yes | HTTP status |
 | `workspace_id` | string | yes | `<unknown>` for early rejects |
+| `auth_subject` | string|null | no | stable bearer-token fingerprint (`sha256:<64 hex>`) when available |
 | `peer_ip` | string|null | no | TCP peer IP when available |
 | `error_code` | string|null | no | stable error code |
+
+`auth_subject` is derived from the presented or matched bearer token hash, never from the raw
+token text. Requests running with `--unsafe-no-auth` or malformed/missing `Authorization` headers
+leave the field empty because no stable authenticated subject exists.
 
 ## `peer_ip` handling
 
