@@ -815,19 +815,8 @@ fn new_with_matchers_rejects_mismatched_traversal_rules() {
 }
 
 #[test]
-fn new_with_matchers_validated_falls_back_to_policy_matchers() {
-    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
-    let now = now_ms();
-    store
-        .insert_file_new("ws", ".env", "SECRET=1\n", now)
-        .expect("seed denied path");
-    store
-        .insert_file_new("ws", "node_modules/skip.txt", "skip\n", now)
-        .expect("seed skipped path");
-    store
-        .insert_file_new("ws", "docs/keep.txt", "keep\n", now)
-        .expect("seed visible path");
-
+fn new_with_matchers_validated_rejects_mismatched_matchers() {
+    let store = SqliteStore::open_in_memory().expect("open sqlite");
     let mut policy = policy_all_perms();
     policy.permissions.allow_full_scan = true;
     policy.secrets.deny_globs = vec![".env".to_string()];
@@ -845,24 +834,9 @@ fn new_with_matchers_validated_falls_back_to_policy_matchers() {
         TraversalSkipper::from_rules(&TraversalRules::default()).expect("mismatched traversal"),
     );
 
-    let mut vfs = DbVfs::new_with_matchers_validated(store, policy, redactor, traversal);
-
-    let err = vfs
-        .read(ReadRequest {
-            workspace_id: "ws".to_string(),
-            path: ".env".to_string(),
-            start_line: None,
-            end_line: None,
-        })
-        .expect_err("policy redactor should still deny secret path");
-    assert_eq!(err.code(), "secret_path_denied");
-
-    let resp = vfs
-        .glob(GlobRequest {
-            workspace_id: "ws".to_string(),
-            pattern: "**/*.txt".to_string(),
-            path_prefix: Some("".to_string()),
-        })
-        .expect("glob");
-    assert_eq!(resp.matches, vec!["docs/keep.txt".to_string()]);
+    let err = match DbVfs::new_with_matchers_validated(store, policy, redactor, traversal) {
+        Ok(_) => panic!("mismatched validated matchers should be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code(), "invalid_policy");
 }

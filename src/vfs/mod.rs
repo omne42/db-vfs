@@ -7,11 +7,6 @@ mod util;
 mod write;
 
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
@@ -28,12 +23,6 @@ pub use grep::{GrepMatch, GrepRequest, GrepResponse};
 pub use patch::{PatchRequest, PatchResponse};
 pub use read::{ReadRequest, ReadResponse};
 pub use write::{WriteRequest, WriteResponse};
-
-static VALIDATED_MATCHER_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static VALIDATED_MATCHER_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
-#[cfg(test)]
-static VALIDATED_MATCHER_FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub struct DbVfs<S> {
@@ -154,38 +143,19 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
-    /// Compatibility constructor for pre-built matchers.
+    /// Builds a VFS from a validated policy plus caller-supplied matchers.
     ///
-    /// If the supplied matchers do not match the policy, this rebuilds the
-    /// policy-derived matchers and ignores the incompatible inputs. Prefer
-    /// [`DbVfs::try_new_with_matchers_validated`] when mismatch should fail
-    /// hard instead of taking this compatibility fallback.
+    /// This constructor now rejects mismatched matchers instead of silently
+    /// rebuilding them from policy state. Call [`DbVfs::new_validated`] when
+    /// the caller wants policy-derived matchers and does not need to supply
+    /// pre-built matcher instances.
     pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
         redactor: impl Into<Arc<SecretRedactor>>,
         traversal: impl Into<Arc<TraversalSkipper>>,
-    ) -> Self {
-        let redactor = redactor.into();
-        let traversal = traversal.into();
-        let (redactor, traversal) = if redactor.is_compatible_with_rules(&policy.secrets)
-            && traversal.is_compatible_with_rules(&policy.traversal)
-        {
-            (redactor, traversal)
-        } else {
-            warn_validated_matcher_fallback::<S>();
-            let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
-                Ok(matchers) => matchers,
-                Err(err) => unreachable!("ValidatedVfsPolicy invariant broken: {err}"),
-            };
-            (Arc::new(policy_redactor), Arc::new(policy_traversal))
-        };
-        Self {
-            policy,
-            redactor,
-            traversal,
-            store,
-        }
+    ) -> Result<Self> {
+        Self::try_new_with_matchers_validated(store, policy, redactor, traversal)
     }
 
     pub fn policy(&self) -> &VfsPolicy {
@@ -195,28 +165,6 @@ impl<S: Store> DbVfs<S> {
     pub fn store_mut(&mut self) -> &mut S {
         &mut self.store
     }
-}
-
-fn warn_validated_matcher_fallback<S>() {
-    if !VALIDATED_MATCHER_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
-        #[cfg(test)]
-        VALIDATED_MATCHER_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
-        log::warn!(
-            "DbVfs::new_with_matchers_validated rebuilt policy-derived matchers for {}; supplied matchers did not match the validated policy; use DbVfs::try_new_with_matchers_validated to fail fast",
-            std::any::type_name::<S>()
-        );
-    }
-}
-
-#[cfg(test)]
-fn reset_validated_matcher_fallback_warning_for_test() {
-    VALIDATED_MATCHER_FALLBACK_WARNED.store(false, Ordering::Release);
-    VALIDATED_MATCHER_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
-}
-
-#[cfg(test)]
-fn validated_matcher_fallback_warn_count_for_test() -> usize {
-    VALIDATED_MATCHER_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,11 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_validated_constructor_rebuilds_mismatched_matchers() {
-        let _guard = VALIDATED_MATCHER_FALLBACK_TEST_LOCK
-            .lock()
-            .expect("lock validated matcher fallback test state");
-        reset_validated_matcher_fallback_warning_for_test();
+    fn validated_constructor_rejects_mismatched_matchers() {
         let policy = validated_policy();
         let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
             replacement: "DIFFERENT".to_string(),
@@ -360,55 +304,23 @@ mod tests {
         .expect("mismatched redactor");
         let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
 
-        let vfs =
-            DbVfs::new_with_matchers_validated(DummyStore, policy.clone(), mismatched, traversal);
-        assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
-        assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
-        assert_eq!(validated_matcher_fallback_warn_count_for_test(), 1);
+        let err = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
+            .expect_err("mismatch should fail");
+        assert_eq!(err.code(), "invalid_policy");
     }
 
     #[test]
-    fn compatibility_validated_constructor_warns_only_once() {
-        let _guard = VALIDATED_MATCHER_FALLBACK_TEST_LOCK
-            .lock()
-            .expect("lock validated matcher fallback test state");
-        reset_validated_matcher_fallback_warning_for_test();
-        let policy = validated_policy();
-        let mismatched = Arc::new(
-            SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
-                replacement: "DIFFERENT".to_string(),
-                ..policy.secrets.clone()
-            })
-            .expect("mismatched redactor"),
-        );
-        let traversal =
-            Arc::new(TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal"));
-
-        let _ = DbVfs::new_with_matchers_validated(
-            DummyStore,
-            policy.clone(),
-            mismatched.clone(),
-            traversal.clone(),
-        );
-        let _ = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal);
-
-        assert_eq!(validated_matcher_fallback_warn_count_for_test(), 1);
-    }
-
-    #[test]
-    fn compatibility_validated_constructor_stays_quiet_when_matchers_align() {
-        let _guard = VALIDATED_MATCHER_FALLBACK_TEST_LOCK
-            .lock()
-            .expect("lock validated matcher fallback test state");
-        reset_validated_matcher_fallback_warning_for_test();
+    fn validated_constructor_accepts_aligned_matchers() {
         let policy = validated_policy();
         let redactor = SecretRedactor::from_rules(&policy.secrets).expect("matching redactor");
         let traversal =
             TraversalSkipper::from_rules(&policy.traversal).expect("matching traversal");
 
-        let _ = DbVfs::new_with_matchers_validated(DummyStore, policy, redactor, traversal);
-
-        assert_eq!(validated_matcher_fallback_warn_count_for_test(), 0);
+        let vfs =
+            DbVfs::new_with_matchers_validated(DummyStore, policy.clone(), redactor, traversal)
+                .expect("matching matchers should succeed");
+        assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
+        assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
     }
 
     #[test]
