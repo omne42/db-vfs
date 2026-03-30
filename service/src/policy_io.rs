@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
@@ -7,22 +8,35 @@ use crate::TrustMode;
 
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum PolicyFormat {
+    Json,
+    Toml,
+}
+
 pub fn load_policy(
     path: impl AsRef<Path>,
     trust_mode: TrustMode,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<VfsPolicy> {
     let path = path.as_ref();
+    let raw = read_policy_file(path)?;
+    let format = policy_format(path)?;
+    let policy = parse_policy_str(&raw, format, trust_mode, Some(path))?;
+    policy.validate().map_err(anyhow::Error::msg)?;
+    validate_trust_mode(&policy, trust_mode, unsafe_no_auth)?;
+    Ok(policy)
+}
 
-    let file = std::fs::File::open(path)
-        .map_err(|err| anyhow::anyhow!("failed to open policy file {}: {err}", path.display()))?;
-    let meta = file
-        .metadata()
+fn read_policy_file(path: &Path) -> anyhow::Result<String> {
+    let meta = std::fs::metadata(path)
         .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
     if !meta.is_file() {
         anyhow::bail!("policy path is not a regular file: {}", path.display());
     }
 
+    let file = std::fs::File::open(path)
+        .map_err(|err| anyhow::anyhow!("failed to open policy file {}: {err}", path.display()))?;
     let limit = u64::try_from(MAX_POLICY_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -42,63 +56,201 @@ pub fn load_policy(
             MAX_POLICY_BYTES
         );
     }
-    let raw = String::from_utf8(bytes).map_err(|err| {
-        anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
-    })?;
-    let raw = match trust_mode {
-        TrustMode::Trusted => interpolate_env(&raw)?,
-        TrustMode::Untrusted => {
-            if raw.contains("${") {
-                anyhow::bail!(
-                    "policy env interpolation is not allowed in trust_mode=untrusted (found '${{')"
-                );
-            }
-            raw
-        }
-    };
-    let ext = path.extension().and_then(|s| s.to_str());
-    let ext = ext.map(str::to_ascii_lowercase);
-    let policy: VfsPolicy = match ext {
-        Some(ext) if ext == "json" => serde_json::from_str(&raw).map_err(|err| {
-            anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display())
-        })?,
-        Some(ext) if ext == "toml" => toml::from_str(&raw).map_err(|err| {
-            anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
-        })?,
-        None => toml::from_str(&raw).map_err(|err| {
-            anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
-        })?,
-        Some(other) => anyhow::bail!("unsupported policy extension: {other}"),
-    };
-    policy.validate().map_err(anyhow::Error::msg)?;
-    validate_trust_mode(&policy, trust_mode, unsafe_no_auth)?;
-    Ok(policy)
+
+    String::from_utf8(bytes)
+        .map_err(|err| anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display()))
 }
 
-fn interpolate_env(raw: &str) -> anyhow::Result<String> {
-    interpolate_env_with(raw, |name| std::env::var(name))
+fn policy_format(path: &Path) -> anyhow::Result<PolicyFormat> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("json") => Ok(PolicyFormat::Json),
+        Some("toml") | None => Ok(PolicyFormat::Toml),
+        Some(other) => anyhow::bail!("unsupported policy extension: {other}"),
+    }
+}
+
+fn parse_policy_str(
+    raw: &str,
+    format: PolicyFormat,
+    trust_mode: TrustMode,
+    path: Option<&Path>,
+) -> anyhow::Result<VfsPolicy> {
+    parse_policy_str_with(raw, format, trust_mode, path, |name| std::env::var(name))
+}
+
+fn parse_policy_str_with(
+    raw: &str,
+    format: PolicyFormat,
+    trust_mode: TrustMode,
+    path: Option<&Path>,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<VfsPolicy> {
+    match format {
+        PolicyFormat::Json => parse_json_policy(raw, trust_mode, path, lookup),
+        PolicyFormat::Toml => parse_toml_policy(raw, trust_mode, path, lookup),
+    }
+}
+
+fn parse_json_policy(
+    raw: &str,
+    trust_mode: TrustMode,
+    path: Option<&Path>,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<VfsPolicy> {
+    let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse JSON policy: {err}"),
+    })?;
+    transform_json_value(&mut value, trust_mode, lookup)?;
+    enforce_interpolated_size_json(&value)?;
+    serde_json::from_value(value).map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse JSON policy: {err}"),
+    })
+}
+
+fn parse_toml_policy(
+    raw: &str,
+    trust_mode: TrustMode,
+    path: Option<&Path>,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<VfsPolicy> {
+    let mut value: toml::Value = toml::from_str(raw).map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse TOML policy: {err}"),
+    })?;
+    transform_toml_value(&mut value, trust_mode, lookup)?;
+    enforce_interpolated_size_toml(&value)?;
+    value.try_into().map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse TOML policy: {err}"),
+    })
+}
+
+fn enforce_interpolated_size_json(value: &serde_json::Value) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|err| anyhow::anyhow!("failed to serialize interpolated JSON policy: {err}"))?;
+    ensure_interpolated_size(bytes.len())
+}
+
+fn enforce_interpolated_size_toml(value: &toml::Value) -> anyhow::Result<()> {
+    let rendered = toml::to_string(value)
+        .map_err(|err| anyhow::anyhow!("failed to serialize interpolated TOML policy: {err}"))?;
+    ensure_interpolated_size(rendered.len())
+}
+
+fn ensure_interpolated_size(len: usize) -> anyhow::Result<()> {
+    if len > MAX_POLICY_BYTES {
+        anyhow::bail!(
+            "policy after env interpolation is too large ({} bytes; max {} bytes)",
+            len,
+            MAX_POLICY_BYTES
+        );
+    }
+    Ok(())
+}
+
+fn transform_json_value(
+    value: &mut serde_json::Value,
+    trust_mode: TrustMode,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::String(string) => {
+            let next = process_string_value(string, trust_mode, lookup)?;
+            if let Cow::Owned(next) = next {
+                *string = next;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                transform_json_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                transform_json_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
+fn transform_toml_value(
+    value: &mut toml::Value,
+    trust_mode: TrustMode,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<()> {
+    match value {
+        toml::Value::String(string) => {
+            let next = process_string_value(string, trust_mode, lookup)?;
+            if let Cow::Owned(next) = next {
+                *string = next;
+            }
+            Ok(())
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                transform_toml_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                transform_toml_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => Ok(()),
+    }
+}
+
+fn process_string_value(
+    input: &str,
+    trust_mode: TrustMode,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError>,
+) -> anyhow::Result<Cow<'_, str>> {
+    match trust_mode {
+        TrustMode::Trusted => interpolate_env_with(input, lookup),
+        TrustMode::Untrusted => reject_env_interpolation(input),
+    }
+}
+
+fn reject_env_interpolation(input: &str) -> anyhow::Result<Cow<'_, str>> {
+    if input.contains("${") {
+        anyhow::bail!(
+            "policy env interpolation is not allowed in trust_mode=untrusted (found '${{')"
+        );
+    }
+    Ok(Cow::Borrowed(input))
 }
 
 fn interpolate_env_with(
     raw: &str,
     mut lookup: impl FnMut(&str) -> Result<String, std::env::VarError>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Cow<'_, str>> {
     let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
 
     let mut idx: usize = 0;
     let mut last: usize = 0;
+    let mut changed = false;
 
     while idx + 1 < bytes.len() {
         if bytes[idx] == b'$' && bytes[idx + 1] == b'{' {
             out.push_str(&raw[last..idx]);
-            if out.len() > MAX_POLICY_BYTES {
-                anyhow::bail!(
-                    "policy after env interpolation is too large ({} bytes; max {} bytes)",
-                    out.len(),
-                    MAX_POLICY_BYTES
-                );
-            }
             let start = idx + 2;
             let mut end = start;
             while end < bytes.len() && bytes[end] != b'}' {
@@ -114,26 +266,8 @@ fn interpolate_env_with(
             let value = lookup(name).map_err(|_| {
                 anyhow::anyhow!("policy env interpolation: env var {name:?} is not set")
             })?;
-
-            if out
-                .len()
-                .checked_add(value.len())
-                .is_none_or(|next| next > MAX_POLICY_BYTES)
-            {
-                anyhow::bail!(
-                    "policy after env interpolation is too large (max {} bytes)",
-                    MAX_POLICY_BYTES
-                );
-            }
             out.push_str(&value);
-            if out.len() > MAX_POLICY_BYTES {
-                anyhow::bail!(
-                    "policy after env interpolation is too large ({} bytes; max {} bytes)",
-                    out.len(),
-                    MAX_POLICY_BYTES
-                );
-            }
-
+            changed = true;
             idx = end + 1;
             last = idx;
             continue;
@@ -142,15 +276,12 @@ fn interpolate_env_with(
         idx += 1;
     }
 
-    out.push_str(&raw[last..]);
-    if out.len() > MAX_POLICY_BYTES {
-        anyhow::bail!(
-            "policy after env interpolation is too large ({} bytes; max {} bytes)",
-            out.len(),
-            MAX_POLICY_BYTES
-        );
+    if !changed {
+        return Ok(Cow::Borrowed(raw));
     }
-    Ok(out)
+
+    out.push_str(&raw[last..]);
+    Ok(Cow::Owned(out))
 }
 
 fn is_valid_env_var_name(name: &str) -> bool {
@@ -213,6 +344,7 @@ mod tests {
     use super::*;
 
     use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions};
+    use tempfile::tempdir;
 
     #[test]
     fn interpolate_env_replaces_vars() {
@@ -230,8 +362,95 @@ mod tests {
 
     #[test]
     fn interpolate_env_rejects_invalid_name() {
-        let err = interpolate_env("x=${1BAD}").unwrap_err();
+        let err = interpolate_env_with("x=${1BAD}", |_| Ok(String::new())).unwrap_err();
         assert!(err.to_string().contains("invalid env var name"));
+    }
+
+    #[test]
+    fn trusted_interpolation_only_touches_string_values() {
+        let policy = parse_policy_str_with(
+            r#"
+# ${COMMENT_ONLY}
+[auth]
+tokens = [{ token = "sha256:${TOKEN_HASH}", allowed_workspaces = ["${WORKSPACE}"] }]
+"#,
+            PolicyFormat::Toml,
+            TrustMode::Trusted,
+            None,
+            lookup,
+        )
+        .unwrap_or_else(|err| panic!("unexpected parse error: {err}"));
+        assert_eq!(
+            policy.auth.tokens[0].token.as_deref(),
+            Some("sha256:abc123")
+        );
+        assert_eq!(policy.auth.tokens[0].allowed_workspaces, vec!["team-a"]);
+    }
+
+    #[test]
+    fn untrusted_mode_ignores_comment_placeholders_but_rejects_string_values() {
+        let trusted_comment_only = parse_policy_str(
+            r#"
+# ${COMMENT_ONLY}
+[permissions]
+read = true
+[limits]
+max_walk_ms = 1000
+max_requests_per_ip_per_sec = 1
+"#,
+            PolicyFormat::Toml,
+            TrustMode::Untrusted,
+            None,
+        )
+        .unwrap();
+        assert!(trusted_comment_only.permissions.read);
+
+        let err = parse_policy_str(
+            r#"
+[permissions]
+read = true
+[limits]
+max_walk_ms = 1000
+max_requests_per_ip_per_sec = 1
+[auth]
+tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
+"#,
+            PolicyFormat::Toml,
+            TrustMode::Untrusted,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("policy env interpolation is not allowed in trust_mode=untrusted")
+        );
+    }
+
+    #[test]
+    fn trusted_json_interpolation_walks_nested_strings() {
+        let policy = parse_policy_str_with(
+            r#"{"auth":{"tokens":[{"token":"sha256:${TOKEN_HASH}","allowed_workspaces":["${WORKSPACE}"]}]}}"#,
+            PolicyFormat::Json,
+            TrustMode::Trusted,
+            None,
+            lookup,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.auth.tokens[0].token.as_deref(),
+            Some("sha256:abc123")
+        );
+        assert_eq!(policy.auth.tokens[0].allowed_workspaces, vec!["team-a"]);
+    }
+
+    #[test]
+    fn read_policy_file_rejects_non_regular_paths() {
+        let dir = tempdir().expect("tempdir");
+        let err = read_policy_file(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("policy path is not a regular file")
+        );
     }
 
     #[test]
@@ -270,5 +489,39 @@ mod tests {
                 || msg.contains("forbids auth.tokens[0].token_env_var"),
             "unexpected error: {msg}"
         );
+    }
+
+    fn parse_policy_str(
+        raw: &str,
+        format: PolicyFormat,
+        trust_mode: TrustMode,
+        path: Option<&Path>,
+    ) -> anyhow::Result<VfsPolicy> {
+        super::parse_policy_str(raw, format, trust_mode, path)
+    }
+
+    fn parse_policy_str_with(
+        raw: &str,
+        format: PolicyFormat,
+        trust_mode: TrustMode,
+        path: Option<&Path>,
+        lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+    ) -> anyhow::Result<VfsPolicy> {
+        super::parse_policy_str_with(raw, format, trust_mode, path, lookup)
+    }
+
+    fn interpolate_env_with(
+        raw: &str,
+        lookup: impl FnMut(&str) -> Result<String, std::env::VarError>,
+    ) -> anyhow::Result<String> {
+        super::interpolate_env_with(raw, lookup).map(Cow::into_owned)
+    }
+
+    fn lookup(name: &str) -> Result<String, std::env::VarError> {
+        match name {
+            "TOKEN_HASH" => Ok("abc123".to_string()),
+            "WORKSPACE" => Ok("team-a".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        }
     }
 }
