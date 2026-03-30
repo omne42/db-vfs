@@ -19,7 +19,7 @@ Request fields:
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
 | `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file |
-| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the raw file and any redacted whole-file intermediate to stay within `max_read_bytes`. Line boundaries treat `\n`, `\r\n`, and lone `\r` equivalently |
+| `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the raw file and any redacted whole-file intermediate to stay within `max_read_bytes`. Line boundaries treat `\n`, `\r\n`, and lone `\r` equivalently, including mixed-ending files |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.
 
@@ -69,7 +69,8 @@ Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`
 consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
 not part of this endpoint contract. Literal queries containing `\n` or `\r` are treated as
 impossible line-spanning literals and return no matches without loading file contents.
-Line numbering and emitted `matches[].text` use the same `\n` / `\r\n` / lone `\r` boundary rules.
+Line numbering and emitted `matches[].text` use the same `\n` / `\r\n` / lone `\r` boundary rules,
+including mixed-ending files.
 
 Response fields: `matches[] { path, line, text, line_truncated }`, plus scan diagnostics (same
 shape as `glob`).

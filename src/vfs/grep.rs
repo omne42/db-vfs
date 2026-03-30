@@ -1272,6 +1272,41 @@ mod tests {
     }
 
     #[test]
+    fn grep_matches_mixed_line_endings_with_stable_line_numbers() {
+        let content = "alpha\rneedle-lf\nneedle-crlf\r\nomega";
+        let store = SingleFileStore {
+            meta: FileMeta {
+                path: "a".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: content.to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "needle".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 2);
+        assert_eq!(resp.matches[0].line, 2);
+        assert_eq!(resp.matches[0].text, "needle-lf");
+        assert_eq!(resp.matches[1].line, 3);
+        assert_eq!(resp.matches[1].text, "needle-crlf");
+    }
+
+    #[test]
     fn grep_counts_redaction_expansion_over_budget_as_too_large() {
         let store = SingleFileStore {
             meta: FileMeta {

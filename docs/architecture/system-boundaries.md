@@ -15,6 +15,7 @@
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
+  - `read` / `grep` 的 line-oriented 契约必须一致：`\n`、`\r\n`、lone `\r` 都是等价行边界，混合换行文件也不能改变 line range / line number 语义。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
   - 启用 redaction 规则时，`grep` 的 literal/regex 匹配必须基于 redacted line view，而不是

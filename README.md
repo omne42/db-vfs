@@ -80,14 +80,14 @@ Line-range `read` still enforces `max_read_bytes` on the returned slice. Without
 rules, the store can stop after the requested range instead of materializing the whole file. When
 secret redaction rules are active, both the raw backing file and the redacted whole-file
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
-before slice extraction. Line-oriented reads treat `\n`, `\r\n`, and lone `\r` as line
-boundaries.
+before slice extraction. Line-oriented reads treat `\n`, `\r\n`, and lone `\r` as equivalent line
+boundaries, including mixed-ending files.
 
 `grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
 literal queries containing `\n` or `\r` short-circuit to no matches without forcing content loads.
 Line numbering and `matches[].text` follow the same `\n` / `\r\n` / lone `\r` line-boundary
-semantics.
+semantics, including files that mix those terminators.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file

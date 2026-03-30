@@ -1048,6 +1048,30 @@ mod tests {
     }
 
     #[test]
+    fn default_range_read_impl_handles_mixed_line_endings() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ContentOnlyStore {
+            content: "line1\rline2\nline3\r\nline4".to_string(),
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 3, 128)
+            .expect("load line range")
+            .expect("range data");
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("line2\nline3\r\n".to_string()),
+                bytes_read: 13,
+                total_lines: 3,
+            }
+        );
+    }
+
+    #[test]
     fn default_range_read_impl_does_not_duplicate_unterminated_lines_across_chunks() {
         let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
             .lock()
