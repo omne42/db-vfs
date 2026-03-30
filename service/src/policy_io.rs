@@ -29,8 +29,11 @@ pub fn load_policy(
 }
 
 fn read_policy_file(path: &Path) -> anyhow::Result<String> {
-    let meta = std::fs::metadata(path)
+    let meta = std::fs::symlink_metadata(path)
         .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("policy path must not be a symlink: {}", path.display());
+    }
     if !meta.is_file() {
         anyhow::bail!("policy path is not a regular file: {}", path.display());
     }
@@ -295,6 +298,129 @@ fn is_valid_env_var_name(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+fn policy_format_for_path(path: &Path) -> anyhow::Result<PolicyFormat> {
+    let ext = path.extension().and_then(|s| s.to_str());
+    let ext = ext.map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("json") => Ok(PolicyFormat::Json),
+        Some("toml") | None => Ok(PolicyFormat::Toml),
+        Some(other) => anyhow::bail!("unsupported policy extension: {other}"),
+    }
+}
+
+fn parse_policy_document(
+    raw: &str,
+    format: PolicyFormat,
+    path: &Path,
+) -> anyhow::Result<PolicyDocument> {
+    match format {
+        PolicyFormat::Json => serde_json::from_str(raw)
+            .map(PolicyDocument::Json)
+            .map_err(|err| {
+                anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display())
+            }),
+        PolicyFormat::Toml => toml::from_str(raw)
+            .map(PolicyDocument::Toml)
+            .map_err(|err| {
+                anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
+            }),
+    }
+}
+
+fn ensure_rendered_policy_size(document: &PolicyDocument) -> anyhow::Result<()> {
+    let rendered_len = document.rendered_len()?;
+    if rendered_len > MAX_POLICY_BYTES {
+        anyhow::bail!(
+            "policy after env interpolation is too large ({} bytes; max {} bytes)",
+            rendered_len,
+            MAX_POLICY_BYTES
+        );
+    }
+    Ok(())
+}
+
+impl PolicyDocument {
+    fn interpolate_string_values(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Json(value) => interpolate_json_strings(value),
+            Self::Toml(value) => interpolate_toml_strings(value),
+        }
+    }
+
+    fn has_env_interpolation(&self) -> bool {
+        match self {
+            Self::Json(value) => json_has_env_interpolation(value),
+            Self::Toml(value) => toml_has_env_interpolation(value),
+        }
+    }
+
+    fn rendered_len(&self) -> anyhow::Result<usize> {
+        match self {
+            Self::Json(value) => Ok(serde_json::to_vec(value)?.len()),
+            Self::Toml(value) => Ok(toml::to_string(value)?.len()),
+        }
+    }
+
+    fn into_policy(self, path: &Path) -> anyhow::Result<VfsPolicy> {
+        match self {
+            Self::Json(value) => serde_json::from_value(value).map_err(|err| {
+                anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display())
+            }),
+            Self::Toml(value) => value.try_into().map_err(|err| {
+                anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display())
+            }),
+        }
+    }
+}
+
+fn interpolate_json_strings(value: &mut serde_json::Value) -> anyhow::Result<()> {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = interpolate_env(text)?;
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            values.iter_mut().try_for_each(interpolate_json_strings)
+        }
+        serde_json::Value::Object(entries) => {
+            entries.values_mut().try_for_each(interpolate_json_strings)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn interpolate_toml_strings(value: &mut toml::Value) -> anyhow::Result<()> {
+    match value {
+        toml::Value::String(text) => {
+            *text = interpolate_env(text)?;
+            Ok(())
+        }
+        toml::Value::Array(values) => values.iter_mut().try_for_each(interpolate_toml_strings),
+        toml::Value::Table(entries) => entries
+            .iter_mut()
+            .try_for_each(|(_, value)| interpolate_toml_strings(value)),
+        _ => Ok(()),
+    }
+}
+
+fn json_has_env_interpolation(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains("${"),
+        serde_json::Value::Array(values) => values.iter().any(json_has_env_interpolation),
+        serde_json::Value::Object(entries) => entries.values().any(json_has_env_interpolation),
+        _ => false,
+    }
+}
+
+fn toml_has_env_interpolation(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(text) => text.contains("${"),
+        toml::Value::Array(values) => values.iter().any(toml_has_env_interpolation),
+        toml::Value::Table(entries) => entries.values().any(toml_has_env_interpolation),
+        _ => false,
+    }
+}
+
 fn validate_trust_mode(
     policy: &VfsPolicy,
     trust_mode: TrustMode,
@@ -451,6 +577,25 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
             err.to_string()
                 .contains("policy path is not a regular file")
         );
+    }
+
+    #[test]
+    fn load_policy_rejects_symlink_before_open() {
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("policy.toml");
+        std::fs::write(
+            &target,
+            "[permissions]\nread = true\n[limits]\nmax_walk_ms = 1000\nmax_requests_per_ip_per_sec = 1\nmax_requests_burst_per_ip = 1\nmax_rate_limit_ips = 1\n",
+        )
+        .expect("write policy");
+        let link = dir.path().join("policy-link.toml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).expect("symlink");
+
+        let err = load_policy(&link, TrustMode::Trusted, false).expect_err("symlink should fail");
+        assert!(err.to_string().contains("must not be a symlink"));
     }
 
     #[test]

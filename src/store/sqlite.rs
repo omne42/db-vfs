@@ -6,7 +6,10 @@ use rusqlite::OptionalExtension;
 
 use db_vfs_core::{Error, Result};
 
-use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms};
+use super::{
+    DeleteOutcome, FileMeta, LineRangeData, Store, db_err, get_line_range_via_chunks,
+    make_prefix_bounds, monotonic_updated_at_ms,
+};
 
 pub struct SqliteStoreWithConn<C> {
     conn: C,
@@ -144,6 +147,26 @@ where
         )
         .optional()
         .map_err(map_sqlite_err)
+    }
+
+    fn get_line_range(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_line: u64,
+        end_line: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LineRangeData>> {
+        get_line_range_via_chunks(
+            self,
+            workspace_id,
+            path,
+            version,
+            start_line,
+            end_line,
+            max_bytes,
+        )
     }
 
     fn insert_file_new(

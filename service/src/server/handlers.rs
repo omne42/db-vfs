@@ -233,8 +233,12 @@ fn glob_segment_probe_variants(segment: &str) -> Vec<String> {
         .unwrap_or_else(|| vec![segment.to_string()]);
     let mut probes = Vec::new();
     for variant in expanded {
-        for probe in sanitize_glob_probe_variant(&variant) {
-            push_unique(&mut probes, probe, MAX_SEGMENT_VARIANTS);
+        let class_expanded = expand_character_class_variants(&variant, MAX_SEGMENT_VARIANTS)
+            .unwrap_or_else(|| vec![variant]);
+        for expanded_variant in class_expanded {
+            for probe in sanitize_glob_probe_variant(&expanded_variant) {
+                push_unique(&mut probes, probe, MAX_SEGMENT_VARIANTS);
+            }
         }
     }
     probes
@@ -286,6 +290,59 @@ fn expand_brace_variants(segment: &str, limit: usize) -> Option<Vec<String>> {
         }
     }
     Some(expanded)
+}
+
+fn expand_character_class_variants(segment: &str, limit: usize) -> Option<Vec<String>> {
+    let open = segment.find('[')?;
+    let close = segment[open + 1..].find(']')? + open + 1;
+    let class = &segment[open + 1..close];
+    let variants = expand_character_class(class, limit)?;
+    let prefix = &segment[..open];
+    let suffix = &segment[close + 1..];
+
+    let mut expanded = Vec::new();
+    for choice in variants {
+        let nested = format!("{prefix}{choice}{suffix}");
+        for variant in
+            expand_character_class_variants(&nested, limit).unwrap_or_else(|| vec![nested.clone()])
+        {
+            push_unique(&mut expanded, variant, limit);
+        }
+    }
+    Some(expanded)
+}
+
+fn expand_character_class(class: &str, limit: usize) -> Option<Vec<String>> {
+    if class.is_empty() || matches!(class.as_bytes().first(), Some(b'!' | b'^')) {
+        return None;
+    }
+
+    let mut variants = Vec::new();
+    let chars: Vec<char> = class.chars().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        if idx + 2 < chars.len() && chars[idx + 1] == '-' {
+            let start = chars[idx];
+            let end = chars[idx + 2];
+            if start > end {
+                return None;
+            }
+            for ch in start..=end {
+                push_unique(&mut variants, ch.to_string(), limit);
+                if variants.len() >= limit {
+                    return Some(variants);
+                }
+            }
+            idx += 3;
+            continue;
+        }
+        push_unique(&mut variants, chars[idx].to_string(), limit);
+        if variants.len() >= limit {
+            break;
+        }
+        idx += 1;
+    }
+    Some(variants)
 }
 
 fn sanitize_glob_probe_variant(segment: &str) -> Vec<String> {
@@ -440,6 +497,7 @@ where
     Ok(Json::<Req>::from_request(request, state).await?.0)
 }
 
+#[cfg(test)]
 async fn try_acquire_permit_then_parse_json<Req, S>(
     semaphore: Arc<tokio::sync::Semaphore>,
     budget: Option<Duration>,
@@ -458,6 +516,20 @@ where
         .await
         .map_err(map_json_rejection)?;
     Ok((permit, remaining, req))
+}
+
+async fn log_audit_event_for_rejection(
+    audit: Option<&super::audit::AuditLogger>,
+    event: super::audit::AuditEvent,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    budget: Option<Duration>,
+) -> Result<(), (StatusCode, Json<super::ErrorBody>)> {
+    if let Some(audit) = audit {
+        super::log_audit_event_with_permit(audit, event, permit, budget).await
+    } else {
+        drop(permit);
+        Ok(())
+    }
 }
 
 trait HasWorkspaceId {
@@ -728,26 +800,31 @@ where
         err: audit_err,
     } = hooks;
 
-    let (permit, remaining, req) = match try_acquire_permit_then_parse_json::<Req, _>(
-        semaphore, budget, request, &state,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err((status, Json(body))) => {
-            if let Some(audit) = state.inner.audit.as_ref() {
-                let audit_req = AuditRequest {
-                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                    requested_path: None,
-                    path_prefix: None,
-                    glob_pattern: None,
-                    grep_regex: None,
-                    grep_query_len: None,
-                };
-                let event =
-                    audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-                super::log_audit_event(audit, event).await?;
-            }
+    let (permit, remaining) = try_acquire_permit(semaphore, budget).await?;
+    let permit_acquired_at = Instant::now();
+    let req = match parse_json_payload::<Req, _>(request, &state).await {
+        Ok(req) => req,
+        Err(err) => {
+            let (status, Json(body)) = map_json_rejection(err);
+            let audit_req = AuditRequest {
+                workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                requested_path: None,
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            };
+            let event = audit_req.into_event(
+                request_id.clone(),
+                peer,
+                op,
+                status,
+                Some(body.code.to_string()),
+            );
+            let audit_budget =
+                remaining.map(|budget| budget.saturating_sub(permit_acquired_at.elapsed()));
+            log_audit_event_for_rejection(state.inner.audit.as_ref(), event, permit, audit_budget)
+                .await?;
             return Err((status, Json(body)));
         }
     };
@@ -755,12 +832,18 @@ where
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
-        if let Some(audit) = state.inner.audit.as_ref() {
-            let mut event =
-                audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-            audit_err(&state, &mut event, &body);
-            super::log_audit_event(audit, event).await?;
-        }
+        let mut event = audit_req.clone().into_event(
+            request_id.clone(),
+            peer,
+            op,
+            status,
+            Some(body.code.to_string()),
+        );
+        audit_err(&state, &mut event, &body);
+        let audit_budget =
+            remaining.map(|budget| budget.saturating_sub(permit_acquired_at.elapsed()));
+        log_audit_event_for_rejection(state.inner.audit.as_ref(), event, permit, audit_budget)
+            .await?;
         return Err((status, Json(body)));
     }
     if !super::auth::workspace_allowed(&auth.allowed_workspaces, req.workspace_id()) {
@@ -769,12 +852,18 @@ where
             super::CODE_NOT_PERMITTED,
             "workspace is not allowed for this token",
         );
-        if let Some(audit) = state.inner.audit.as_ref() {
-            let mut event =
-                audit_req.into_event(request_id, peer, op, status, Some(body.code.to_string()));
-            audit_err(&state, &mut event, &body);
-            super::log_audit_event(audit, event).await?;
-        }
+        let mut event = audit_req.clone().into_event(
+            request_id.clone(),
+            peer,
+            op,
+            status,
+            Some(body.code.to_string()),
+        );
+        audit_err(&state, &mut event, &body);
+        let audit_budget =
+            remaining.map(|budget| budget.saturating_sub(permit_acquired_at.elapsed()));
+        log_audit_event_for_rejection(state.inner.audit.as_ref(), event, permit, audit_budget)
+            .await?;
         return Err((status, Json(body)));
     }
 
@@ -1005,6 +1094,7 @@ mod tests {
         assert_eq!(redact_path(&redactor, ".git"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".git"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".env*"), "<secret>");
+        assert_eq!(redact_glob_pattern(&redactor, ".[en]nv"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, "docs/**/.env*"), "<secret>");
         assert_eq!(redact_glob_pattern(&redactor, ".{envrc,netrc}"), "<secret>");
         assert_eq!(
@@ -1029,6 +1119,12 @@ mod tests {
         let probes = glob_redaction_probes("**/{.envrc,.netrc}");
         assert!(probes.iter().any(|probe| probe == ".envrc"));
         assert!(probes.iter().any(|probe| probe == ".netrc"));
+    }
+
+    #[test]
+    fn glob_redaction_probes_expand_character_classes() {
+        let probes = glob_redaction_probes(".[en]nv");
+        assert!(probes.iter().any(|probe| probe == ".env"));
     }
 
     #[test]

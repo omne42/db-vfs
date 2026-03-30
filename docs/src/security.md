@@ -17,7 +17,7 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；不一致的 matcher 会被拒绝或回退成 policy 编译结果。
+- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致的 matcher，兼容构造器会发出弃用/告警信号后才回退成 policy 编译结果。
 
 ## Untrusted mode checklist
 

@@ -1,5 +1,5 @@
 use db_vfs::store::sqlite::SqliteStore;
-use db_vfs::store::{DeleteOutcome, FileMeta, Store};
+use db_vfs::store::{DeleteOutcome, FileMeta, LineRangeData, Store};
 
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
@@ -271,6 +271,21 @@ impl Store for BackendStore {
         version: u64,
     ) -> db_vfs::Result<Option<String>> {
         dispatch_store!(self, get_content(workspace_id, path, version))
+    }
+
+    fn get_line_range(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_line: u64,
+        end_line: u64,
+        max_bytes: u64,
+    ) -> db_vfs::Result<Option<LineRangeData>> {
+        dispatch_store!(
+            self,
+            get_line_range(workspace_id, path, version, start_line, end_line, max_bytes)
+        )
     }
 
     fn insert_file_new(

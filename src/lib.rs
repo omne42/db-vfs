@@ -6,6 +6,7 @@
 //! - `vfs`: read/write/patch/delete/glob/grep operations with policy enforcement
 //! - `migrations`: schema bootstrap helpers for supported backends
 
+mod line_endings;
 pub mod migrations;
 pub mod store;
 pub mod vfs;

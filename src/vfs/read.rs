@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::line_endings::line_spans;
 use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
@@ -330,29 +331,20 @@ fn extract_line_range(
     _file_size_bytes: u64,
     path: &str,
 ) -> Result<String> {
-    let bytes = content.as_bytes();
-    let mut pos: usize = 0;
-    let mut current_line: u64 = 0;
-
     let mut start_pos: Option<usize> = None;
     let mut end_pos: Option<usize> = None;
-
-    while pos < bytes.len() {
-        let next = match memchr::memchr(b'\n', &bytes[pos..]) {
-            Some(offset) => pos + offset + 1, // include newline
-            None => bytes.len(),
-        };
-
-        current_line += 1;
+    let mut current_line: u64 = 0;
+    let mut line_start = 0usize;
+    for span in line_spans(content) {
+        current_line = current_line.saturating_add(1);
         if current_line == start_line {
-            start_pos = Some(pos);
+            start_pos = Some(line_start);
         }
         if current_line == end_line {
-            end_pos = Some(next);
+            end_pos = Some(span.full_end);
             break;
         }
-
-        pos = next;
+        line_start = span.full_end;
     }
 
     let Some(start_pos) = start_pos else {
@@ -910,6 +902,14 @@ mod tests {
     }
 
     #[test]
+    fn extract_line_range_supports_cr_only_and_crlf() {
+        let content = "a\rb\r\nc";
+        let out = extract_line_range(content, 2, 2, 1024, content.len() as u64, "a.txt")
+            .expect("line range");
+        assert_eq!(out, "b\r\n");
+    }
+
+    #[test]
     fn ranged_read_allows_large_file_when_selected_slice_is_small() {
         let content = "line-1\nline-2\nline-3\n".repeat(64);
         let store = StaticContentStore {
@@ -968,6 +968,38 @@ mod tests {
             })
             .expect("ranged read");
         assert_eq!(resp.content, "line-2\n");
+        assert!(vfs.store_mut().chunk_reads > 1);
+    }
+
+    #[test]
+    fn ranged_read_without_redaction_supports_cr_only_lines() {
+        let content = "line-1\rline-2\rline-3\r".repeat(16);
+        let store = ChunkOnlyStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: u64::try_from(content.len()).unwrap_or(u64::MAX),
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content,
+            chunk_chars: 4,
+            chunk_reads: 0,
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.read = true;
+        policy.limits.max_read_bytes = 8;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .read(ReadRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                start_line: Some(2),
+                end_line: Some(2),
+            })
+            .expect("ranged read");
+        assert_eq!(resp.content, "line-2\r");
         assert!(vfs.store_mut().chunk_reads > 1);
     }
 

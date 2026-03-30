@@ -454,7 +454,9 @@ mod tests {
 
     use std::sync::Arc;
 
+    use axum::body::Body;
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     #[test]
     fn audit_required_false_allows_startup_when_audit_path_invalid() {
@@ -756,5 +758,71 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.1.0.code, "audit_unavailable");
+    }
+
+    #[tokio::test]
+    async fn required_audit_keeps_io_permit_for_invalid_json_rejections() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.write = true;
+        policy.limits.max_concurrency_io = 1;
+        let validated = ValidatedVfsPolicy::new(policy).expect("validated policy");
+
+        let mut prepared = prepare_state(validated, true).expect("prepared state");
+        let (audit, control) = audit::AuditLogger::blocking_required_logger_for_test();
+        prepared.audit = Some(audit);
+        prepared.io_concurrency = 1;
+
+        let manager =
+            sqlite_connection_manager(std::path::Path::new(":memory:"), Duration::from_millis(100));
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let (state, body_limit) = build_state(backend::Backend::Sqlite { pool }, prepared);
+        let app = build_router(state, body_limit);
+
+        let blocked = tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/write")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{"))
+                        .expect("invalid json request"),
+                )
+                .await
+                .expect("blocked request response")
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("audit wait should block early rejection");
+
+        let busy = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/write")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"workspace_id":"ws","path":"docs/a.txt","content":"ok","expected_version":null}"#,
+                    ))
+                    .expect("second request"),
+            )
+            .await
+            .expect("busy response");
+        assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        control.release_success();
+        let first = blocked.await.expect("join blocked request");
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
     }
 }

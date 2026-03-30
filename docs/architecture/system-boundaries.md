@@ -65,6 +65,7 @@
 - `src/store/mod.rs`
   - 仍保留 legacy `list_metas_by_prefix_page` compatibility fallback，但它只保证正确性，
     不保证大前缀 scan budget / 性能语义；fallback 命中时现在会显式告警，不再静默退化。
+  - `get_line_range` 也保留 legacy chunked compatibility fallback；内建 store 已显式接线，外部 legacy store 命中时会显式告警，而不是静默伪装成稳定抽象层。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 

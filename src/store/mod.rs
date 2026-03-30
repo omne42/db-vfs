@@ -11,8 +11,11 @@ const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
 
 static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static LEGACY_LINE_RANGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static LEGACY_LINE_RANGE_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -141,72 +144,16 @@ pub trait Store {
         end_line: u64,
         max_bytes: u64,
     ) -> Result<Option<LineRangeData>> {
-        let chunk_chars = range_read_chunk_chars(max_bytes);
-        let mut start_char = 1u64;
-        let mut current_line = 1u64;
-        let mut bytes_read = 0u64;
-        let mut content = String::new();
-        let mut saw_content = false;
-        let mut last_chunk_ended_with_newline = false;
-
-        loop {
-            let Some(chunk) =
-                self.get_content_chunk(workspace_id, path, version, start_char, chunk_chars)?
-            else {
-                return Ok(None);
-            };
-            if chunk.is_empty() {
-                let total_lines = if !saw_content {
-                    0
-                } else if last_chunk_ended_with_newline {
-                    current_line.saturating_sub(1)
-                } else {
-                    current_line
-                };
-                return Ok(Some(LineRangeData {
-                    content: (bytes_read <= max_bytes).then_some(content),
-                    bytes_read,
-                    total_lines,
-                }));
-            }
-
-            saw_content = true;
-            last_chunk_ended_with_newline = chunk.as_bytes().last() == Some(&b'\n');
-            let chunk_char_count = u64::try_from(chunk.chars().count())
-                .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
-            let mut segment_start = 0usize;
-
-            for newline_idx in memchr::memchr_iter(b'\n', chunk.as_bytes()) {
-                let segment_end = newline_idx + 1;
-                if current_line >= start_line && current_line <= end_line {
-                    append_range_segment(
-                        &mut content,
-                        &mut bytes_read,
-                        max_bytes,
-                        &chunk[segment_start..segment_end],
-                    );
-                }
-                if current_line == end_line {
-                    return Ok(Some(LineRangeData {
-                        content: (bytes_read <= max_bytes).then_some(content),
-                        bytes_read,
-                        total_lines: end_line,
-                    }));
-                }
-                current_line = current_line.saturating_add(1);
-                segment_start = segment_end;
-            }
-            if segment_start < chunk.len() && current_line >= start_line && current_line <= end_line
-            {
-                append_range_segment(
-                    &mut content,
-                    &mut bytes_read,
-                    max_bytes,
-                    &chunk[segment_start..],
-                );
-            }
-            start_char = start_char.saturating_add(chunk_char_count);
-        }
+        warn_legacy_line_range_fallback::<Self>();
+        get_line_range_via_chunks(
+            self,
+            workspace_id,
+            path,
+            version,
+            start_line,
+            end_line,
+            max_bytes,
+        )
     }
 
     fn insert_file_new(
@@ -306,6 +253,168 @@ pub trait Store {
     }
 }
 
+pub(crate) fn get_line_range_via_chunks<S: Store + ?Sized>(
+    store: &mut S,
+    workspace_id: &str,
+    path: &str,
+    version: u64,
+    start_line: u64,
+    end_line: u64,
+    max_bytes: u64,
+) -> Result<Option<LineRangeData>> {
+    let chunk_chars = range_read_chunk_chars(max_bytes);
+    let mut start_char = 1u64;
+    let mut completed_lines = 0u64;
+    let mut bytes_read = 0u64;
+    let mut content = String::new();
+    let mut saw_content = false;
+    let mut unfinished_line_started = false;
+    let mut pending_cr = false;
+    let mut pending_cr_selected = false;
+
+    loop {
+        let Some(chunk) =
+            store.get_content_chunk(workspace_id, path, version, start_char, chunk_chars)?
+        else {
+            return Ok(None);
+        };
+        if chunk.is_empty() {
+            if pending_cr {
+                completed_lines = completed_lines.saturating_add(1);
+                if completed_lines == end_line {
+                    return Ok(Some(LineRangeData {
+                        content: (bytes_read <= max_bytes).then_some(content),
+                        bytes_read,
+                        total_lines: end_line,
+                    }));
+                }
+            }
+            let total_lines = if !saw_content {
+                0
+            } else {
+                completed_lines.saturating_add(u64::from(unfinished_line_started))
+            };
+            return Ok(Some(LineRangeData {
+                content: (bytes_read <= max_bytes).then_some(content),
+                bytes_read,
+                total_lines,
+            }));
+        }
+
+        saw_content = true;
+        let chunk_char_count = u64::try_from(chunk.chars().count())
+            .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
+        let bytes = chunk.as_bytes();
+        let mut idx = 0usize;
+        let mut segment_start = 0usize;
+
+        if pending_cr {
+            if bytes.first() == Some(&b'\n') {
+                if pending_cr_selected {
+                    append_range_segment(&mut content, &mut bytes_read, max_bytes, &chunk[..1]);
+                }
+                idx = 1;
+                segment_start = 1;
+            }
+            pending_cr = false;
+            pending_cr_selected = false;
+            completed_lines = completed_lines.saturating_add(1);
+            if completed_lines == end_line {
+                return Ok(Some(LineRangeData {
+                    content: (bytes_read <= max_bytes).then_some(content),
+                    bytes_read,
+                    total_lines: end_line,
+                }));
+            }
+        }
+
+        while idx < bytes.len() {
+            let line_no = completed_lines.saturating_add(1);
+            let selected = (start_line..=end_line).contains(&line_no);
+            match bytes[idx] {
+                b'\n' => {
+                    if selected {
+                        append_range_segment(
+                            &mut content,
+                            &mut bytes_read,
+                            max_bytes,
+                            &chunk[segment_start..idx + 1],
+                        );
+                    }
+                    completed_lines = completed_lines.saturating_add(1);
+                    unfinished_line_started = false;
+                    idx += 1;
+                    segment_start = idx;
+                    if completed_lines == end_line {
+                        return Ok(Some(LineRangeData {
+                            content: (bytes_read <= max_bytes).then_some(content),
+                            bytes_read,
+                            total_lines: end_line,
+                        }));
+                    }
+                }
+                b'\r' if idx + 1 < bytes.len() => {
+                    let term_end = if bytes[idx + 1] == b'\n' {
+                        idx + 2
+                    } else {
+                        idx + 1
+                    };
+                    if selected {
+                        append_range_segment(
+                            &mut content,
+                            &mut bytes_read,
+                            max_bytes,
+                            &chunk[segment_start..term_end],
+                        );
+                    }
+                    completed_lines = completed_lines.saturating_add(1);
+                    unfinished_line_started = false;
+                    idx = term_end;
+                    segment_start = idx;
+                    if completed_lines == end_line {
+                        return Ok(Some(LineRangeData {
+                            content: (bytes_read <= max_bytes).then_some(content),
+                            bytes_read,
+                            total_lines: end_line,
+                        }));
+                    }
+                }
+                b'\r' => {
+                    if selected {
+                        append_range_segment(
+                            &mut content,
+                            &mut bytes_read,
+                            max_bytes,
+                            &chunk[segment_start..idx + 1],
+                        );
+                    }
+                    unfinished_line_started = false;
+                    pending_cr = true;
+                    pending_cr_selected = selected;
+                    idx += 1;
+                    segment_start = idx;
+                }
+                _ => {
+                    unfinished_line_started = true;
+                    idx += 1;
+                }
+            }
+        }
+        if segment_start < chunk.len() && !pending_cr {
+            let line_no = completed_lines.saturating_add(1);
+            if (start_line..=end_line).contains(&line_no) {
+                append_range_segment(
+                    &mut content,
+                    &mut bytes_read,
+                    max_bytes,
+                    &chunk[segment_start..],
+                );
+            }
+        }
+        start_char = start_char.saturating_add(chunk_char_count);
+    }
+}
+
 fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
     if !LEGACY_PREFIX_PAGE_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
         #[cfg(test)]
@@ -317,15 +426,33 @@ fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
     }
 }
 
+fn warn_legacy_line_range_fallback<S: ?Sized>() {
+    if !LEGACY_LINE_RANGE_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+        #[cfg(test)]
+        LEGACY_LINE_RANGE_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+        log::warn!(
+            "Store::get_line_range is using the legacy compatibility fallback for {}; implement ranged reads explicitly to keep this public boundary diagnosable",
+            std::any::type_name::<S>()
+        );
+    }
+}
+
 #[cfg(test)]
 fn reset_legacy_prefix_page_fallback_warning_for_test() {
     LEGACY_PREFIX_PAGE_FALLBACK_WARNED.store(false, Ordering::Release);
     LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
+    LEGACY_LINE_RANGE_FALLBACK_WARNED.store(false, Ordering::Release);
+    LEGACY_LINE_RANGE_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
 }
 
 #[cfg(test)]
 fn legacy_prefix_page_fallback_warn_count_for_test() -> usize {
     LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn legacy_line_range_fallback_warn_count_for_test() -> usize {
+    LEGACY_LINE_RANGE_FALLBACK_WARN_COUNT.load(Ordering::Acquire)
 }
 
 fn range_read_chunk_chars(max_bytes: u64) -> usize {
@@ -635,6 +762,83 @@ mod tests {
         }
     }
 
+    struct ChunkRangeFallbackStore {
+        content: String,
+    }
+
+    impl Store for ChunkRangeFallbackStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            panic!("legacy line-range fallback should use get_content_chunk");
+        }
+
+        fn get_content_chunk(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+            start_char: u64,
+            max_chars: usize,
+        ) -> Result<Option<String>> {
+            let start_idx = usize::try_from(start_char.saturating_sub(1))
+                .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
+            Ok(Some(
+                self.content
+                    .chars()
+                    .skip(start_idx)
+                    .take(max_chars)
+                    .collect(),
+            ))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+    }
+
     #[test]
     fn default_page_impl_supports_cursor_pagination_with_legacy_stores() {
         let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
@@ -700,5 +904,29 @@ mod tests {
             .expect("second fallback page");
 
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_line_range_impl_warns_once_and_supports_cr_only() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
+        let mut store = ChunkRangeFallbackStore {
+            content: "a\rb\rc\r".to_string(),
+        };
+
+        let first = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 64)
+            .expect("line range")
+            .expect("present range");
+        assert_eq!(first.content.as_deref(), Some("b\r"));
+
+        let second = store
+            .get_line_range("ws", "docs/a.txt", 1, 3, 3, 64)
+            .expect("second line range")
+            .expect("present range");
+        assert_eq!(second.content.as_deref(), Some("c\r"));
+        assert_eq!(legacy_line_range_fallback_warn_count_for_test(), 1);
     }
 }

@@ -7,6 +7,7 @@ mod util;
 mod write;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
@@ -16,6 +17,8 @@ use db_vfs_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::store::Store;
+
+static COMPAT_VALIDATED_MATCHER_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 pub use delete::{DeleteRequest, DeleteResponse};
 pub use glob::{GlobRequest, GlobResponse};
@@ -149,6 +152,9 @@ impl<S: Store> DbVfs<S> {
     /// policy-derived matchers and ignores the incompatible inputs. Prefer
     /// [`DbVfs::try_new_with_matchers_validated`] when mismatch should fail
     /// hard instead of silently falling back.
+    #[deprecated(
+        note = "compatibility-only API; prefer DbVfs::try_new_with_matchers_validated so policy/matcher mismatches fail fast"
+    )]
     pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
@@ -162,6 +168,11 @@ impl<S: Store> DbVfs<S> {
         {
             (redactor, traversal)
         } else {
+            if !COMPAT_VALIDATED_MATCHER_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+                log::warn!(
+                    "DbVfs::new_with_matchers_validated received matchers that do not match the supplied policy; rebuilding policy-derived matchers instead. Prefer try_new_with_matchers_validated for fail-fast behavior."
+                );
+            }
             let (policy_redactor, policy_traversal) = match Self::build_matchers(policy.as_ref()) {
                 Ok(matchers) => matchers,
                 Err(err) => unreachable!("ValidatedVfsPolicy invariant broken: {err}"),
@@ -313,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn compatibility_validated_constructor_rebuilds_mismatched_matchers() {
         let policy = validated_policy();
         let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {

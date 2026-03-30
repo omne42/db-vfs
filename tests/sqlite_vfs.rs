@@ -815,6 +815,7 @@ fn new_with_matchers_rejects_mismatched_traversal_rules() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn new_with_matchers_validated_falls_back_to_policy_matchers() {
     let mut store = SqliteStore::open_in_memory().expect("open sqlite");
     let now = now_ms();
