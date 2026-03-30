@@ -178,12 +178,16 @@ Secrets semantics:
   wait finishes, and uses the same request runtime budget for the required audit wait; worker loss
   or audit-budget exhaustion turns audited traffic into a visible availability failure instead of
   silently dropping events.
+- The same fail-closed permit retention also applies to early rejects that already consumed a
+  request slot (for example invalid content type / JSON / schema, invalid `workspace_id`, or a
+  disallowed workspace), so audited rejection paths cannot free concurrency before append+flush
+  finishes.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
-- Audit path redaction is conservative for malformed secret-ish inputs too; values such as
-  `.env/../visible.txt` or control-character variants are masked as `<secret>` instead of being
-  written through to JSONL.
+- Audit path/glob redaction is conservative for malformed or pattern-based secret-ish inputs too;
+  values such as `.env/../visible.txt`, `".[en]nv"`, or control-character variants are masked as
+  `<secret>` instead of being written through to JSONL.
 - Early rejects (unauthorized/invalid JSON/rate-limited) are audited with `workspace_id="<unknown>"`.
 - Service logs use `tracing`; configure via `RUST_LOG`.
 
@@ -343,6 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/path-policy: tighten workspace/path validation (control chars, wildcard constraints, oversized inputs).
 - migrations: add DB-level integrity checks for version/timestamp/path/content-size consistency.
 - service/audit-runtime: keep required-audit waits under the originating request's concurrency slot and remaining runtime budget so slow audit sinks cannot free execution capacity before the response can legally return.
+- service/audit-runtime+core/redaction: make early-reject paths keep their original concurrency permit through required audit append+flush, and match audited glob/pattern redaction against real secret deny semantics so values like `".[en]nv"` are masked instead of leaking to JSONL.
 
 ### Changed
 
@@ -371,6 +376,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/scan+docs: stop serializing secret-denied scan counters, exclude denied paths from public `scanned_entries`, and correct `delete.ignore_missing` plus policy-default documentation.
 - service/auth+audit+sqlite: reject plaintext env-backed tokens that violate HTTP Bearer token syntax, reject literal `sha256:<hex>` values in `token_env_var` instead of treating them as pre-hashed secrets, return stable `503 audit_unavailable` errors when required audit append/flush fails, fail fast on held audit locks, and force `--sqlite :memory:` through a single migrated pooled connection.
 - service/policy: stat policy paths before open so non-regular files fail fast, and scope env interpolation to parsed JSON/TOML string values so comments and non-string fields are not treated as template input.
+- service/audit-handlers+core/redaction: keep the original concurrency permit held through required-audit waits for JSON/workspace early rejects too, and drive audit glob redaction from real deny-glob matching so secret patterns like `.[en]nv` no longer leak into JSONL.
 - core/policy+vfs: make `ValidatedVfsPolicy::new()` prove policy-derived matcher construction up front, so validated-policy constructor families no longer carry a reachable matcher fallback panic path.
 - service/audit-redaction: conservatively mask malformed secret-ish request paths in audit fields, so inputs like `.env/../visible.txt` or control-character variants do not leak denied roots into JSONL.
 - store/vfs/read: finish the chunked no-redaction ranged-read path across the `Store` trait plus SQLite/Postgres backends, so narrow line-range reads no longer require whole-file materialization.
@@ -822,6 +828,7 @@ Budget semantics:
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
+- The same permit retention applies to early rejects that already acquired a request slot, including invalid content type / JSON / schema, invalid `workspace_id`, and token-authorized requests whose workspace is still denied by `allowed_workspaces`.
 - SQLite `busy_timeout` and Postgres `statement_timeout` / `lock_timeout` are reset to the active request or startup migration budget.
 - Capacity planning for scan workloads should budget up to `2 * max_read_bytes` per in-flight scan when `secrets.redact_regexes` is enabled, because the service may need to hold both the original content and a bounded redacted copy at once.
 
@@ -966,6 +973,9 @@ Common codes:
 `audit_unavailable` means required audit append/flush failed after request handling started. The
 operation may already have completed, so callers should verify state before replaying writes. This
 also covers required-audit waits that overrun the originating request's remaining runtime budget.
+Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
+or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
+finishes.
 
 `busy` can be returned before JSON validation runs: the service acquires the relevant concurrency
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending
