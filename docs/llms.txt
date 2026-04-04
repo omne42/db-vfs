@@ -192,6 +192,7 @@ Secrets semantics:
   disallowed workspace), so audited rejection paths cannot free concurrency before append+flush
   finishes.
 - Unauthorized and rate-limited early rejects also follow the fail-closed path when `audit.required = true`; they acquire a frontdoor permit, spend the remaining `max_io_ms` budget on append+flush, and release that permit as soon as the request-level audit wait ends instead of waiting for any background worker lifetime.
+- Required-audit queue saturation also fails closed with `503 audit_unavailable` immediately instead of blocking indefinitely on the audit channel; the originating permit is released as soon as that bounded audit wait returns.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
@@ -361,6 +362,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime: keep required-audit waits under the originating request's concurrency slot and remaining runtime budget so slow audit sinks cannot free execution capacity before the response can legally return.
 - service/audit-runtime+core/redaction: make early-reject paths keep their original concurrency permit through required audit append+flush, and match audited glob/pattern redaction against real secret deny semantics so values like `".[en]nv"` are masked instead of leaking to JSONL.
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
+- service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
 
 ### Changed
 
@@ -500,7 +502,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-service`: HTTP JSON API for the VFS (SQLite).
 - Schema migrations for SQLite/Postgres (`files` table with `(workspace_id, path)` primary key + `updated_at_ms` index).
 - Tests:
-  - SQLite VFS semantic tests (CAS conflicts, deny globs, grep/glob scoping).
 
 
 ---
@@ -879,8 +880,10 @@ waits for its audit record to append+flush successfully, the originating concurr
 held until that wait finishes, and the same request runtime budget continues to cover the required
 audit wait. Losing the audit worker, write/flush failures, or exhausting the remaining request
 budget turns into a visible `503 audit_unavailable` failure instead of silent event loss or a
-panic-driven connection abort. That error means the request outcome may already be committed, so
-callers should verify state before retrying non-idempotent writes.
+panic-driven connection abort. Required-audit queue saturation also fails closed immediately with
+the same error instead of blocking forever on the enqueue path. That error means the request
+outcome may already be committed, so callers should verify state before retrying non-idempotent
+writes.
 
 
 ---
@@ -1003,6 +1006,8 @@ Common codes:
 `audit_unavailable` means required audit append/flush failed after request handling started. The
 operation may already have completed, so callers should verify state before replaying writes. This
 also covers required-audit waits that overrun the originating request's remaining runtime budget.
+Required-audit queue saturation uses the same error instead of indefinitely blocking behind a full
+audit channel.
 Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
 or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
 finishes.

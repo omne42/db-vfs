@@ -329,7 +329,7 @@ mod tests {
     use axum::Router;
     use axum::http::HeaderValue;
     use axum::routing::post;
-    use db_vfs_core::policy::AuthToken;
+    use db_vfs_core::policy::{AuditPolicy, AuthToken, Limits};
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
     use tower::ServiceExt;
@@ -643,6 +643,63 @@ mod tests {
         control.release_success();
         let resp = task.await.expect("join auth middleware task");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_times_out_required_audit_for_unauthorized_requests() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+
+        let mut policy = VfsPolicy {
+            limits: Limits {
+                max_io_ms: 10,
+                ..Limits::default()
+            },
+            audit: AuditPolicy {
+                required: true,
+                ..AuditPolicy::default()
+            },
+            ..VfsPolicy::default()
+        };
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(dev_token_sha256_for_test()),
+            token_env_var: None,
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+        let state = super::super::test_state_with_policy_audit_and_auth(policy, Some(audit), false);
+
+        let app = Router::new()
+            .route("/v1/read", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::auth_middleware,
+            ))
+            .with_state(state.clone());
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        let mut request = request;
+        request
+            .extensions_mut()
+            .insert(super::super::layers::RequestId(
+                "req-auth-timeout".to_string(),
+            ));
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let permit = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.inner.io_concurrency.clone().acquire_owned(),
+        )
+        .await
+        .expect("timed-out audit should release the IO permit")
+        .expect("acquire IO permit after auth audit timeout");
+        drop(permit);
+
+        control.release_success();
     }
 
     fn dev_token_sha256_for_test() -> String {

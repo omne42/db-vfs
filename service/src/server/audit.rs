@@ -40,6 +40,18 @@ impl AuditFailure {
     fn worker_stopped() -> Self {
         Self::new("the audit worker stopped")
     }
+
+    fn queue_full() -> Self {
+        Self::new(format!(
+            "the required audit queue is full (capacity {AUDIT_CHANNEL_CAPACITY})"
+        ))
+    }
+
+    fn budget_exhausted(timeout: Duration) -> Self {
+        Self::new(format!(
+            "audit append+flush exceeded the remaining request budget ({timeout:?})"
+        ))
+    }
 }
 
 impl fmt::Display for AuditFailure {
@@ -209,23 +221,36 @@ impl AuditLogger {
         })
     }
 
-    pub(super) fn try_log(&self, event: AuditEvent) -> Result<(), AuditFailure> {
+    pub(super) fn try_log(
+        &self,
+        event: AuditEvent,
+        budget: Option<Duration>,
+    ) -> Result<(), AuditFailure> {
         if self.required {
             let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-            if self
-                .sender
-                .send(QueuedAuditEvent {
-                    event,
-                    ack: Some(ack_tx),
-                })
-                .is_err()
-            {
-                return Err(AuditFailure::worker_stopped());
+            match self.sender.try_send(QueuedAuditEvent {
+                event,
+                ack: Some(ack_tx),
+            }) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => return Err(AuditFailure::queue_full()),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(AuditFailure::worker_stopped());
+                }
             }
-            match ack_rx.recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => return Err(AuditFailure::new(err)),
-                Err(_) => return Err(AuditFailure::worker_stopped()),
+            let ack_result = match budget {
+                Some(timeout) if timeout.is_zero() => {
+                    return Err(AuditFailure::budget_exhausted(timeout));
+                }
+                Some(timeout) => ack_rx.recv_timeout(timeout).map_err(|err| match err {
+                    mpsc::RecvTimeoutError::Timeout => AuditFailure::budget_exhausted(timeout),
+                    mpsc::RecvTimeoutError::Disconnected => AuditFailure::worker_stopped(),
+                })?,
+                None => ack_rx.recv().map_err(|_| AuditFailure::worker_stopped())?,
+            };
+            match ack_result {
+                Ok(()) => {}
+                Err(err) => return Err(AuditFailure::new(err)),
             }
             return Ok(());
         }
@@ -299,12 +324,38 @@ impl AuditLogger {
             },
         )
     }
+
+    #[cfg(test)]
+    pub(super) fn full_required_logger_for_test() -> (Self, FullRequiredAuditControl) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(QueuedAuditEvent {
+                event: minimal_event("queued".to_string(), None, "read", 200, None),
+                ack: None,
+            })
+            .expect("fill required audit queue");
+        (
+            Self {
+                sender,
+                disconnected_warned: Arc::new(AtomicBool::new(false)),
+                required: true,
+            },
+            FullRequiredAuditControl {
+                _receiver: receiver,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
 pub(super) struct BlockingRequiredAuditControl {
     blocked: Arc<AtomicBool>,
     release_tx: mpsc::SyncSender<()>,
+}
+
+#[cfg(test)]
+pub(super) struct FullRequiredAuditControl {
+    _receiver: mpsc::Receiver<QueuedAuditEvent>,
 }
 
 #[cfg(test)]
@@ -720,15 +771,43 @@ mod tests {
         };
 
         let err = logger
-            .try_log(super::minimal_event(
-                "req-1".to_string(),
-                None,
-                "read",
-                200,
-                None,
-            ))
+            .try_log(
+                super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                Some(Duration::from_millis(10)),
+            )
             .expect_err("required audit should surface worker failure");
         assert_eq!(err.to_string(), "the audit worker stopped");
+    }
+
+    #[test]
+    fn required_audit_logger_fails_when_queue_is_full() {
+        let (logger, _control) = super::AuditLogger::full_required_logger_for_test();
+        let err = logger
+            .try_log(
+                super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                Some(Duration::from_secs(1)),
+            )
+            .expect_err("required audit should fail immediately when queue is full");
+        assert!(
+            err.to_string().contains("required audit queue is full"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn required_audit_logger_times_out_waiting_for_ack() {
+        let (logger, _control) = super::AuditLogger::blocking_required_logger_for_test();
+        let err = logger
+            .try_log(
+                super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                Some(Duration::from_millis(10)),
+            )
+            .expect_err("required audit should fail when ack wait exhausts budget");
+        assert!(
+            err.to_string()
+                .contains("audit append+flush exceeded the remaining request budget"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

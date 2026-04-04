@@ -929,7 +929,7 @@ mod tests {
     use axum::http::Request;
     use axum::http::StatusCode;
     use db_vfs::vfs::{DbVfs, WriteRequest};
-    use db_vfs_core::policy::{ValidatedVfsPolicy, VfsPolicy};
+    use db_vfs_core::policy::{AuditPolicy, Limits, ValidatedVfsPolicy, VfsPolicy};
     use db_vfs_core::redaction::SecretRedactor;
     use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
@@ -1134,6 +1134,63 @@ mod tests {
             .expect_err("invalid JSON should be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert_eq!(err.1.0.code, "invalid_json_syntax");
+    }
+
+    #[tokio::test]
+    async fn handle_vfs_request_times_out_required_audit_for_json_rejects() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let policy = VfsPolicy {
+            limits: Limits {
+                max_io_ms: 10,
+                ..Limits::default()
+            },
+            audit: AuditPolicy {
+                required: true,
+                ..AuditPolicy::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state.clone(),
+                "req-invalid-json-timeout".to_string(),
+                allow_all_auth_ctx(),
+                "write",
+            ),
+            request,
+            io_limits(&state),
+            |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
+            DbVfs::write,
+            AuditHooks {
+                ok: super::audit_ok_write,
+                err: super::audit_err_hide_secret_path,
+            },
+        )
+        .await
+        .expect_err("required audit timeout should fail closed");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+        let permit = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.inner.io_concurrency.clone().acquire_owned(),
+        )
+        .await
+        .expect("timed-out audit should release the semaphore slot")
+        .expect("acquire IO permit after timed-out audit");
+        drop(permit);
+
+        control.release_success();
     }
 
     #[tokio::test]
@@ -1446,5 +1503,33 @@ mod tests {
         drop(permit);
 
         control.release_success();
+    }
+
+    #[tokio::test]
+    async fn log_audit_event_with_permit_fails_fast_when_required_audit_queue_is_full() {
+        let (audit, _control) = super::super::audit::AuditLogger::full_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+
+        let err = super::super::log_audit_event_with_permit(
+            &audit,
+            super::super::audit::minimal_event("req-full".to_string(), None, "write", 200, None),
+            permit,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect_err("full required audit queue should fail closed");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("queue-full audit should release the semaphore slot")
+            .expect("acquire permit after queue-full audit");
+        drop(permit);
     }
 }

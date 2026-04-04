@@ -56,6 +56,8 @@
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - required audit channel 满也必须立即 fail-closed 成 `503 audit_unavailable`；不能因为
+    阻塞 `send()` 把 request permit 或后台线程无限悬挂。
   - scan 请求即使配置 `max_walk_ms = None`，backend DB pool wait/connect 和 frontdoor
     reject/audit wait 仍必须保持 `max_io_ms` 有界；只有 scan runtime 本身可以不设上限。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样

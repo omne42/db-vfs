@@ -232,4 +232,60 @@ mod tests {
         let resp = task.await.expect("join rate-limited task");
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+
+    #[tokio::test]
+    async fn rate_limit_middleware_times_out_required_audit_and_releases_io_permit() {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let policy = VfsPolicy {
+            limits: Limits {
+                max_io_ms: 10,
+                max_requests_per_ip_per_sec: 1,
+                max_requests_burst_per_ip: 1,
+                max_rate_limit_ips: 16,
+                ..Limits::default()
+            },
+            audit: AuditPolicy {
+                required: true,
+                ..AuditPolicy::default()
+            },
+            ..VfsPolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
+
+        let app = Router::new()
+            .route("/v1/read", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::rate_limit_middleware,
+            ))
+            .with_state(state.clone());
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("first request");
+        let first_resp = app.clone().oneshot(first).await.expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("second request");
+        let resp = app.oneshot(second).await.expect("second response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let permit = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.inner.io_concurrency.clone().acquire_owned(),
+        )
+        .await
+        .expect("timed-out audit should release the IO permit")
+        .expect("acquire IO permit after rate-limit audit timeout");
+        drop(permit);
+
+        control.release_success();
+    }
 }
