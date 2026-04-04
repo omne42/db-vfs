@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -89,6 +90,48 @@ fn policy_allow_all() -> VfsPolicy {
                 allowed_workspaces: vec!["ws".to_string()],
             }],
         },
+    }
+}
+
+fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+struct BackendWholeContentGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl BackendWholeContentGuard {
+    fn install(limit: u64) -> Self {
+        let previous = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
+        // SAFETY: callers hold the process-wide test env mutex while this guard lives.
+        unsafe {
+            std::env::set_var(
+                "DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES",
+                limit.to_string(),
+            );
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for BackendWholeContentGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => {
+                // SAFETY: callers hold the process-wide test env mutex while this guard lives.
+                unsafe {
+                    std::env::set_var("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES", previous);
+                }
+            }
+            None => {
+                // SAFETY: callers hold the process-wide test env mutex while this guard lives.
+                unsafe {
+                    std::env::remove_var("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
+                }
+            }
+        }
     }
 }
 
@@ -298,6 +341,56 @@ async fn write_then_read() {
         .await
         .expect("read json");
     assert_eq!(read.content, "hello\n");
+    assert_eq!(read.version, 1);
+}
+
+#[tokio::test]
+async fn write_then_read_line_range() {
+    let _env_guard = test_env_lock().lock().await;
+    let max_read_bytes = 12u64;
+    let _whole_content_guard = BackendWholeContentGuard::install(max_read_bytes);
+
+    let mut policy = policy_allow_all();
+    policy.limits.max_read_bytes = max_read_bytes;
+    let Some(server) = setup_with_policy(policy).await else {
+        return;
+    };
+
+    server
+        .client
+        .post(format!("{}/v1/write", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .json(&WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/range.txt".to_string(),
+            content: "line-0001\nline-0002\nline-0003\nline-0004\n".to_string(),
+            expected_version: None,
+        })
+        .send()
+        .await
+        .expect("send write")
+        .error_for_status()
+        .expect("write status");
+
+    let read = server
+        .client
+        .post(format!("{}/v1/read", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .json(&ReadRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/range.txt".to_string(),
+            start_line: Some(2),
+            end_line: Some(2),
+        })
+        .send()
+        .await
+        .expect("send ranged read")
+        .error_for_status()
+        .expect("ranged read status")
+        .json::<ReadBody>()
+        .await
+        .expect("ranged read json");
+    assert_eq!(read.content, "line-0002\n");
     assert_eq!(read.version, 1);
 }
 
