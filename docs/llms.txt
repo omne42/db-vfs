@@ -380,6 +380,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
@@ -501,7 +502,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db-vfs-core`: Policy + Secrets + Limits, error codes, path normalization, deny+redaction helpers.
 - `db-vfs`: SQLite (default) + Postgres (feature) stores and VFS ops: `read/write/patch/delete/glob/grep`.
 - `db-vfs-service`: HTTP JSON API for the VFS (SQLite).
-- Schema migrations for SQLite/Postgres (`files` table with `(workspace_id, path)` primary key + `updated_at_ms` index).
 
 
 ---
@@ -861,6 +861,9 @@ Budget semantics:
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
+- `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
+- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` expect
+  caller-supplied matchers to match that same policy and fail fast on mismatch.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
 - Redaction-enabled ranged `read` rejects raw files larger than `max_read_bytes` before full-content load, and also rejects redacted whole-file intermediates that would overflow the same budget.
 
@@ -986,6 +989,8 @@ counts it under `skipped_too_large_files` instead of allocating an unbounded red
 - must be root-relative;
 - no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
 - normalized path is echoed in response fields.
+- audit path/glob masking is derived from the same policy-backed redaction matcher semantics as
+  runtime secret denial; handlers do not maintain a separate local secret-path guesser.
 
 ## Errors
 
@@ -1406,3 +1411,4 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
+
