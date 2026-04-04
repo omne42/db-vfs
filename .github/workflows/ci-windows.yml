@@ -91,6 +91,13 @@ jobs:
           $reportPath = Join-Path $env:RUNNER_TEMP "persistent-cache-report.json"
           $report | ConvertTo-Json -Depth 6 | Out-File -FilePath $reportPath -Encoding utf8
 
+          Write-Host "persistent-cache: mirror_exists_before=$($before.mirror_exists)"
+          Write-Host "persistent-cache: worktree_exists_before=$($before.repo_exists)"
+          Write-Host "persistent-cache: cargo_registry_exists_before=$($before.cargo_registry_exists)"
+          Write-Host "persistent-cache: target_exists_before=$($before.target_exists)"
+          Write-Host "persistent-cache: repo_dir=$repoDir"
+          Write-Host "persistent-cache: synced_sha=$(git -C $repoDir rev-parse HEAD)"
+
           "repo_dir=$repoDir" >> $env:GITHUB_OUTPUT
           "repo_dir_bash=$repoDirBash" >> $env:GITHUB_OUTPUT
           "report_path=$reportPath" >> $env:GITHUB_OUTPUT
@@ -106,6 +113,7 @@ jobs:
         shell: pwsh
         run: |
           $count = if (Test-Path $env:CARGO_TARGET_DIR) { (Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count } else { 0 }
+          Write-Host "persistent-cache: target_entries_before_build=$count"
           "entry_count=$count" >> $env:GITHUB_OUTPUT
 
       - name: Gates (Windows)
@@ -146,4 +154,5 @@ jobs:
             "- warm cache hit: $([bool]($warmTarget -or $warmCargoRegistry))"
           )
 
+          $lines | ForEach-Object { Write-Host $_ }
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($lines -join "`n")
