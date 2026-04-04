@@ -7,6 +7,7 @@ mod util;
 mod write;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
@@ -208,6 +209,134 @@ impl<S> DbVfs<S> {
             Ok(())
         } else {
             Err(Error::NotPermitted(format!("{op} is disabled by policy")))
+        }
+    }
+}
+
+pub(super) enum ScanTarget<'a> {
+    Prefix(&'a str),
+    ExactPath(&'a str),
+}
+
+pub(super) enum ScanControl {
+    Continue,
+    Stop(ScanLimitReason),
+}
+
+pub(super) struct ScanOutcome {
+    pub limit_reason: Option<ScanLimitReason>,
+    started: Instant,
+}
+
+impl ScanOutcome {
+    pub fn elapsed_ms(&self) -> u64 {
+        util::elapsed_ms(&self.started)
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.limit_reason.is_some()
+    }
+}
+
+pub(super) fn scan_metas<S, F>(
+    store: &mut S,
+    workspace_id: &str,
+    target: ScanTarget<'_>,
+    max_scan_entries: usize,
+    max_walk: Option<Duration>,
+    op: &'static str,
+    mut visit: F,
+) -> Result<ScanOutcome>
+where
+    S: Store,
+    F: FnMut(&mut S, FileMeta) -> Result<ScanControl>,
+{
+    let started = Instant::now();
+    let mut budgeted_entries = 0usize;
+    let mut after: Option<String> = None;
+    let mut exact_path_fetched = false;
+
+    loop {
+        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+            return Ok(ScanOutcome {
+                limit_reason: Some(ScanLimitReason::Time),
+                started,
+            });
+        }
+
+        let remaining_entries = max_scan_entries.saturating_sub(budgeted_entries);
+        if remaining_entries == 0 {
+            return Ok(ScanOutcome {
+                limit_reason: Some(ScanLimitReason::Entries),
+                started,
+            });
+        }
+
+        let page_budget = remaining_entries.min(glob::META_PAGE_SIZE.max(grep::META_PAGE_SIZE));
+        let (mut metas, has_more) = match target {
+            ScanTarget::Prefix(prefix) => {
+                let fetch_limit = page_budget.saturating_add(1);
+                let mut metas = store.list_metas_by_prefix_page(
+                    workspace_id,
+                    prefix,
+                    after.as_deref(),
+                    fetch_limit,
+                )?;
+                if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+                    return Ok(ScanOutcome {
+                        limit_reason: Some(ScanLimitReason::Time),
+                        started,
+                    });
+                }
+                validate_scan_page_order(&metas, after.as_deref(), op)?;
+                let has_more = metas.len() > page_budget;
+                if has_more {
+                    metas.truncate(page_budget);
+                }
+                (metas, has_more)
+            }
+            ScanTarget::ExactPath(path) => {
+                if exact_path_fetched {
+                    (Vec::new(), false)
+                } else {
+                    exact_path_fetched = true;
+                    let meta = store.get_meta(workspace_id, path)?.into_iter().collect();
+                    (meta, false)
+                }
+            }
+        };
+
+        if metas.is_empty() {
+            return Ok(ScanOutcome {
+                limit_reason: None,
+                started,
+            });
+        }
+        if has_more {
+            advance_scan_after_cursor(&mut after, &metas, op)?;
+        }
+
+        for meta in metas.drain(..) {
+            budgeted_entries = budgeted_entries.saturating_add(1);
+            if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
+                return Ok(ScanOutcome {
+                    limit_reason: Some(ScanLimitReason::Time),
+                    started,
+                });
+            }
+            if let ScanControl::Stop(reason) = visit(store, meta)? {
+                return Ok(ScanOutcome {
+                    limit_reason: Some(reason),
+                    started,
+                });
+            }
+        }
+
+        if !has_more {
+            return Ok(ScanOutcome {
+                limit_reason: None,
+                started,
+            });
         }
     }
 }
