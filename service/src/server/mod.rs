@@ -366,6 +366,7 @@ fn build_router(state: AppState, body_limit: usize) -> Router {
         .with_state(state)
 }
 
+#[cfg(feature = "sqlite")]
 fn sqlite_uses_in_memory_pool(db_path: &std::path::Path) -> bool {
     db_path == std::path::Path::new(":memory:")
 }
@@ -374,6 +375,7 @@ fn startup_migration_timeout(policy: &VfsPolicy) -> Duration {
     Duration::from_millis(policy.limits.max_io_ms)
 }
 
+#[cfg(feature = "sqlite")]
 fn sqlite_connection_manager(
     db_path: &std::path::Path,
     startup_busy_timeout: Duration,
@@ -389,6 +391,7 @@ fn sqlite_connection_manager(
     })
 }
 
+#[cfg(feature = "sqlite")]
 fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
     if sqlite_uses_in_memory_pool(db_path) {
         1
@@ -397,7 +400,7 @@ fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_policy_audit_and_auth(
     policy: VfsPolicy,
     audit: Option<audit::AuditLogger>,
@@ -431,12 +434,12 @@ pub(in crate::server) fn test_state_with_policy_audit_and_auth(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_audit(audit: Option<audit::AuditLogger>) -> AppState {
     test_state_with_policy_audit_and_auth(VfsPolicy::default(), audit, true)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_policy_and_audit(
     policy: VfsPolicy,
     audit: Option<audit::AuditLogger>,
@@ -444,6 +447,7 @@ pub(in crate::server) fn test_state_with_policy_and_audit(
     test_state_with_policy_audit_and_auth(policy, audit, true)
 }
 
+#[cfg(feature = "sqlite")]
 pub fn build_app_sqlite(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
@@ -507,6 +511,7 @@ pub fn build_app_postgres(
     Ok(build_router(state, body_limit))
 }
 
+#[cfg(feature = "sqlite")]
 /// Convenience entrypoint using the SQLite backend.
 ///
 /// For PostgreSQL, call `build_app_postgres` when the `postgres` feature is enabled.
@@ -528,8 +533,10 @@ mod tests {
 
     use std::sync::Arc;
 
+    #[cfg(feature = "sqlite")]
     use tempfile::tempdir;
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn audit_required_false_allows_startup_when_audit_path_invalid() {
         let dir = tempdir().expect("tempdir");
@@ -544,6 +551,7 @@ mod tests {
         assert!(build_app_sqlite(db_path, policy, true).is_ok());
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn audit_required_true_fails_startup_when_audit_path_invalid() {
         let dir = tempdir().expect("tempdir");
@@ -565,6 +573,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn auth_validation_fails_before_touching_sqlite() {
         let dir = tempdir().expect("tempdir");
@@ -629,6 +638,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_memory_path_uses_single_connection_pool() {
         assert!(sqlite_uses_in_memory_pool(std::path::Path::new(":memory:")));
@@ -664,6 +674,7 @@ mod tests {
         assert_eq!(estimated_scan_inflight_bytes(&policy), 768);
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_memory_pool_reuses_the_single_migrated_connection() {
         let manager = sqlite_connection_manager(
@@ -708,6 +719,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_connection_manager_applies_startup_busy_timeout_budget() {
         let manager = sqlite_connection_manager(

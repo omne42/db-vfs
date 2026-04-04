@@ -1,15 +1,18 @@
-use db_vfs::store::sqlite::SqliteStore;
 use db_vfs::store::{DeleteOutcome, FileMeta, LineRangeData, Store};
 
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
+#[cfg(feature = "sqlite")]
+use db_vfs::store::sqlite::SqliteStore;
 #[cfg(feature = "postgres")]
 use std::sync::OnceLock;
 #[cfg(feature = "postgres")]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[cfg(feature = "sqlite")]
 type SqlitePool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
+#[cfg(feature = "sqlite")]
 type SqliteConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 #[cfg(feature = "postgres")]
@@ -19,6 +22,7 @@ type PostgresPool =
 type PostgresConn = r2d2::PooledConnection<
     r2d2_postgres::PostgresConnectionManager<r2d2_postgres::postgres::NoTls>,
 >;
+#[cfg(feature = "sqlite")]
 const SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
 #[cfg(feature = "postgres")]
 const POSTGRES_CANCEL_QUEUE_CAPACITY: usize = 1024;
@@ -81,22 +85,21 @@ fn postgres_cancel_tx()
 
 #[derive(Clone)]
 pub(super) enum Backend {
-    Sqlite {
-        pool: SqlitePool,
-    },
+    #[cfg(feature = "sqlite")]
+    Sqlite { pool: SqlitePool },
     #[cfg(feature = "postgres")]
-    Postgres {
-        pool: PostgresPool,
-    },
+    Postgres { pool: PostgresPool },
 }
 
 pub(super) enum BackendStore {
+    #[cfg(feature = "sqlite")]
     Sqlite(SqliteStore<SqliteConn>),
     #[cfg(feature = "postgres")]
     Postgres(Box<PostgresStore<PostgresConn>>),
 }
 
 pub(super) enum CancelHandle {
+    #[cfg(feature = "sqlite")]
     Sqlite(rusqlite::InterruptHandle),
     #[cfg(feature = "postgres")]
     Postgres(r2d2_postgres::postgres::CancelToken),
@@ -105,6 +108,7 @@ pub(super) enum CancelHandle {
 impl CancelHandle {
     pub(super) fn cancel(&self) {
         match self {
+            #[cfg(feature = "sqlite")]
             CancelHandle::Sqlite(handle) => handle.interrupt(),
             #[cfg(feature = "postgres")]
             CancelHandle::Postgres(token) => {
@@ -190,6 +194,7 @@ fn maybe_reject_test_whole_content_read(_content_len: usize) -> db_vfs::Result<(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
 pub(super) fn sqlite_busy_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS))
 }
@@ -234,6 +239,7 @@ impl BackendStore {
         operation_timeout: Option<std::time::Duration>,
     ) -> db_vfs::Result<(Self, CancelHandle)> {
         match backend {
+            #[cfg(feature = "sqlite")]
             Backend::Sqlite { pool } => {
                 let conn = match pool_timeout {
                     Some(timeout) => pool
@@ -276,6 +282,7 @@ impl BackendStore {
 macro_rules! dispatch_store {
     ($this:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match $this {
+            #[cfg(feature = "sqlite")]
             BackendStore::Sqlite(store) => store.$method($($arg),*),
             #[cfg(feature = "postgres")]
             BackendStore::Postgres(store) => store.$method($($arg),*),
@@ -518,6 +525,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_backend_open_returns_sqlite_cancel_handle() {
         let manager = r2d2_sqlite::SqliteConnectionManager::memory();
@@ -532,6 +540,7 @@ mod tests {
         assert!(matches!(cancel, CancelHandle::Sqlite(_)));
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_backend_open_honors_pool_timeout() {
         let manager = r2d2_sqlite::SqliteConnectionManager::memory();
@@ -557,6 +566,7 @@ mod tests {
         assert_eq!(err.code(), "timeout");
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_busy_timeout_tracks_request_budget() {
         assert_eq!(
@@ -565,6 +575,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_busy_timeout_is_effectively_unbounded_without_budget() {
         assert_eq!(
@@ -573,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn backend_store_forwards_chunked_content_reads() {
         let _lock = backend_whole_content_test_lock()
@@ -612,6 +624,7 @@ mod tests {
         assert_eq!(chunk, "line-0002\n");
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn backend_store_forwards_line_range_reads() {
         let _lock = backend_whole_content_test_lock()

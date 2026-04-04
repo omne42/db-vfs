@@ -2,6 +2,12 @@
 
 Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`).
 
+The service binary backend is feature-gated independently from policy loading:
+
+- default build enables SQLite via `sqlite-bundled`
+- Postgres-only build uses `--no-default-features --features postgres`
+- plain SQLite build without bundled libsqlite uses `--no-default-features --features sqlite`
+
 Start from [`policy.example.toml`](policy.example.toml).
 
 Policy files must be direct regular files. The loader rejects symlinks, directories, FIFOs,

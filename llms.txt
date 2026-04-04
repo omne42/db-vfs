@@ -43,6 +43,12 @@ DB-backed virtual filesystem (DB-VFS) for service workloads.
 - Tool-like operations: `read`, `write`, `patch`, `delete`, `glob`, `grep`.
 - Backends: SQLite (default/dev) and Postgres (`--features postgres`).
 
+`db-vfs-service` now exposes backend features explicitly:
+
+- default build: SQLite with bundled libsqlite (`cargo run -p db-vfs-service -- ...`)
+- Postgres-only build: `cargo run -p db-vfs-service --no-default-features --features postgres -- --postgres ...`
+- SQLite without bundled libsqlite: `cargo run -p db-vfs-service --no-default-features --features sqlite -- ...`
+
 ## Quickstart (5 min)
 
 1. Create a local policy and token:
@@ -380,6 +386,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
@@ -501,7 +508,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `db-vfs-core`: Policy + Secrets + Limits, error codes, path normalization, deny+redaction helpers.
-- `db-vfs`: SQLite (default) + Postgres (feature) stores and VFS ops: `read/write/patch/delete/glob/grep`.
 
 
 ---
@@ -774,6 +780,12 @@ section_id: "docs-src-policy-md"
 # Policy
 
 Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`).
+
+The service binary backend is feature-gated independently from policy loading:
+
+- default build enables SQLite via `sqlite-bundled`
+- Postgres-only build uses `--no-default-features --features postgres`
+- plain SQLite build without bundled libsqlite uses `--no-default-features --features sqlite`
 
 Start from [`policy.example.toml`](policy.example.toml).
 

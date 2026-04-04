@@ -1,3 +1,5 @@
+#![cfg(feature = "sqlite")]
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

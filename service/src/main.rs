@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         "sqlite"
     };
 
-    #[cfg(feature = "postgres")]
+    #[cfg(all(feature = "sqlite", feature = "postgres"))]
     let app = if let Some(url) = args.postgres {
         db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
     } else {
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
 
-    #[cfg(not(feature = "postgres"))]
+    #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
     let app = if args.postgres.is_some() {
         anyhow::bail!(
             "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
@@ -103,18 +103,39 @@ async fn main() -> anyhow::Result<()> {
         };
         db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
     };
-    tracing::info!(
-        listen = %args.listen,
-        trust_mode = ?args.trust_mode,
-        unsafe_no_auth = args.unsafe_no_auth,
-        backend = backend_kind,
-        "starting db-vfs-service"
-    );
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-    Ok(())
+
+    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+    let app = if let Some(url) = args.postgres {
+        db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
+    } else {
+        anyhow::bail!(
+            "db-vfs-service was built without SQLite support; rebuild with `--features sqlite-bundled` or `--features sqlite`"
+        );
+    };
+
+    #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+    {
+        let _ = (policy, backend_kind);
+        anyhow::bail!(
+            "db-vfs-service was built without any backend support; enable `sqlite-bundled`, `sqlite`, or `postgres`"
+        );
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    {
+        tracing::info!(
+            listen = %args.listen,
+            trust_mode = ?args.trust_mode,
+            unsafe_no_auth = args.unsafe_no_auth,
+            backend = backend_kind,
+            "starting db-vfs-service"
+        );
+        let listener = tokio::net::TcpListener::bind(args.listen).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
+        Ok(())
+    }
 }
