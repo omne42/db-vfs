@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime+core/redaction: make early-reject paths keep their original concurrency permit through required audit append+flush, and match audited glob/pattern redaction against real secret deny semantics so values like `".[en]nv"` are masked instead of leaking to JSONL.
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
 - service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
+- vfs/scan-pagination: move page-order and cursor monotonicity checks behind a shared helper so `glob` and `grep` keep the same broken-store diagnostics instead of maintaining duplicate validation logic.
 
 ### Changed
 
