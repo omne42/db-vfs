@@ -83,7 +83,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
-      - name: Run ignored Postgres integration tests
+      - name: Run Postgres-backed all-features test suite
         env:
           DB_VFS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/db_vfs_ci
-        run: cargo test --workspace --all-features --locked -- --ignored
+        run: cargo test --workspace --all-features --locked

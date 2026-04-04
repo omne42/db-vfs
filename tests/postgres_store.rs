@@ -25,16 +25,24 @@ fn now_nanos() -> u128 {
         .unwrap_or(1)
 }
 
-fn postgres_url() -> String {
-    let raw = std::env::var("DB_VFS_TEST_POSTGRES_URL").expect(
-        "DB_VFS_TEST_POSTGRES_URL is required when running ignored postgres integration tests",
-    );
+fn postgres_url() -> Option<String> {
+    let raw = match std::env::var("DB_VFS_TEST_POSTGRES_URL") {
+        Ok(raw) => raw,
+        Err(_) => return None,
+    };
     let url = raw.trim().to_string();
-    assert!(
-        !url.is_empty(),
-        "DB_VFS_TEST_POSTGRES_URL must be non-empty when running ignored postgres integration tests"
-    );
-    url
+    if url.is_empty() {
+        return None;
+    }
+    Some(url)
+}
+
+fn require_postgres_url(test_name: &str) -> Option<String> {
+    let Some(url) = postgres_url() else {
+        eprintln!("skipping {test_name}: DB_VFS_TEST_POSTGRES_URL unset");
+        return None;
+    };
+    Some(url)
 }
 
 fn ensure_postgres_schema(url: &str) {
@@ -79,9 +87,10 @@ impl Drop for CleanupGuard {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_store_roundtrip() {
-    let url = postgres_url();
+    let Some(url) = require_postgres_url("postgres_store_roundtrip") else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -132,9 +141,12 @@ fn postgres_store_roundtrip() {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() {
-    let url = postgres_url();
+    let Some(url) = require_postgres_url(
+        "postgres_delete_with_expected_version_distinguishes_conflict_and_not_found",
+    ) else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -181,9 +193,12 @@ fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() 
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_versions_remain_monotonic_across_delete_and_recreate() {
-    let url = postgres_url();
+    let Some(url) =
+        require_postgres_url("postgres_versions_remain_monotonic_across_delete_and_recreate")
+    else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -228,9 +243,11 @@ fn postgres_versions_remain_monotonic_across_delete_and_recreate() {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_update_distinguishes_conflict_and_not_found() {
-    let url = postgres_url();
+    let Some(url) = require_postgres_url("postgres_update_distinguishes_conflict_and_not_found")
+    else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -270,9 +287,12 @@ fn postgres_update_distinguishes_conflict_and_not_found() {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_missing_update_does_not_create_generation_state() {
-    let url = postgres_url();
+    let Some(url) =
+        require_postgres_url("postgres_missing_update_does_not_create_generation_state")
+    else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -303,9 +323,12 @@ fn postgres_missing_update_does_not_create_generation_state() {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_missing_delete_does_not_create_generation_state() {
-    let url = postgres_url();
+    let Some(url) =
+        require_postgres_url("postgres_missing_delete_does_not_create_generation_state")
+    else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
@@ -336,9 +359,12 @@ fn postgres_missing_delete_does_not_create_generation_state() {
 }
 
 #[test]
-#[ignore = "requires DB_VFS_TEST_POSTGRES_URL"]
 fn postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
-    let url = postgres_url();
+    let Some(url) = require_postgres_url(
+        "postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards",
+    ) else {
+        return;
+    };
     ensure_postgres_schema(&url);
     let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
 
