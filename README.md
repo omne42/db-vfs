@@ -8,6 +8,12 @@ DB-backed virtual filesystem (DB-VFS) for service workloads.
 - Tool-like operations: `read`, `write`, `patch`, `delete`, `glob`, `grep`.
 - Backends: SQLite (default/dev) and Postgres (`--features postgres`).
 
+`db-vfs-service` now exposes backend features explicitly:
+
+- default build: SQLite with bundled libsqlite (`cargo run -p db-vfs-service -- ...`)
+- Postgres-only build: `cargo run -p db-vfs-service --no-default-features --features postgres -- --postgres ...`
+- SQLite without bundled libsqlite: `cargo run -p db-vfs-service --no-default-features --features sqlite -- ...`
+
 ## Quickstart (5 min)
 
 1. Create a local policy and token:

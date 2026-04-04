@@ -1,19 +1,26 @@
+#![cfg(any(feature = "sqlite", feature = "postgres"))]
+
 use std::net::SocketAddr;
+#[cfg(feature = "sqlite")]
 use std::sync::OnceLock;
 use std::time::Duration;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "sqlite")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use axum::Router;
+#[cfg(feature = "sqlite")]
 use axum::body::{Body, to_bytes};
+#[cfg(feature = "sqlite")]
 use axum::http::{Request, StatusCode};
 use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{
     AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
 use sha2::{Digest, Sha256};
+#[cfg(feature = "sqlite")]
 use tower::ServiceExt;
 
 const DEV_TOKEN: &str = "dev-token";
@@ -49,6 +56,7 @@ struct DeleteBody {
     deleted: bool,
 }
 
+#[cfg(feature = "sqlite")]
 struct TestServer {
     _db: tempfile::NamedTempFile,
     addr: SocketAddr,
@@ -57,6 +65,7 @@ struct TestServer {
     handle: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(feature = "sqlite")]
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.handle.abort();
@@ -93,15 +102,18 @@ fn policy_allow_all() -> VfsPolicy {
     }
 }
 
+#[cfg(feature = "sqlite")]
 fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+#[cfg(feature = "sqlite")]
 struct BackendWholeContentGuard {
     previous: Option<std::ffi::OsString>,
 }
 
+#[cfg(feature = "sqlite")]
 impl BackendWholeContentGuard {
     fn install(limit: u64) -> Self {
         let previous = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
@@ -116,6 +128,7 @@ impl BackendWholeContentGuard {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl Drop for BackendWholeContentGuard {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -171,10 +184,12 @@ async fn wait_until_ready(client: &reqwest::Client, base: &str) {
     }
 }
 
+#[cfg(feature = "sqlite")]
 async fn setup() -> Option<TestServer> {
     setup_with_policy(policy_allow_all()).await
 }
 
+#[cfg(feature = "sqlite")]
 async fn setup_with_policy(policy: VfsPolicy) -> Option<TestServer> {
     let db = tempfile::NamedTempFile::new().expect("temp db");
     let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy, false)
@@ -200,6 +215,7 @@ async fn setup_with_policy(policy: VfsPolicy) -> Option<TestServer> {
     })
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn embedded_router_write_works_without_connect_info() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
@@ -227,6 +243,7 @@ async fn embedded_router_write_works_without_connect_info() {
     assert_eq!(write.version, 1);
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn workspace_id_with_wildcard_is_rejected() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
@@ -291,10 +308,12 @@ async fn setup_postgres() -> Option<(String, reqwest::Client, tokio::task::JoinH
     Some((base, client, handle))
 }
 
+#[cfg(feature = "sqlite")]
 fn is_generated_request_id(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn write_then_read() {
     let Some(server) = setup().await else {
@@ -344,6 +363,7 @@ async fn write_then_read() {
     assert_eq!(read.version, 1);
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn write_then_read_line_range() {
     let _env_guard = test_env_lock().lock().await;
@@ -394,6 +414,7 @@ async fn write_then_read_line_range() {
     assert_eq!(read.version, 1);
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn auth_is_checked_before_json_body_is_parsed() {
     let Some(server) = setup().await else {
@@ -415,6 +436,7 @@ async fn auth_is_checked_before_json_body_is_parsed() {
     assert_eq!(body.code, "unauthorized");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn request_id_header_roundtrip_and_sanitization() {
     let Some(server) = setup().await else {
@@ -458,6 +480,7 @@ async fn request_id_header_roundtrip_and_sanitization() {
     assert_ne!(generated, "bad id !");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn invalid_json_returns_json_error_body() {
     let Some(server) = setup().await else {
@@ -480,6 +503,7 @@ async fn invalid_json_returns_json_error_body() {
     assert_eq!(body.code, "invalid_json_syntax");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn missing_content_type_returns_json_error_body() {
     let Some(server) = setup().await else {
@@ -501,6 +525,7 @@ async fn missing_content_type_returns_json_error_body() {
     assert_eq!(body.code, "unsupported_media_type");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn slow_request_body_times_out_before_json_decode() {
     let mut policy = policy_allow_all();
@@ -542,6 +567,7 @@ async fn slow_request_body_times_out_before_json_decode() {
     );
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn unknown_request_fields_are_rejected_as_invalid_json_schema() {
     let Some(server) = setup().await else {
@@ -563,6 +589,7 @@ async fn unknown_request_fields_are_rejected_as_invalid_json_schema() {
     assert_eq!(body.code, "invalid_json_schema");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn workspace_allowlist_rejections_return_not_permitted_code() {
     let Some(server) = setup().await else {
@@ -588,6 +615,7 @@ async fn workspace_allowlist_rejections_return_not_permitted_code() {
     assert_eq!(body.code, "not_permitted");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn rate_limited_requests_return_rate_limited_code() {
     let mut policy = policy_allow_all();
@@ -624,6 +652,7 @@ async fn rate_limited_requests_return_rate_limited_code() {
     assert_eq!(body.code, "rate_limited");
 }
 
+#[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn delete_ignore_missing_returns_deleted_false() {
     let Some(server) = setup().await else {

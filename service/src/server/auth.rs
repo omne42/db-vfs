@@ -577,6 +577,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn unauthorized_audit_records_presented_token_fingerprint() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -605,6 +606,7 @@ mod tests {
         assert_eq!(parsed["error_code"].as_str(), Some("unauthorized"));
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn auth_middleware_keeps_io_permit_while_required_audit_blocks() {
         let (audit, control) =
@@ -664,6 +666,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn auth_middleware_times_out_required_audit_for_unauthorized_requests() {
         let (audit, control) =

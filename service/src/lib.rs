@@ -4,6 +4,7 @@
 //! - `server`: Axum router, middleware, auth, audit and execution plumbing
 
 pub mod policy_io;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod server;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

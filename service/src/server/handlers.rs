@@ -935,6 +935,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[cfg(feature = "sqlite")]
     fn test_state_with_audit(
         audit: Option<super::super::audit::AuditLogger>,
     ) -> super::super::AppState {
@@ -1072,6 +1073,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn handle_vfs_request_keeps_io_permit_during_required_audit_for_json_rejects() {
         let (audit, control) =
@@ -1136,6 +1138,7 @@ mod tests {
         assert_eq!(err.1.0.code, "invalid_json_syntax");
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn handle_vfs_request_times_out_required_audit_for_json_rejects() {
         let (audit, control) =
@@ -1193,6 +1196,7 @@ mod tests {
         control.release_success();
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn handle_vfs_request_keeps_io_permit_during_required_audit_for_workspace_rejects() {
         let (audit, control) =
@@ -1259,6 +1263,7 @@ mod tests {
         assert_eq!(err.1.0.code, "invalid_path");
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn handle_vfs_request_audit_includes_auth_subject_on_rejection() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -168,6 +168,7 @@ mod tests {
         assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn rate_limit_middleware_keeps_io_permit_while_required_audit_blocks() {
         let (audit, control) =
@@ -233,6 +234,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn rate_limit_middleware_times_out_required_audit_and_releases_io_permit() {
         let (audit, control) =
