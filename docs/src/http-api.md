@@ -112,6 +112,8 @@ Common codes:
 `audit_unavailable` means required audit append/flush failed after request handling started. The
 operation may already have completed, so callers should verify state before replaying writes. This
 also covers required-audit waits that overrun the originating request's remaining runtime budget.
+Required-audit queue saturation uses the same error instead of indefinitely blocking behind a full
+audit channel.
 Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
 or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
 finishes.

@@ -102,7 +102,7 @@ async fn log_audit_event(
     event: audit::AuditEvent,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     let audit = audit.clone();
-    tokio::task::spawn_blocking(move || audit.try_log(event))
+    tokio::task::spawn_blocking(move || audit.try_log(event, None))
         .await
         .map_err(|err| {
             audit_failure_response(audit::AuditFailure::new(format!(
@@ -119,41 +119,17 @@ async fn log_audit_event_with_permit(
     budget: Option<Duration>,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
     let audit = audit.clone();
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    tokio::task::spawn_blocking(move || {
-        drop(result_tx.send(audit.try_log(event)));
-    });
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        audit.try_log(event, budget)
+    })
+    .await
+    .map_err(|err| {
+        audit_failure_response(audit::AuditFailure::new(format!(
+            "audit wait task failed: {err}"
+        )))
+    })?;
 
-    let wait_for_result = async {
-        result_rx.await.map_err(|_| {
-            audit_failure_response(audit::AuditFailure::new(
-                "audit wait task dropped before returning a result",
-            ))
-        })
-    };
-
-    let result = if let Some(timeout) = budget {
-        if timeout.is_zero() {
-            drop(permit);
-            return Err(audit_failure_response(audit::AuditFailure::new(
-                "audit wait budget exhausted before append+flush completed",
-            )));
-        }
-
-        match tokio::time::timeout(timeout, wait_for_result).await {
-            Ok(result) => result?,
-            Err(_) => {
-                drop(permit);
-                return Err(audit_failure_response(audit::AuditFailure::new(format!(
-                    "audit append+flush exceeded the remaining request budget ({timeout:?})"
-                ))));
-            }
-        }
-    } else {
-        wait_for_result.await?
-    };
-
-    drop(permit);
     result.map_err(audit_failure_response)
 }
 

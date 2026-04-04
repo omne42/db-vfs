@@ -107,5 +107,7 @@ waits for its audit record to append+flush successfully, the originating concurr
 held until that wait finishes, and the same request runtime budget continues to cover the required
 audit wait. Losing the audit worker, write/flush failures, or exhausting the remaining request
 budget turns into a visible `503 audit_unavailable` failure instead of silent event loss or a
-panic-driven connection abort. That error means the request outcome may already be committed, so
-callers should verify state before retrying non-idempotent writes.
+panic-driven connection abort. Required-audit queue saturation also fails closed immediately with
+the same error instead of blocking forever on the enqueue path. That error means the request
+outcome may already be committed, so callers should verify state before retrying non-idempotent
+writes.
