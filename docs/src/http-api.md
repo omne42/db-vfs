@@ -92,6 +92,8 @@ counts it under `skipped_too_large_files` instead of allocating an unbounded red
 - must be root-relative;
 - no leading `/`, no `..`, no control chars, no leading/trailing whitespace;
 - normalized path is echoed in response fields.
+- audit path/glob masking is derived from the same policy-backed redaction matcher semantics as
+  runtime secret denial; handlers do not maintain a separate local secret-path guesser.
 
 ## Errors
 

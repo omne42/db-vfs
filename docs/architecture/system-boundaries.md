@@ -61,9 +61,8 @@
   - scan 请求即使配置 `max_walk_ms = None`，backend DB pool wait/connect 和 frontdoor
     reject/audit wait 仍必须保持 `max_io_ms` 有界；只有 scan runtime 本身可以不设上限。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
-    `DbVfs::new_with_matchers_validated` 这类兼容构造器就不会在 matcher fallback 路径上
-    panic，也不需要把这类状态延后到运行期才暴露；但 compatibility fallback 命中时必须
-    发出显式告警，不能把 policy/matcher 不一致继续做成静默“自动修复”。
+    `DbVfs::new_validated`、`DbVfs::new_with_matchers_validated` 这类 validated 构造器都能
+    在创建时直接暴露 policy/matcher 不一致，而不是把状态推迟到运行期或做静默“自动修复”。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
     glob/pattern 审计字段也必须按真实 deny-glob 语义保守遮蔽，不能靠一套会漂移的本地猜测规则。

@@ -226,6 +226,10 @@ fn strip_leading_dot_slashes(mut s: &str) -> &str {
     s
 }
 
+fn strip_leading_slashes(s: &str) -> &str {
+    s.trim_start_matches('/')
+}
+
 fn is_canonical_relative_path(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('/')
@@ -242,6 +246,46 @@ fn is_canonical_relative_path(s: &str) -> bool {
         && !is_windows_drive_absolute_path(s)
         && !s.contains('\0')
         && !s.chars().any(char::is_control)
+}
+
+pub fn normalize_runtime_relative_path_for_matching(path: &str) -> Option<Cow<'_, str>> {
+    if is_canonical_runtime_relative_path(path) {
+        return Some(Cow::Borrowed(path));
+    }
+
+    let trimmed = path.trim();
+    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
+        Cow::Owned(trimmed.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(trimmed)
+    };
+    let normalized = strip_leading_dot_slashes(normalized.as_ref());
+    let normalized = strip_leading_slashes(normalized);
+    if normalized.is_empty()
+        || is_windows_drive_absolute_path(normalized)
+        || normalized.contains('\0')
+        || normalized.chars().any(char::is_control)
+    {
+        return None;
+    }
+
+    let mut out = String::with_capacity(normalized.len());
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return None;
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(segment);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(Cow::Owned(out))
 }
 
 fn normalize_path_inner(input: &str, kind: PathKind) -> Result<String> {
@@ -461,5 +505,33 @@ mod tests {
         assert!(!is_canonical_runtime_relative_path(" docs/a.txt"));
         assert!(!is_canonical_runtime_relative_path("docs/a.txt "));
         assert!(!is_canonical_runtime_relative_path("docs\\a.txt"));
+    }
+
+    #[test]
+    fn normalize_runtime_relative_path_for_matching_reuses_canonical_inputs() {
+        let normalized =
+            normalize_runtime_relative_path_for_matching("docs/a.txt").expect("normalized");
+        match normalized {
+            Cow::Borrowed(path) => assert_eq!(path, "docs/a.txt"),
+            Cow::Owned(_) => panic!("canonical inputs should stay borrowed"),
+        }
+    }
+
+    #[test]
+    fn normalize_runtime_relative_path_for_matching_normalizes_noncanonical_inputs() {
+        let normalized =
+            normalize_runtime_relative_path_for_matching("///./docs//a.txt").expect("path");
+        assert_eq!(normalized.as_ref(), "docs/a.txt");
+
+        let normalized =
+            normalize_runtime_relative_path_for_matching(".\\docs\\nested\\a.txt").expect("path");
+        assert_eq!(normalized.as_ref(), "docs/nested/a.txt");
+    }
+
+    #[test]
+    fn normalize_runtime_relative_path_for_matching_rejects_invalid_inputs() {
+        assert!(normalize_runtime_relative_path_for_matching("docs/../a.txt").is_none());
+        assert!(normalize_runtime_relative_path_for_matching("docs/\na.txt").is_none());
+        assert!(normalize_runtime_relative_path_for_matching("   ").is_none());
     }
 }

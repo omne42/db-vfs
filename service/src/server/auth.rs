@@ -71,6 +71,18 @@ pub(super) fn build_auth_mode(
     policy: &VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<AuthMode> {
+    build_auth_mode_with_env_lookup(policy, unsafe_no_auth, |env| {
+        std::env::var(env).map_err(|_| {
+            anyhow::anyhow!("auth token env var {env:?} is not set or not valid UTF-8")
+        })
+    })
+}
+
+fn build_auth_mode_with_env_lookup(
+    policy: &VfsPolicy,
+    unsafe_no_auth: bool,
+    mut env_lookup: impl FnMut(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<AuthMode> {
     if unsafe_no_auth {
         return Ok(AuthMode::Disabled);
     }
@@ -86,9 +98,7 @@ pub(super) fn build_auth_mode(
         let token_sha256 = if let Some(token) = rule.token.as_deref() {
             parse_token_sha256(token)?
         } else if let Some(env) = rule.token_env_var.as_deref() {
-            let value = std::env::var(env).map_err(|_| {
-                anyhow::anyhow!("auth token env var {env:?} is not set or not valid UTF-8")
-            })?;
+            let value = env_lookup(env)?;
             if value.is_empty() {
                 anyhow::bail!("auth token env var {env:?} must be non-empty");
             }
@@ -330,6 +340,7 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::routing::post;
     use db_vfs_core::policy::{AuditPolicy, AuthToken, Limits};
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
     use tower::ServiceExt;
@@ -487,13 +498,9 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::set_var(&var, token) };
-        let err = build_auth_mode(&policy, false)
+        let err = build_auth_mode_for_test(&policy, [(&var, token)], false)
             .err()
             .expect("whitespace-bearing env token should be rejected");
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::remove_var(&var) };
         assert!(err.to_string().contains("valid HTTP Bearer token"));
     }
 
@@ -510,11 +517,8 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::set_var(&var, token) };
-        let mode = build_auth_mode(&policy, false).expect("build auth mode");
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::remove_var(&var) };
+        let mode =
+            build_auth_mode_for_test(&policy, [(&var, token)], false).expect("build auth mode");
 
         let AuthMode::Enforced { rules } = mode else {
             panic!("expected enforced auth mode");
@@ -539,15 +543,30 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::set_var(&var, &token) };
-        let err = build_auth_mode(&policy, false)
+        let err = build_auth_mode_for_test(&policy, [(&var, token.as_str())], false)
             .err()
             .expect("sha256-prefixed env value should be treated as invalid plaintext");
-        // SAFETY: test-only scoped environment mutation.
-        unsafe { std::env::remove_var(&var) };
 
         assert!(err.to_string().contains("valid HTTP Bearer token"));
+    }
+
+    fn build_auth_mode_for_test<'a>(
+        policy: &VfsPolicy,
+        env: impl IntoIterator<Item = (&'a String, &'a str)>,
+        unsafe_no_auth: bool,
+    ) -> anyhow::Result<AuthMode> {
+        let env_map: HashMap<&str, &str> = env
+            .into_iter()
+            .map(|(key, value)| (key.as_str(), value))
+            .collect();
+        build_auth_mode_with_env_lookup(policy, unsafe_no_auth, |name| {
+            env_map
+                .get(name)
+                .map(|value| (*value).to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("auth token env var {name:?} is not set or not valid UTF-8")
+                })
+        })
     }
 
     #[test]

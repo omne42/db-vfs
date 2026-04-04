@@ -88,6 +88,9 @@ Budget semantics:
 Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
+- `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
+- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` expect
+  caller-supplied matchers to match that same policy and fail fast on mismatch.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
 - Redaction-enabled ranged `read` rejects raw files larger than `max_read_bytes` before full-content load, and also rejects redacted whole-file intermediates that would overflow the same budget.
 
