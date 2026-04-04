@@ -1,9 +1,10 @@
-name: CI
+name: CI Linux
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,13 +14,9 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Test (ubuntu-latest)
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -35,22 +32,8 @@ jobs:
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Gates (linux)
-        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: ./scripts/gate.sh
-
-      - name: Gates (macOS / Windows)
-        if: matrix.os != 'ubuntu-latest'
-        shell: bash
-        run: |
-          cargo fmt --all -- --check
-          cargo check --workspace --all-targets --locked
-          cargo check --workspace --all-targets --no-default-features --locked
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-          cargo test --workspace --locked
-          cargo test --workspace --no-default-features --locked
-          cargo test --workspace --all-features --locked
-          cargo tree -d --workspace --locked
 
   postgres-integration:
     name: Postgres Integration (ubuntu)

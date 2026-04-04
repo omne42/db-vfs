@@ -1,0 +1,149 @@
+name: CI Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  test:
+    name: Test (windows-latest)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: windows-local
+      labels: omne42-local
+    concurrency:
+      group: persistent-worktree-${{ github.repository }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: C:\actions-cache\cargo
+      RUSTUP_HOME: C:\actions-cache\rustup
+      CARGO_TARGET_DIR: C:\actions-cache\db-vfs\target
+      DB_VFS_PERSISTENT_REPO_DIR: C:\actions-cache\repos\omne42\db-vfs
+      DB_VFS_PERSISTENT_MIRROR_DIR: C:\actions-cache\mirrors\omne42\db-vfs.git
+
+    steps:
+      - name: Sync persistent workspace
+        id: sync
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoUrl = "https://github.com/${{ github.repository }}.git"
+          $repoDir = $env:DB_VFS_PERSISTENT_REPO_DIR
+          $mirrorDir = $env:DB_VFS_PERSISTENT_MIRROR_DIR
+
+          $before = [ordered]@{
+            mirror_exists = Test-Path $mirrorDir
+            repo_exists = Test-Path (Join-Path $repoDir ".git")
+            target_exists = Test-Path $env:CARGO_TARGET_DIR
+            target_entries = if (Test-Path $env:CARGO_TARGET_DIR) { (Get-ChildItem $env:CARGO_TARGET_DIR -Force -ErrorAction SilentlyContinue | Measure-Object).Count } else { 0 }
+            cargo_registry_exists = Test-Path (Join-Path $env:CARGO_HOME "registry")
+          }
+
+          New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:RUSTUP_HOME | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:CARGO_TARGET_DIR | Out-Null
+          New-Item -ItemType Directory -Force -Path (Split-Path $repoDir -Parent) | Out-Null
+          New-Item -ItemType Directory -Force -Path (Split-Path $mirrorDir -Parent) | Out-Null
+
+          git config --global http.version HTTP/1.1
+          git config --global --add safe.directory $repoDir
+
+          if (-not $before.mirror_exists) {
+            git clone --mirror $repoUrl $mirrorDir
+          }
+
+          git -C $mirrorDir remote set-url origin $repoUrl
+          git -C $mirrorDir fetch --prune origin "+refs/heads/*:refs/heads/*" "+refs/pull/*:refs/pull/*" "+refs/tags/*:refs/tags/*"
+
+          if (-not $before.repo_exists) {
+            git clone $mirrorDir $repoDir
+          }
+
+          git -C $repoDir remote set-url origin $repoUrl
+          git -C $repoDir fetch --prune origin "+refs/heads/*:refs/remotes/origin/*" "+refs/pull/*:refs/remotes/pull/*" "+refs/tags/*:refs/tags/*"
+          git -C $repoDir reset --hard $env:GITHUB_SHA
+          git -C $repoDir clean -ffd
+
+          $drive = $repoDir.Substring(0, 1).ToLowerInvariant()
+          $rest = $repoDir.Substring(2).Replace('\', '/')
+          $repoDirBash = "/$drive$rest"
+
+          $report = [ordered]@{
+            repository = $env:GITHUB_REPOSITORY
+            sha = $env:GITHUB_SHA
+            before = $before
+            after_sync = [ordered]@{
+              head = (git -C $repoDir rev-parse HEAD)
+              repo_dir = $repoDir
+              repo_dir_bash = $repoDirBash
+            }
+          }
+
+          $reportPath = Join-Path $env:RUNNER_TEMP "persistent-cache-report.json"
+          $report | ConvertTo-Json -Depth 6 | Out-File -FilePath $reportPath -Encoding utf8
+
+          "repo_dir=$repoDir" >> $env:GITHUB_OUTPUT
+          "repo_dir_bash=$repoDirBash" >> $env:GITHUB_OUTPUT
+          "report_path=$reportPath" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # stable
+        with:
+          toolchain: 1.91.1
+          components: rustfmt,clippy
+
+      - name: Record persistent target state before build
+        id: target_before
+        shell: pwsh
+        run: |
+          $count = if (Test-Path $env:CARGO_TARGET_DIR) { (Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count } else { 0 }
+          "entry_count=$count" >> $env:GITHUB_OUTPUT
+
+      - name: Gates (Windows)
+        shell: bash
+        env:
+          DB_VFS_REPO_DIR_BASH: ${{ steps.sync.outputs.repo_dir_bash }}
+        run: |
+          cd "$DB_VFS_REPO_DIR_BASH"
+          cargo fmt --all -- --check
+          cargo check --workspace --all-targets --locked
+          cargo check --workspace --all-targets --no-default-features --locked
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --locked
+          cargo test --workspace --no-default-features --locked
+          cargo test --workspace --all-features --locked
+          cargo tree -d --workspace --locked
+
+      - name: Summarize persistent cache state
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:CARGO_HOME | Out-Null
+          $report = Get-Content "${{ steps.sync.outputs.report_path }}" | ConvertFrom-Json
+          $afterCount = if (Test-Path $env:CARGO_TARGET_DIR) { (Get-ChildItem $env:CARGO_TARGET_DIR -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count } else { 0 }
+          $warmTarget = [int]${{ steps.target_before.outputs.entry_count }} -gt 0
+          $warmCargoRegistry = $report.before.cargo_registry_exists
+
+          $lines = @(
+            "### Windows persistent workspace cache"
+            "- repo dir: $($report.after_sync.repo_dir)"
+            "- synced sha: $($report.after_sync.head)"
+            "- mirror existed before run: $($report.before.mirror_exists)"
+            "- worktree existed before run: $($report.before.repo_exists)"
+            "- cargo registry existed before run: $warmCargoRegistry"
+            "- target existed before run: $($report.before.target_exists)"
+            "- target entries before build: ${{ steps.target_before.outputs.entry_count }}"
+            "- target entries after build: $afterCount"
+            "- warm cache hit: $([bool]($warmTarget -or $warmCargoRegistry))"
+          )
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($lines -join "`n")
