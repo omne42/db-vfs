@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/redaction+vfs/grep: add borrowed bounded-redaction path and use it in grep so matched lines avoid eager string allocation before response-byte budgeting when redaction rules are enabled.
 - service/postgres-cancel: reuse cancel tokens from queue fallback errors and move fallback in-flight guards into spawned task captures so slot accounting is released even if execution is canceled before task start.
 - service/audit-handlers: de-duplicate secret-path redaction when `requested_path` and `path` are identical, reducing redundant matcher checks and transient allocations on read/write/patch/delete audit paths.
+- service/runtime: keep the validated policy in service state intact after auth setup instead of mutating it into a token-cleared shadow copy, so the in-memory policy remains the single config source seen by later runtime stages and tests.
 - vfs/grep: short-circuit newline-containing literal queries before file-size gating so impossible line matches no longer inflate `skipped_too_large_files`, while also skipping unnecessary hot-path checks.
 - vfs/read: simplify newline-scan index arithmetic in line-range extraction (bounds-proven `+` instead of saturating math) to trim per-line CPU overhead.
 - vfs/grep: short-circuit literal queries containing `\n` before content fetch so line-based impossible matches no longer trigger unnecessary `get_content` I/O on scanned files.
