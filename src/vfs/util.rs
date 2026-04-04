@@ -4,8 +4,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use globset::GlobMatcher;
 
 use db_vfs_core::glob_utils::{
-    build_glob_from_normalized, normalize_glob_pattern_for_matching,
-    validate_normalized_root_relative_glob_pattern,
+    analyze_literal_glob_for_matching, build_glob_from_normalized,
+    normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
 use db_vfs_core::path::is_canonical_runtime_relative_path;
 use db_vfs_core::{Error, Result};
@@ -147,72 +147,20 @@ pub(super) fn glob_is_match(glob: &GlobMatcher, path: &str) -> bool {
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
-    let normalized = normalize_glob_pattern_for_matching(pattern);
-    if normalized.starts_with('/') {
+    let analysis = analyze_literal_glob_for_matching(pattern)?;
+    if analysis.prefix.is_empty() {
         return None;
     }
-
-    let mut prefix = String::with_capacity(normalized.len());
-    let mut stopped_on_wildcard = normalized.ends_with('/');
-
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return None;
-        }
-        if segment
-            .chars()
-            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
-        {
-            stopped_on_wildcard = true;
-            break;
-        }
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(segment);
-    }
-
-    if prefix.is_empty() {
-        return None;
-    }
-
-    if stopped_on_wildcard {
+    let mut prefix = analysis.prefix;
+    if analysis.truncated {
         prefix.push('/');
     }
-
     Some(prefix)
 }
 
 pub(super) fn derive_exact_path_from_glob(pattern: &str) -> Option<String> {
-    let normalized = normalize_glob_pattern_for_matching(pattern);
-    if normalized.is_empty() || normalized.starts_with('/') || normalized.ends_with('/') {
-        return None;
-    }
-
-    let mut exact = String::with_capacity(normalized.len());
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return None;
-        }
-        if segment
-            .chars()
-            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
-        {
-            return None;
-        }
-        if !exact.is_empty() {
-            exact.push('/');
-        }
-        exact.push_str(segment);
-    }
-
-    (!exact.is_empty()).then_some(exact)
+    let analysis = analyze_literal_glob_for_matching(pattern)?;
+    (analysis.exact_path && !analysis.prefix.is_empty()).then_some(analysis.prefix)
 }
 
 #[cfg(test)]

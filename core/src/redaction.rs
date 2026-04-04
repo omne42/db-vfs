@@ -5,7 +5,7 @@ use globset::{GlobSet, GlobSetBuilder};
 use regex::Regex;
 
 use crate::glob_utils::{
-    build_glob_from_normalized, expand_dir_star_to_descendants,
+    analyze_literal_glob_for_matching, build_glob_from_normalized, expand_dir_star_to_descendants,
     normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
 use crate::path::normalize_runtime_relative_path_for_matching;
@@ -357,32 +357,7 @@ fn compile_audit_glob_matcher(pattern: &str) -> Option<globset::GlobMatcher> {
 }
 
 fn literal_glob_prefix(pattern: &str) -> Option<String> {
-    let normalized = normalize_glob_pattern_for_matching(pattern);
-    if normalized.starts_with('/') {
-        return None;
-    }
-
-    let mut prefix = String::with_capacity(normalized.len());
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return None;
-        }
-        if segment
-            .chars()
-            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
-        {
-            break;
-        }
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(segment);
-    }
-
-    Some(prefix)
+    analyze_literal_glob_for_matching(pattern).map(|analysis| analysis.prefix)
 }
 
 fn audit_path_probes(path: &str) -> Vec<String> {
