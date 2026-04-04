@@ -8,10 +8,10 @@ use regex_syntax::hir::{Class, Hir, HirKind};
 use crate::store::line_segments;
 
 use super::util::{
-    compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
-    u64_decimal_len,
+    compile_glob, derive_exact_path_from_glob, derive_safe_prefix_from_glob, glob_is_match,
+    json_escaped_str_len, u64_decimal_len,
 };
-use super::{DbVfs, ScanLimitReason, advance_scan_after_cursor, validate_scan_page_order};
+use super::{DbVfs, ScanControl, ScanLimitReason, ScanTarget, scan_metas};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +64,7 @@ pub struct GrepResponse {
 const MAX_GREP_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
-const META_PAGE_SIZE: usize = 2048;
+pub(super) const META_PAGE_SIZE: usize = 2048;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
 
 fn grep_match_json_bytes(
@@ -209,7 +209,6 @@ pub(super) fn grep<S: crate::store::Store>(
         });
     }
 
-    let started = std::time::Instant::now();
     let max_walk = vfs
         .policy
         .limits
@@ -217,6 +216,16 @@ pub(super) fn grep<S: crate::store::Store>(
         .map(std::time::Duration::from_millis);
 
     let file_glob = request.glob.as_deref().map(compile_glob).transpose()?;
+    let exact_path = request
+        .path_prefix
+        .is_none()
+        .then(|| {
+            request
+                .glob
+                .as_deref()
+                .and_then(derive_exact_path_from_glob)
+        })
+        .flatten();
 
     let prefix = match request.path_prefix {
         Some(prefix) => normalize_path_prefix(&prefix)?,
@@ -275,76 +284,33 @@ pub(super) fn grep<S: crate::store::Store>(
     let mut skipped_missing_content: u64 = 0;
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: usize = 0;
-    let mut budgeted_entries: usize = 0;
-    let mut scan_limit_reached = false;
-    let mut scan_limit_reason: Option<ScanLimitReason> = None;
     let mut response_bytes: usize = GREP_RESPONSE_JSON_FIXED_OVERHEAD;
     let has_redaction_rules = vfs.redactor.has_redact_rules();
     let max_line_bytes = vfs.policy.limits.max_line_bytes;
-    let mut after: Option<String> = None;
-
-    'scan: loop {
-        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Time);
-            break;
-        }
-
-        let remaining_entries = max_scan_entries.saturating_sub(budgeted_entries);
-        if remaining_entries == 0 {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Entries);
-            break;
-        }
-
-        let page_budget = remaining_entries.min(META_PAGE_SIZE);
-        let fetch_limit = page_budget.saturating_add(1);
-        let mut metas = vfs.store.list_metas_by_prefix_page(
-            &request.workspace_id,
-            &prefix,
-            after.as_deref(),
-            fetch_limit,
-        )?;
-        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Time);
-            break;
-        }
-        validate_scan_page_order(&metas, after.as_deref(), "grep")?;
-        let has_more = metas.len() > page_budget;
-        if has_more {
-            metas.truncate(page_budget);
-        }
-
-        if metas.is_empty() {
-            break;
-        }
-        if has_more {
-            advance_scan_after_cursor(&mut after, &metas, "grep")?;
-        }
-
-        for meta in metas {
+    let target = exact_path
+        .as_deref()
+        .map(ScanTarget::ExactPath)
+        .unwrap_or(ScanTarget::Prefix(&prefix));
+    let outcome = scan_metas(
+        &mut vfs.store,
+        &request.workspace_id,
+        target,
+        max_scan_entries,
+        max_walk,
+        "grep",
+        |store, meta| {
             let path = meta.path;
             let meta_version = meta.version;
             let meta_size_bytes = meta.size_bytes;
             let mut path_json_escaped_len: Option<usize> = None;
 
-            budgeted_entries = budgeted_entries.saturating_add(1);
-
-            if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-                scan_limit_reached = true;
-                scan_limit_reason = Some(ScanLimitReason::Time);
-                break 'scan;
-            }
-
             if vfs.traversal.is_path_skipped(&path) {
                 skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
-
             if vfs.redactor.is_path_denied(&path) {
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
             scanned_entries = scanned_entries.saturating_add(1);
 
@@ -352,38 +318,32 @@ pub(super) fn grep<S: crate::store::Store>(
                 && !glob_is_match(glob, &path)
             {
                 skipped_glob_mismatch = skipped_glob_mismatch.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
 
             if scanned_files >= max_scan_files_u64 {
-                scan_limit_reached = true;
-                scan_limit_reason = Some(ScanLimitReason::Files);
-                break 'scan;
+                return Ok(ScanControl::Stop(ScanLimitReason::Files));
             }
             scanned_files = scanned_files.saturating_add(1);
 
             if literal_query_spans_lines {
-                // Literal queries containing '\n' or '\r' cannot match line-delimited scans.
-                // Skip content-size/content-load work while keeping scan counters accurate.
-                continue;
+                return Ok(ScanControl::Continue);
             }
 
             if meta_size_bytes > max_read_bytes {
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
 
-            let Some(content) =
-                vfs.store
-                    .get_content(&request.workspace_id, &path, meta_version)?
+            let Some(content) = store.get_content(&request.workspace_id, &path, meta_version)?
             else {
                 skipped_missing_content = skipped_missing_content.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             };
             let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
             if content_size_bytes > max_read_bytes {
                 skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
             let redacted_content = if has_redaction_rules {
                 match vfs
@@ -393,7 +353,7 @@ pub(super) fn grep<S: crate::store::Store>(
                     Ok(redacted) => Some(redacted),
                     Err(_) => {
                         skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                        continue;
+                        return Ok(ScanControl::Continue);
                     }
                 }
             } else {
@@ -403,16 +363,11 @@ pub(super) fn grep<S: crate::store::Store>(
             if let Some(finder) = literal_finder.as_ref()
                 && finder.find(searchable_content.as_bytes()).is_none()
             {
-                continue;
+                return Ok(ScanControl::Continue);
             }
+
             let mut line_no: u64 = 1;
             for segment in line_segments(searchable_content) {
-                if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-                    scan_limit_reached = true;
-                    scan_limit_reason = Some(ScanLimitReason::Time);
-                    break 'scan;
-                }
-
                 let line = segment.text;
                 let ok = match &regex {
                     Some(regex) => regex.is_match(line),
@@ -429,7 +384,6 @@ pub(super) fn grep<S: crate::store::Store>(
                 let line_truncated = line_slice.len() < line.len();
                 let path_json_escaped_len =
                     *path_json_escaped_len.get_or_insert_with(|| json_escaped_str_len(&path));
-                // Budget against JSON-encoded output size (escaped strings + object structure).
                 let entry_bytes = grep_match_json_bytes(
                     path_json_escaped_len,
                     line_no,
@@ -439,9 +393,7 @@ pub(super) fn grep<S: crate::store::Store>(
                 .saturating_add(usize::from(!matches.is_empty()));
                 let next_response_bytes = response_bytes.saturating_add(entry_bytes);
                 if next_response_bytes > MAX_SCAN_RESPONSE_BYTES {
-                    scan_limit_reached = true;
-                    scan_limit_reason = Some(ScanLimitReason::Results);
-                    break 'scan;
+                    return Ok(ScanControl::Stop(ScanLimitReason::Results));
                 }
                 response_bytes = next_response_bytes;
                 matches.push(GrepMatch {
@@ -453,36 +405,26 @@ pub(super) fn grep<S: crate::store::Store>(
                 line_no = line_no.saturating_add(1);
 
                 if matches.len() >= vfs.policy.limits.max_results {
-                    scan_limit_reached = true;
-                    scan_limit_reason = Some(ScanLimitReason::Results);
-                    break 'scan;
+                    return Ok(ScanControl::Stop(ScanLimitReason::Results));
                 }
             }
-        }
 
-        if has_more && budgeted_entries >= max_scan_entries {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Entries);
-            break;
-        }
-
-        if !has_more {
-            break;
-        }
-    }
+            Ok(ScanControl::Continue)
+        },
+    )?;
 
     Ok(GrepResponse {
         matches,
-        truncated: scan_limit_reached,
+        truncated: outcome.truncated(),
         skipped_too_large_files,
         skipped_traversal_skipped,
         skipped_secret_denied,
         skipped_glob_mismatch,
         skipped_missing_content,
         scanned_files,
-        scan_limit_reached,
-        scan_limit_reason,
-        elapsed_ms: elapsed_ms(&started),
+        scan_limit_reached: outcome.truncated(),
+        scan_limit_reason: outcome.limit_reason,
+        elapsed_ms: outcome.elapsed_ms(),
         scanned_entries: u64::try_from(scanned_entries).unwrap_or(u64::MAX),
     })
 }
@@ -708,6 +650,66 @@ mod tests {
         }
     }
 
+    struct ExactGlobStore {
+        meta: FileMeta,
+        content: String,
+    }
+
+    impl Store for ExactGlobStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            Ok((path == self.meta.path).then(|| self.meta.clone()))
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            Ok((path == self.meta.path && version == self.meta.version)
+                .then(|| self.content.clone()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            panic!("exact-path grep should not fall back to prefix scanning")
+        }
+    }
+
     #[test]
     fn grep_truncates_after_redaction_expansion() {
         let store = SingleFileStore {
@@ -746,6 +748,38 @@ mod tests {
     #[test]
     fn grep_allows_root_exact_glob_without_full_scan() {
         let store = SingleFileStore {
+            meta: FileMeta {
+                path: "README.md".to_string(),
+                size_bytes: 12,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "hello world\n".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "hello".to_string(),
+                regex: false,
+                glob: Some("README.md".to_string()),
+                path_prefix: None,
+            })
+            .expect("grep");
+
+        assert_eq!(resp.matches.len(), 1);
+        assert_eq!(resp.matches[0].path, "README.md");
+        assert_eq!(resp.scanned_entries, 1);
+        assert_eq!(resp.scanned_files, 1);
+    }
+
+    #[test]
+    fn grep_uses_exact_glob_path_without_prefix_rescan() {
+        let store = ExactGlobStore {
             meta: FileMeta {
                 path: "README.md".to_string(),
                 size_bytes: 12,

@@ -5,11 +5,12 @@ use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
 use db_vfs_core::{Error, Result};
 
 use super::util::{
-    compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
+    compile_glob, derive_exact_path_from_glob, derive_safe_prefix_from_glob, glob_is_match,
+    json_escaped_str_len,
 };
-use super::{DbVfs, ScanLimitReason, advance_scan_after_cursor, validate_scan_page_order};
+use super::{DbVfs, ScanControl, ScanLimitReason, ScanTarget, scan_metas};
 
-const META_PAGE_SIZE: usize = 2048;
+pub(super) const META_PAGE_SIZE: usize = 2048;
 const GLOB_RESPONSE_JSON_FIXED_OVERHEAD: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +62,6 @@ pub(super) fn glob<S: crate::store::Store>(
         });
     }
 
-    let started = std::time::Instant::now();
     let max_walk = vfs
         .policy
         .limits
@@ -69,6 +69,11 @@ pub(super) fn glob<S: crate::store::Store>(
         .map(std::time::Duration::from_millis);
 
     let matcher = compile_glob(&request.pattern)?;
+    let exact_path = request
+        .path_prefix
+        .is_none()
+        .then(|| derive_exact_path_from_glob(&request.pattern))
+        .flatten();
 
     let prefix = match request.path_prefix {
         Some(prefix) => normalize_path_prefix(&prefix)?,
@@ -90,120 +95,63 @@ pub(super) fn glob<S: crate::store::Store>(
     let mut matches = Vec::<String>::with_capacity(vfs.policy.limits.max_results.min(1024));
     let mut scanned_files: u64 = 0;
     let mut scanned_entries: usize = 0;
-    let mut budgeted_entries: usize = 0;
     let mut skipped_traversal_skipped: u64 = 0;
     let mut skipped_secret_denied: u64 = 0;
-    let mut scan_limit_reached = false;
-    let mut scan_limit_reason: Option<ScanLimitReason> = None;
     let mut response_bytes: usize = GLOB_RESPONSE_JSON_FIXED_OVERHEAD;
-    let mut after: Option<String> = None;
-
-    'scan: loop {
-        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Time);
-            break;
-        }
-
-        let remaining_entries = max_scan_entries.saturating_sub(budgeted_entries);
-        if remaining_entries == 0 {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Entries);
-            break;
-        }
-
-        let page_budget = remaining_entries.min(META_PAGE_SIZE);
-        let fetch_limit = page_budget.saturating_add(1);
-        let mut metas = vfs.store.list_metas_by_prefix_page(
-            &request.workspace_id,
-            &prefix,
-            after.as_deref(),
-            fetch_limit,
-        )?;
-        if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Time);
-            break;
-        }
-        validate_scan_page_order(&metas, after.as_deref(), "glob")?;
-        let has_more = metas.len() > page_budget;
-        if has_more {
-            metas.truncate(page_budget);
-        }
-
-        if metas.is_empty() {
-            break;
-        }
-        if has_more {
-            advance_scan_after_cursor(&mut after, &metas, "glob")?;
-        }
-
-        for meta in metas {
+    let target = exact_path
+        .as_deref()
+        .map(ScanTarget::ExactPath)
+        .unwrap_or(ScanTarget::Prefix(&prefix));
+    let outcome = scan_metas(
+        &mut vfs.store,
+        &request.workspace_id,
+        target,
+        max_scan_entries,
+        max_walk,
+        "glob",
+        |_store, meta| {
             let path = meta.path;
-
-            budgeted_entries = budgeted_entries.saturating_add(1);
-            if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
-                scan_limit_reached = true;
-                scan_limit_reason = Some(ScanLimitReason::Time);
-                break 'scan;
-            }
 
             if vfs.traversal.is_path_skipped(&path) {
                 skipped_traversal_skipped = skipped_traversal_skipped.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
             if vfs.redactor.is_path_denied(&path) {
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
-                continue;
+                return Ok(ScanControl::Continue);
             }
             scanned_entries = scanned_entries.saturating_add(1);
             if scanned_files >= max_scan_files_u64 {
-                scan_limit_reached = true;
-                scan_limit_reason = Some(ScanLimitReason::Files);
-                break 'scan;
+                return Ok(ScanControl::Stop(ScanLimitReason::Files));
             }
             scanned_files = scanned_files.saturating_add(1);
             if glob_is_match(&matcher, &path) {
-                // Budget against JSON-encoded output size (escaped bytes + quotes + separator).
                 let entry_bytes = json_escaped_str_len(&path)
                     .saturating_add(2)
                     .saturating_add(usize::from(!matches.is_empty()));
                 let next_response_bytes = response_bytes.saturating_add(entry_bytes);
                 if next_response_bytes > MAX_SCAN_RESPONSE_BYTES {
-                    scan_limit_reached = true;
-                    scan_limit_reason = Some(ScanLimitReason::Results);
-                    break 'scan;
+                    return Ok(ScanControl::Stop(ScanLimitReason::Results));
                 }
                 response_bytes = next_response_bytes;
                 matches.push(path);
                 if matches.len() >= vfs.policy.limits.max_results {
-                    scan_limit_reached = true;
-                    scan_limit_reason = Some(ScanLimitReason::Results);
-                    break 'scan;
+                    return Ok(ScanControl::Stop(ScanLimitReason::Results));
                 }
             }
-        }
-
-        if has_more && budgeted_entries >= max_scan_entries {
-            scan_limit_reached = true;
-            scan_limit_reason = Some(ScanLimitReason::Entries);
-            break;
-        }
-
-        if !has_more {
-            break;
-        }
-    }
+            Ok(ScanControl::Continue)
+        },
+    )?;
 
     Ok(GlobResponse {
         matches,
-        truncated: scan_limit_reached,
+        truncated: outcome.truncated(),
         scanned_files,
         skipped_traversal_skipped,
         skipped_secret_denied,
-        scan_limit_reached,
-        scan_limit_reason,
-        elapsed_ms: elapsed_ms(&started),
+        scan_limit_reached: outcome.truncated(),
+        scan_limit_reason: outcome.limit_reason,
+        elapsed_ms: outcome.elapsed_ms(),
         scanned_entries: u64::try_from(scanned_entries).unwrap_or(u64::MAX),
     })
 }
@@ -222,8 +170,8 @@ mod tests {
     }
 
     impl Store for PrefixFilteringStore {
-        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
-            unimplemented!()
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            Ok(self.rows.iter().find(|meta| meta.path == path).cloned())
         }
 
         fn get_content(
@@ -319,8 +267,8 @@ mod tests {
             .expect("glob");
 
         assert_eq!(resp.matches, vec!["README.md".to_string()]);
-        assert_eq!(resp.scanned_entries, 2);
-        assert_eq!(resp.scanned_files, 2);
+        assert_eq!(resp.scanned_entries, 1);
+        assert_eq!(resp.scanned_files, 1);
     }
 
     struct NonMonotonicPageStore {

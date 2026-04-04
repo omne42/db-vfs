@@ -186,6 +186,35 @@ pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
     Some(prefix)
 }
 
+pub(super) fn derive_exact_path_from_glob(pattern: &str) -> Option<String> {
+    let normalized = normalize_glob_pattern_for_matching(pattern);
+    if normalized.is_empty() || normalized.starts_with('/') || normalized.ends_with('/') {
+        return None;
+    }
+
+    let mut exact = String::with_capacity(normalized.len());
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return None;
+        }
+        if segment
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
+            return None;
+        }
+        if !exact.is_empty() {
+            exact.push('/');
+        }
+        exact.push_str(segment);
+    }
+
+    (!exact.is_empty()).then_some(exact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +280,20 @@ mod tests {
             Some("docs/".to_string())
         );
         assert_eq!(derive_safe_prefix_from_glob("**/*.txt"), None);
+    }
+
+    #[test]
+    fn derive_exact_path_rejects_wildcards_and_dirs() {
+        assert_eq!(
+            derive_exact_path_from_glob("docs/a.txt"),
+            Some("docs/a.txt".to_string())
+        );
+        assert_eq!(
+            derive_exact_path_from_glob("./docs//a.txt"),
+            Some("docs/a.txt".to_string())
+        );
+        assert_eq!(derive_exact_path_from_glob("docs/*.txt"), None);
+        assert_eq!(derive_exact_path_from_glob("docs/{a,b}.txt"), None);
+        assert_eq!(derive_exact_path_from_glob("docs/"), None);
     }
 }
