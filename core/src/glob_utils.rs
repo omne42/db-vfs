@@ -2,6 +2,13 @@ use std::borrow::Cow;
 
 use globset::GlobBuilder;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiteralGlobAnalysis {
+    pub prefix: String,
+    pub exact_path: bool,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlobPatternValidationError {
     Empty,
@@ -69,6 +76,41 @@ pub fn validate_root_relative_glob_pattern(
     validate_normalized_root_relative_glob_pattern(&normalized)
 }
 
+pub fn analyze_literal_glob_for_matching(pattern: &str) -> Option<LiteralGlobAnalysis> {
+    let normalized = normalize_glob_pattern_for_matching(pattern);
+    if normalized.starts_with('/') {
+        return None;
+    }
+
+    let mut prefix = String::with_capacity(normalized.len());
+    let mut truncated = normalized.ends_with('/');
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return None;
+        }
+        if segment
+            .chars()
+            .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
+            truncated = true;
+            break;
+        }
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(segment);
+    }
+
+    Some(LiteralGlobAnalysis {
+        exact_path: !truncated && !prefix.is_empty(),
+        prefix,
+        truncated,
+    })
+}
+
 /// Expand a `dir/*`-style glob into a second pattern that matches descendants (`dir/**`).
 ///
 /// This is used to preserve historical semantics where deny/skip globs ending with `/*` also apply
@@ -120,5 +162,43 @@ mod tests {
             validate_normalized_root_relative_glob_pattern("docs/*.txt"),
             Ok(())
         );
+    }
+
+    #[test]
+    fn analyze_literal_glob_tracks_prefix_exactness_and_wildcards() {
+        assert_eq!(
+            analyze_literal_glob_for_matching("docs/a.txt"),
+            Some(LiteralGlobAnalysis {
+                prefix: "docs/a.txt".to_string(),
+                exact_path: true,
+                truncated: false,
+            })
+        );
+        assert_eq!(
+            analyze_literal_glob_for_matching("./docs/*.txt"),
+            Some(LiteralGlobAnalysis {
+                prefix: "docs".to_string(),
+                exact_path: false,
+                truncated: true,
+            })
+        );
+        assert_eq!(
+            analyze_literal_glob_for_matching("docs/"),
+            Some(LiteralGlobAnalysis {
+                prefix: "docs".to_string(),
+                exact_path: false,
+                truncated: true,
+            })
+        );
+        assert_eq!(
+            analyze_literal_glob_for_matching("*.txt"),
+            Some(LiteralGlobAnalysis {
+                prefix: String::new(),
+                exact_path: false,
+                truncated: true,
+            })
+        );
+        assert_eq!(analyze_literal_glob_for_matching("/docs/*.txt"), None);
+        assert_eq!(analyze_literal_glob_for_matching("docs/../a.txt"), None);
     }
 }
