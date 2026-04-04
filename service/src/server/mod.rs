@@ -271,7 +271,7 @@ async fn try_acquire_required_audit_gate_for_path(
 }
 
 fn prepare_state(
-    mut policy: ValidatedVfsPolicy,
+    policy: ValidatedVfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<PreparedState> {
     let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&policy);
@@ -336,8 +336,6 @@ fn prepare_state(
         auth_allowed_workspace_patterns,
         "auth configuration loaded"
     );
-
-    policy.clear_auth_tokens();
 
     let body_limit = max_body_bytes(&policy);
     Ok(PreparedState {
@@ -602,6 +600,25 @@ mod tests {
         assert!(
             !db_path.exists(),
             "invalid auth config should fail before touching sqlite"
+        );
+    }
+
+    #[test]
+    fn prepare_state_keeps_validated_policy_as_the_real_config_source() {
+        let mut raw = VfsPolicy::default();
+        raw.auth.tokens = vec![db_vfs_core::policy::AuthToken {
+            token: Some(format!("sha256:{}", "11".repeat(32))),
+            token_env_var: None,
+            allowed_workspaces: vec!["team-*".to_string()],
+        }];
+
+        let validated = ValidatedVfsPolicy::new(raw).expect("validated policy");
+        let prepared = prepare_state(validated, false).expect("prepared state");
+
+        assert_eq!(prepared.policy.auth.tokens.len(), 1);
+        assert_eq!(
+            prepared.policy.auth.tokens[0].allowed_workspaces,
+            vec!["team-*".to_string()]
         );
     }
 
