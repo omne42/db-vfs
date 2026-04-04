@@ -11,7 +11,7 @@ use super::util::{
     compile_glob, derive_safe_prefix_from_glob, elapsed_ms, glob_is_match, json_escaped_str_len,
     u64_decimal_len,
 };
-use super::{DbVfs, ScanLimitReason};
+use super::{DbVfs, ScanLimitReason, advance_scan_after_cursor, validate_scan_page_order};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,62 +66,6 @@ const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
 const META_PAGE_SIZE: usize = 2048;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
-
-fn advance_after_cursor(
-    after: &mut Option<String>,
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
-        return Ok(());
-    };
-    if let Some(prev_after) = after.as_ref()
-        && next_after <= prev_after.as_str()
-    {
-        return Err(Error::Db(format!(
-            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
-        )));
-    }
-    if let Some(cursor) = after.as_mut() {
-        cursor.clear();
-        cursor.push_str(next_after);
-    } else {
-        *after = Some(next_after.to_string());
-    }
-    Ok(())
-}
-
-fn ensure_page_strictly_increasing(
-    metas: &[crate::store::FileMeta],
-    op: &'static str,
-) -> Result<()> {
-    for pair in metas.windows(2) {
-        if pair[0].path >= pair[1].path {
-            return Err(Error::Db(format!(
-                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
-                pair[0].path, pair[1].path
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_page_starts_after_cursor(
-    metas: &[crate::store::FileMeta],
-    after: Option<&str>,
-    op: &'static str,
-) -> Result<()> {
-    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
-        return Ok(());
-    };
-    if first.path.as_str() <= prev_after {
-        return Err(Error::Db(format!(
-            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
-            first.path
-        )));
-    }
-    Ok(())
-}
 
 fn grep_match_json_bytes(
     path_json_escaped_len: usize,
@@ -366,18 +310,17 @@ pub(super) fn grep<S: crate::store::Store>(
             scan_limit_reason = Some(ScanLimitReason::Time);
             break;
         }
-        ensure_page_strictly_increasing(&metas, "grep")?;
+        validate_scan_page_order(&metas, after.as_deref(), "grep")?;
         let has_more = metas.len() > page_budget;
         if has_more {
             metas.truncate(page_budget);
         }
-        ensure_page_starts_after_cursor(&metas, after.as_deref(), "grep")?;
 
         if metas.is_empty() {
             break;
         }
         if has_more {
-            advance_after_cursor(&mut after, &metas, "grep")?;
+            advance_scan_after_cursor(&mut after, &metas, "grep")?;
         }
 
         for meta in metas {

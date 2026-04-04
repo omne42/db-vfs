@@ -15,7 +15,7 @@ use db_vfs_core::traversal::TraversalSkipper;
 use db_vfs_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::store::Store;
+use crate::store::{FileMeta, Store};
 
 pub use delete::{DeleteRequest, DeleteResponse};
 pub use glob::{GlobRequest, GlobResponse};
@@ -212,6 +212,57 @@ impl<S> DbVfs<S> {
     }
 }
 
+pub(super) fn advance_scan_after_cursor(
+    after: &mut Option<String>,
+    metas: &[FileMeta],
+    op: &'static str,
+) -> Result<()> {
+    let Some(next_after) = metas.last().map(|meta| meta.path.as_str()) else {
+        return Ok(());
+    };
+    if let Some(prev_after) = after.as_ref()
+        && next_after <= prev_after.as_str()
+    {
+        return Err(Error::Db(format!(
+            "{op}: store returned non-monotonic pagination cursor (prev={prev_after:?}, next={next_after:?})"
+        )));
+    }
+    if let Some(cursor) = after.as_mut() {
+        cursor.clear();
+        cursor.push_str(next_after);
+    } else {
+        *after = Some(next_after.to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn validate_scan_page_order(
+    metas: &[FileMeta],
+    after: Option<&str>,
+    op: &'static str,
+) -> Result<()> {
+    for pair in metas.windows(2) {
+        if pair[0].path >= pair[1].path {
+            return Err(Error::Db(format!(
+                "{op}: store returned non-monotonic page ordering (prev={:?}, next={:?})",
+                pair[0].path, pair[1].path
+            )));
+        }
+    }
+
+    let (Some(prev_after), Some(first)) = (after, metas.first()) else {
+        return Ok(());
+    };
+    if first.path.as_str() <= prev_after {
+        return Err(Error::Db(format!(
+            "{op}: store returned rows not strictly after pagination cursor (after={prev_after:?}, first={:?})",
+            first.path
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +380,64 @@ mod tests {
         raw_policy.secrets.redact_regexes = vec!["(".to_string()];
         let err = ValidatedVfsPolicy::new(raw_policy).expect_err("policy should be rejected");
         assert_eq!(err.code(), "invalid_policy");
+    }
+
+    fn meta(path: &str) -> FileMeta {
+        FileMeta {
+            path: path.to_string(),
+            size_bytes: 1,
+            version: 1,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn validate_scan_page_order_accepts_strictly_increasing_page() {
+        validate_scan_page_order(
+            &[meta("docs/a.txt"), meta("docs/b.txt")],
+            Some("docs/0"),
+            "op",
+        )
+        .expect("strictly increasing page should pass");
+    }
+
+    #[test]
+    fn validate_scan_page_order_rejects_non_monotonic_rows() {
+        let err = validate_scan_page_order(
+            &[meta("docs/a.txt"), meta("docs/c.txt"), meta("docs/b.txt")],
+            None,
+            "glob",
+        )
+        .expect_err("non-monotonic page ordering should fail");
+        assert!(
+            err.to_string().contains("non-monotonic page ordering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_scan_page_order_rejects_rows_at_or_before_cursor() {
+        let err = validate_scan_page_order(&[meta("docs/a.txt")], Some("docs/a.txt"), "grep")
+            .expect_err("rows at or before previous cursor should fail");
+        assert!(
+            err.to_string()
+                .contains("not strictly after pagination cursor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn advance_scan_after_cursor_updates_and_rejects_non_monotonic_cursor() {
+        let mut after = Some("docs/b.txt".to_string());
+        let err = advance_scan_after_cursor(&mut after, &[meta("docs/a.txt")], "glob")
+            .expect_err("cursor rewind should fail");
+        assert!(
+            err.to_string().contains("non-monotonic pagination cursor"),
+            "unexpected error: {err}"
+        );
+
+        advance_scan_after_cursor(&mut after, &[meta("docs/c.txt")], "glob")
+            .expect("cursor should advance");
+        assert_eq!(after.as_deref(), Some("docs/c.txt"));
     }
 }
