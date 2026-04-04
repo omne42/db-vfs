@@ -1310,6 +1310,7 @@ Common failures:
 
 - stale lockfile/features -> run targeted `cargo check` locally first
 - stale llms bundle -> run `./scripts/llms.sh`
+- Postgres-only regressions need `DB_VFS_TEST_POSTGRES_URL=postgres://... cargo test --workspace --all-features --locked`
 
 ### `./scripts/docs.sh`
 
