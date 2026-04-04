@@ -1,5 +1,5 @@
 use db_vfs::store::sqlite::SqliteStore;
-use db_vfs::store::{DeleteOutcome, FileMeta, Store};
+use db_vfs::store::{DeleteOutcome, FileMeta, LineRangeData, Store};
 
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
@@ -166,6 +166,30 @@ fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_
     db_vfs::Error::Timeout(format!("backend={backend} stage=pool_get detail={err}"))
 }
 
+#[cfg(debug_assertions)]
+fn maybe_reject_test_whole_content_read(content_len: usize) -> db_vfs::Result<()> {
+    let Some(raw_limit) = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES") else {
+        return Ok(());
+    };
+    let raw_limit = raw_limit.to_string_lossy();
+    let limit = raw_limit.parse::<usize>().map_err(|err| {
+        db_vfs::Error::Db(format!(
+            "invalid DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES={raw_limit:?}: {err}"
+        ))
+    })?;
+    if content_len > limit {
+        return Err(db_vfs::Error::Db(format!(
+            "test whole-content read guard rejected content_len={content_len} > limit={limit}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn maybe_reject_test_whole_content_read(_content_len: usize) -> db_vfs::Result<()> {
+    Ok(())
+}
+
 pub(super) fn sqlite_busy_timeout(timeout: Option<Duration>) -> Duration {
     timeout.unwrap_or_else(|| Duration::from_millis(SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS))
 }
@@ -270,7 +294,40 @@ impl Store for BackendStore {
         path: &str,
         version: u64,
     ) -> db_vfs::Result<Option<String>> {
-        dispatch_store!(self, get_content(workspace_id, path, version))
+        let content = dispatch_store!(self, get_content(workspace_id, path, version))?;
+        if let Some(content) = content.as_ref() {
+            maybe_reject_test_whole_content_read(content.len())?;
+        }
+        Ok(content)
+    }
+
+    fn get_content_chunk(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_char: u64,
+        max_chars: usize,
+    ) -> db_vfs::Result<Option<String>> {
+        dispatch_store!(
+            self,
+            get_content_chunk(workspace_id, path, version, start_char, max_chars)
+        )
+    }
+
+    fn get_line_range(
+        &mut self,
+        workspace_id: &str,
+        path: &str,
+        version: u64,
+        start_line: u64,
+        end_line: u64,
+        max_bytes: u64,
+    ) -> db_vfs::Result<Option<LineRangeData>> {
+        dispatch_store!(
+            self,
+            get_line_range(workspace_id, path, version, start_line, end_line, max_bytes)
+        )
     }
 
     fn insert_file_new(
@@ -417,6 +474,49 @@ mod postgres_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn backend_whole_content_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct BackendWholeContentGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl BackendWholeContentGuard {
+        fn install(limit: usize) -> Self {
+            let previous = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
+            // SAFETY: tests serialize access to this process-wide env var.
+            unsafe {
+                std::env::set_var(
+                    "DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES",
+                    limit.to_string(),
+                );
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for BackendWholeContentGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => {
+                    // SAFETY: tests serialize access to this process-wide env var.
+                    unsafe {
+                        std::env::set_var("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES", previous);
+                    }
+                }
+                None => {
+                    // SAFETY: tests serialize access to this process-wide env var.
+                    unsafe {
+                        std::env::remove_var("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn sqlite_backend_open_returns_sqlite_cancel_handle() {
@@ -471,6 +571,86 @@ mod tests {
             sqlite_busy_timeout(None),
             std::time::Duration::from_millis(SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS)
         );
+    }
+
+    #[test]
+    fn backend_store_forwards_chunked_content_reads() {
+        let _lock = backend_whole_content_test_lock()
+            .lock()
+            .expect("lock backend whole-content guard");
+        let _guard = BackendWholeContentGuard::install(12);
+        let db = tempfile::NamedTempFile::new().expect("temp sqlite file");
+        let seed = rusqlite::Connection::open(db.path()).expect("sqlite connection");
+        db_vfs::migrations::migrate_sqlite(&seed).expect("migrate sqlite");
+        seed.execute(
+            "INSERT INTO files(
+                workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            rusqlite::params![
+                "ws",
+                "docs/a.txt",
+                "line-0001\nline-0002\nline-0003\nline-0004\n",
+                40_i64,
+                1_i64,
+                1_i64,
+                1_i64
+            ],
+        )
+        .expect("seed file");
+
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db.path());
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let (mut store, _cancel) =
+            BackendStore::open(Backend::Sqlite { pool }, None, None).expect("open backend");
+        let chunk = store
+            .get_content_chunk("ws", "docs/a.txt", 1, 11, 10)
+            .expect("chunk read")
+            .expect("existing content");
+        assert_eq!(chunk, "line-0002\n");
+    }
+
+    #[test]
+    fn backend_store_forwards_line_range_reads() {
+        let _lock = backend_whole_content_test_lock()
+            .lock()
+            .expect("lock backend whole-content guard");
+        let _guard = BackendWholeContentGuard::install(12);
+        let db = tempfile::NamedTempFile::new().expect("temp sqlite file");
+        let seed = rusqlite::Connection::open(db.path()).expect("sqlite connection");
+        db_vfs::migrations::migrate_sqlite(&seed).expect("migrate sqlite");
+        seed.execute(
+            "INSERT INTO files(
+                workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            rusqlite::params![
+                "ws",
+                "docs/a.txt",
+                "line-0001\nline-0002\nline-0003\nline-0004\n",
+                40_i64,
+                1_i64,
+                1_i64,
+                1_i64
+            ],
+        )
+        .expect("seed file");
+
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db.path());
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let (mut store, _cancel) =
+            BackendStore::open(Backend::Sqlite { pool }, None, None).expect("open backend");
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 32)
+            .expect("line range read")
+            .expect("existing content");
+        assert_eq!(range.content.as_deref(), Some("line-0002\n"));
+        assert_eq!(range.bytes_read, 10);
+        assert_eq!(range.total_lines, 2);
     }
 
     #[cfg(feature = "postgres")]
