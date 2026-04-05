@@ -41,11 +41,6 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     if vfs.redactor.is_path_denied(&requested_path) {
         return Err(Error::SecretPathDenied(requested_path));
     }
-    if vfs.redactor.has_redact_rules() {
-        return Err(Error::NotPermitted(
-            "patch is not supported when secrets.redact_regexes are active".to_string(),
-        ));
-    }
     if request.expected_version > i64::MAX as u64 {
         return Err(Error::Conflict(format!(
             "expected_version is too large (max {})",
@@ -186,8 +181,9 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
 mod tests {
     use super::*;
 
+    use crate::store::sqlite::SqliteStore;
     use crate::store::{DeleteOutcome, FileMeta, Store};
-    use db_vfs_core::policy::VfsPolicy;
+    use db_vfs_core::policy::{SecretRules, VfsPolicy};
 
     struct InconsistentSizeStore {
         meta: FileMeta,
@@ -386,5 +382,47 @@ mod tests {
             })
             .expect("patch should succeed after stale meta re-check");
         assert_eq!(resp.version, 2);
+    }
+
+    #[test]
+    fn patch_is_rejected_when_secret_redaction_rules_are_active() {
+        let mut store = SqliteStore::open_in_memory().expect("sqlite");
+        store
+            .insert_file_new("ws", "docs/a.txt", "secret\npublic\n", 1)
+            .expect("seed file");
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+        policy.secrets = SecretRules {
+            redact_regexes: vec!["secret".to_string()],
+            replacement: "REDACTED".to_string(),
+            ..SecretRules::default()
+        };
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let matching_err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch: diffy::create_patch("secret\npublic\n", "changed\npublic\n").to_string(),
+                expected_version: 1,
+            })
+            .expect_err("redaction-backed patch should be rejected");
+        let mismatched_err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch: diffy::create_patch("wrong\npublic\n", "changed\npublic\n").to_string(),
+                expected_version: 1,
+            })
+            .expect_err("redaction-backed patch should be rejected before diff evaluation");
+
+        assert_eq!(matching_err.code(), "not_permitted");
+        assert_eq!(mismatched_err.code(), "not_permitted");
+        assert_eq!(matching_err.to_string(), mismatched_err.to_string());
+        assert_eq!(
+            matching_err.to_string(),
+            "operation is not permitted: patch is not supported when secret redaction rules are active"
+        );
     }
 }
