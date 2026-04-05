@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use db_vfs_core::policy::VfsPolicy;
+use db_vfs_core::policy::{ValidatedVfsPolicy, VfsPolicy};
 
 use crate::TrustMode;
 
@@ -23,7 +23,9 @@ pub fn load_policy(
     let raw = read_policy_file(path)?;
     let format = policy_format(path)?;
     let policy = parse_policy_str(&raw, format, trust_mode, Some(path))?;
-    policy.validate().map_err(anyhow::Error::msg)?;
+    let policy = ValidatedVfsPolicy::new(policy)
+        .map_err(anyhow::Error::msg)?
+        .into_inner();
     validate_trust_mode(&policy, trust_mode, unsafe_no_auth)?;
     Ok(policy)
 }
@@ -526,6 +528,34 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
             msg.contains("forbids write/patch/delete")
                 || msg.contains("forbids auth.tokens[0].token_env_var"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_policy_rejects_unbuildable_matchers_during_load() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("policy.toml");
+        std::fs::write(
+            &path,
+            r#"
+[permissions]
+read = true
+
+[limits]
+max_walk_ms = 1000
+max_requests_per_ip_per_sec = 1
+
+[secrets]
+redact_regexes = ["("]
+"#,
+        )
+        .expect("write policy");
+
+        let err = load_policy(&path, TrustMode::Trusted, true).expect_err("invalid regex");
+        assert!(
+            err.to_string()
+                .contains("invalid secrets.redact_regexes regex"),
+            "unexpected error: {err}"
         );
     }
 
