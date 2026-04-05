@@ -10,6 +10,9 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
+- The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
+  for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
+  the transport representation is escape-heavy.
 
 ## Endpoint contracts
 
@@ -38,6 +41,10 @@ Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`
 ### `/v1/patch`
 
 Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+When `secrets.redact_regexes` is active, `/v1/patch` returns `403 not_permitted` instead of
+applying unified diffs against the raw backing text. This closes the otherwise unavoidable oracle
+between redacted `read` / `grep` output and raw-content patch context matching.
 
 Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
@@ -128,6 +135,10 @@ holds the matching `max_concurrency_*` slot until the audit append+flush succeed
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending
 CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
 until any required audit append+flush completes.
+
+The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
+escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
+rejected purely because the client chose an escape-heavy JSON representation.
 
 When JSONL audit is enabled, the side-channel audit record also carries `auth_subject` whenever the
 service can derive a stable bearer-token fingerprint (`sha256:<64 hex>`) for the caller. This

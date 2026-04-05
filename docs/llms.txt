@@ -99,7 +99,7 @@ All endpoints are JSON `POST` and require:
 | --- | --- | --- | --- |
 | `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
 | `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
-| `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
+| `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found`, `not_permitted` |
 | `/v1/delete` | `workspace_id`, `path`, `expected_version?`, `ignore_missing?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
 | `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, public scan counters | `not_permitted`, `timeout` |
 | `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, public scan counters | `invalid_regex`, `not_permitted`, `timeout` |
@@ -132,6 +132,10 @@ literal queries containing `\n` or `\r` short-circuit to no matches without forc
 Line numbering and `matches[].text` follow the same `\n` / `\r\n` / lone `\r` line-boundary
 semantics, including files that mix those terminators.
 
+`patch` is disabled whenever `secrets.redact_regexes` is active. Applying unified diffs against the
+raw backing text would otherwise turn patch context match/no-match into a secret oracle, so the
+service now returns `not_permitted` instead of pretending redacted files are safely patchable.
+
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
 lifetime by accident.
@@ -161,6 +165,7 @@ Tune policy `limits` for your workload:
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
+- The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
@@ -186,6 +191,7 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
+- Optional audit auto-recovers after sink failure by rotating the possibly corrupted JSONL file and starting a fresh worker; the failing event can still be lost, but later requests do not permanently run without audit.
 - Audit records include `auth_subject="sha256:<64 hex>"` whenever the service can derive a stable
   bearer-token fingerprint from the request, so successful requests, post-auth rejects, and
   syntactically valid unauthorized attempts can still be tied back to the same caller identity
@@ -372,12 +378,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
 - service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
 - vfs/scan-pagination: move page-order and cursor monotonicity checks behind a shared helper so `glob` and `grep` keep the same broken-store diagnostics instead of maintaining duplicate validation logic.
+- vfs/patch+service/secrets: disable unified-diff patching while secret redaction rules are active so masked raw content cannot be re-exposed as a patch-context oracle.
 
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
+- service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
 - vfs/api: add a strict validated-matcher constructor for callers that need policy/matcher mismatches to fail hard instead of silently rebuilding policy-derived matchers.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
 - service/api: reject unknown request fields with `invalid_json_schema` instead of silently accepting undeclared JSON members.
@@ -389,6 +397,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
+- service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
@@ -452,6 +461,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: enforce that each fetched page starts strictly after the previous cursor, preventing duplicate/backtracking rows from misbehaving stores and removing now-redundant defensive result re-sorting work on scan hot paths.
 - store/sqlite+postgres: short-circuit `list_metas_by_prefix_page` when `limit=0` to avoid unnecessary database round-trips.
 - service/sqlite+postgres: bind startup migrations to the existing `max_io_ms` budget so SQLite no longer starts with an effectively unbounded `busy_timeout`, and Postgres startup runs under bounded `statement_timeout` plus `lock_timeout` instead of waiting indefinitely on migration-time contention.
+- service/frontdoor: reserve worst-case JSON string escaping inside the router body cap for `write` / `patch`, so escape-heavy but decoded-valid payloads no longer fail early with `payload_too_large`.
+- vfs/patch: disable diff-based patching while `secrets.redact_regexes` is active, closing the hidden-content oracle created by unified diff context against raw text.
+- service/audit: rotate damaged optional audit logs aside and reopen the primary path after sink failures, so best-effort audit does not permanently stall after the first broken write.
 - vfs/read: remove per-line byte-limit recount in line-range extraction by enforcing a single upfront content-size guard, reducing hot-loop overhead without changing limit behavior.
 - vfs/glob+grep pagination: reject non-monotonic path ordering within a single store page to avoid silent row skips on misordered paginated backends.
 - service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.
@@ -504,12 +516,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests/service-policy: add an explicit FIFO regression test so policy loading keeps rejecting special files before `open`, instead of only covering generic non-regular paths.
 - tests: add regression coverage to ensure audit worker keeps provided event timestamps unchanged.
 - tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
-- tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.
-- tests: add regression coverage for required-audit worker loss returning stable `503 audit_unavailable` errors.
-
-## [0.1.0] - 2026-01-31
-
-### Added
 
 
 ---
@@ -878,6 +884,9 @@ Secrets semantics:
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
 - `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` expect
   caller-supplied matchers to match that same policy and fail fast on mismatch.
+- `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
+  against raw stored text would otherwise let callers probe masked content through context-match
+  success or failure.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
 - Redaction-enabled ranged `read` rejects raw files larger than `max_read_bytes` before full-content load, and also rejects redacted whole-file intermediates that would overflow the same budget.
 
@@ -902,6 +911,10 @@ the same error instead of blocking forever on the enqueue path. That error means
 outcome may already be committed, so callers should verify state before retrying non-idempotent
 writes.
 
+When `audit.required = false`, sink failures still fail open, but the optional logger now rotates
+the possibly corrupted JSONL file and respawns a fresh worker on the next event instead of
+remaining permanently disconnected for the rest of the process lifetime.
+
 
 ---
 file: docs/src/http-api.md
@@ -921,6 +934,9 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
+- The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
+  for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
+  the transport representation is escape-heavy.
 
 ## Endpoint contracts
 
@@ -949,6 +965,10 @@ Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`
 ### `/v1/patch`
 
 Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+When `secrets.redact_regexes` is active, `/v1/patch` returns `403 not_permitted` instead of
+applying unified diffs against the raw backing text. This closes the otherwise unavoidable oracle
+between redacted `read` / `grep` output and raw-content patch context matching.
 
 Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
@@ -1039,6 +1059,10 @@ holds the matching `max_concurrency_*` slot until the audit append+flush succeed
 permit before buffering and decoding the body, so saturated servers fail fast instead of spending
 CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
 until any required audit append+flush completes.
+
+The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
+escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
+rejected purely because the client chose an escape-heavy JSON representation.
 
 When JSONL audit is enabled, the side-channel audit record also carries `auth_subject` whenever the
 service can derive a stable bearer-token fingerprint (`sha256:<64 hex>`) for the caller. This
@@ -1224,6 +1248,9 @@ Recommended `RUST_LOG`:
 - monitor disk usage;
 - understand both startup and runtime behavior difference between `audit.required=true/false`;
 - with `audit.required=true`, treat audit backpressure, per-request write/flush failures, or worker loss as availability-impacting by design.
+- with `audit.required=false`, monitor for rotated broken-audit files and dropped-event warnings:
+  the service now respawns best-effort logging after sink failures, but the event that hit the
+  failure can still be lost.
 
 
 ---

@@ -57,3 +57,6 @@ Recommended `RUST_LOG`:
 - monitor disk usage;
 - understand both startup and runtime behavior difference between `audit.required=true/false`;
 - with `audit.required=true`, treat audit backpressure, per-request write/flush failures, or worker loss as availability-impacting by design.
+- with `audit.required=false`, monitor for rotated broken-audit files and dropped-event warnings:
+  the service now respawns best-effort logging after sink failures, but the event that hit the
+  failure can still be lost.

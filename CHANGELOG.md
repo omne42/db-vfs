@@ -20,12 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
 - service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
 - vfs/scan-pagination: move page-order and cursor monotonicity checks behind a shared helper so `glob` and `grep` keep the same broken-store diagnostics instead of maintaining duplicate validation logic.
+- vfs/patch+service/secrets: disable unified-diff patching while secret redaction rules are active so masked raw content cannot be re-exposed as a patch-context oracle.
 
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
+- service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
 - vfs/api: add a strict validated-matcher constructor for callers that need policy/matcher mismatches to fail hard instead of silently rebuilding policy-derived matchers.
 - service/api: split JSON parse/schema rejections into stable error codes and standardize 4xx mappings for client-visible validation failures.
 - service/api: reject unknown request fields with `invalid_json_schema` instead of silently accepting undeclared JSON members.
@@ -37,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
+- service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
@@ -100,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: enforce that each fetched page starts strictly after the previous cursor, preventing duplicate/backtracking rows from misbehaving stores and removing now-redundant defensive result re-sorting work on scan hot paths.
 - store/sqlite+postgres: short-circuit `list_metas_by_prefix_page` when `limit=0` to avoid unnecessary database round-trips.
 - service/sqlite+postgres: bind startup migrations to the existing `max_io_ms` budget so SQLite no longer starts with an effectively unbounded `busy_timeout`, and Postgres startup runs under bounded `statement_timeout` plus `lock_timeout` instead of waiting indefinitely on migration-time contention.
+- service/frontdoor: reserve worst-case JSON string escaping inside the router body cap for `write` / `patch`, so escape-heavy but decoded-valid payloads no longer fail early with `payload_too_large`.
+- vfs/patch: disable diff-based patching while `secrets.redact_regexes` is active, closing the hidden-content oracle created by unified diff context against raw text.
+- service/audit: rotate damaged optional audit logs aside and reopen the primary path after sink failures, so best-effort audit does not permanently stall after the first broken write.
 - vfs/read: remove per-line byte-limit recount in line-range extraction by enforcing a single upfront content-size guard, reducing hot-loop overhead without changing limit behavior.
 - vfs/glob+grep pagination: reject non-monotonic path ordering within a single store page to avoid silent row skips on misordered paginated backends.
 - service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.

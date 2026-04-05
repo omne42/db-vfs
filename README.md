@@ -64,7 +64,7 @@ All endpoints are JSON `POST` and require:
 | --- | --- | --- | --- |
 | `/v1/read` | `workspace_id`, `path`, `start_line?`, `end_line?` | `requested_path`, `path`, `content`, `bytes_read`, `version` | `unauthorized`, `invalid_path`, `not_found` |
 | `/v1/write` | `workspace_id`, `path`, `content`, `expected_version?` | `requested_path`, `path`, `bytes_written`, `created`, `version` | `conflict`, `file_too_large` |
-| `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found` |
+| `/v1/patch` | `workspace_id`, `path`, `patch`, `expected_version` | `requested_path`, `path`, `bytes_written`, `version` | `patch`, `conflict`, `not_found`, `not_permitted` |
 | `/v1/delete` | `workspace_id`, `path`, `expected_version?`, `ignore_missing?` | `requested_path`, `path`, `deleted` | `conflict`, `not_found` |
 | `/v1/glob` | `workspace_id`, `pattern`, `path_prefix?` | `matches`, `truncated`, public scan counters | `not_permitted`, `timeout` |
 | `/v1/grep` | `workspace_id`, `query`, `regex`, `glob?`, `path_prefix?` | `matches[]`, `truncated`, public scan counters | `invalid_regex`, `not_permitted`, `timeout` |
@@ -97,6 +97,10 @@ literal queries containing `\n` or `\r` short-circuit to no matches without forc
 Line numbering and `matches[].text` follow the same `\n` / `\r\n` / lone `\r` line-boundary
 semantics, including files that mix those terminators.
 
+`patch` is disabled whenever `secrets.redact_regexes` is active. Applying unified diffs against the
+raw backing text would otherwise turn patch context match/no-match into a secret oracle, so the
+service now returns `not_permitted` instead of pretending redacted files are safely patchable.
+
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
 lifetime by accident.
@@ -126,6 +130,7 @@ Tune policy `limits` for your workload:
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
+- The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
@@ -151,6 +156,7 @@ Secrets semantics:
 
 - `x-request-id` is accepted/echoed; invalid/missing IDs are replaced by service-generated IDs.
 - Optional JSONL audit via `audit.jsonl_path`.
+- Optional audit auto-recovers after sink failure by rotating the possibly corrupted JSONL file and starting a fresh worker; the failing event can still be lost, but later requests do not permanently run without audit.
 - Audit records include `auth_subject="sha256:<64 hex>"` whenever the service can derive a stable
   bearer-token fingerprint from the request, so successful requests, post-auth rejects, and
   syntactically valid unauthorized attempts can still be tied back to the same caller identity

@@ -20,6 +20,9 @@
   - `read` / `grep` 的 line-oriented 契约必须一致：`\n`、`\r\n`、lone `\r` 都是等价行边界，混合换行文件也不能改变 line range / line number 语义。
   - crate 公开构造器里的 `SecretRedactor` / `TraversalSkipper` 必须与同一份 `VfsPolicy` 同源；不允许用外部自定义 matcher 绕过 policy 边界。
   - `secrets.replacement` 不允许控制字符；多行 secret redaction 必须保住 `read` / `grep` 的行语义。
+  - 开启 `secrets.redact_regexes` 时，`patch` 不能再对 raw backing text 做 unified diff apply；
+    service/vfs 必须显式拒绝这类请求，避免通过 patch context match/no-match 把被遮蔽的 secret
+    再次暴露成 oracle。
   - 启用 redaction 规则时，`grep` 的 literal/regex 匹配必须基于 redacted line view，而不是
     hidden raw content；被遮蔽的 secret 不能继续通过 match/no-match 语义泄漏存在性。
   - redaction 路径的原始输入和中间结果都必须受 `max_read_bytes` 约束；当 ranged `read`
@@ -58,6 +61,9 @@
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - `audit.required = false` 仍然允许 fail-open，但 optional audit sink 一次写失败后不能把
+    后续整个进程永久打成“有请求、无审计”的状态；至少要 rotate 掉可能损坏的 JSONL 并恢复
+    worker，让后续事件重新可写。
   - required audit channel 满也必须立即 fail-closed 成 `503 audit_unavailable`；不能因为
     阻塞 `send()` 把 request permit 或后台线程无限悬挂。
   - scan 请求即使配置 `max_walk_ms = None`，backend DB pool wait/connect 和 frontdoor
