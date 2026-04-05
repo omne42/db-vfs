@@ -6,6 +6,8 @@ Use this checklist for production:
 
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
+- [ ] if you embed the router with auth disabled, keep the default loopback-only mode unless you
+  intentionally need unauthenticated non-loopback or peerless traffic;
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
 - [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
@@ -17,7 +19,7 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，compatibility 构造器会回退成 policy 编译结果并发出一次显式告警。
+- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，需要 policy 编译结果时应直接使用 `DbVfs::new_validated()`。
 
 ## Untrusted mode checklist
 

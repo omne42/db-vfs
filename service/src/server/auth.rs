@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -9,6 +9,8 @@ use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use db_vfs_core::policy::VfsPolicy;
+
+use super::UnsafeNoAuthMode;
 
 static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[WorkspacePattern]>> = OnceLock::new();
 
@@ -22,7 +24,7 @@ fn allow_all_workspaces() -> Arc<[WorkspacePattern]> {
 
 #[derive(Clone)]
 pub(super) enum AuthMode {
-    Disabled,
+    Disabled { mode: UnsafeNoAuthMode },
     Enforced { rules: Arc<[AuthRule]> },
 }
 
@@ -69,9 +71,9 @@ fn compile_workspace_patterns(patterns: &[String]) -> anyhow::Result<Arc<[Worksp
 
 pub(super) fn build_auth_mode(
     policy: &VfsPolicy,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
 ) -> anyhow::Result<AuthMode> {
-    build_auth_mode_with_env_lookup(policy, unsafe_no_auth, |env| {
+    build_auth_mode_with_env_lookup(policy, unsafe_no_auth_mode, |env| {
         std::env::var(env).map_err(|_| {
             anyhow::anyhow!("auth token env var {env:?} is not set or not valid UTF-8")
         })
@@ -80,11 +82,13 @@ pub(super) fn build_auth_mode(
 
 fn build_auth_mode_with_env_lookup(
     policy: &VfsPolicy,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
     mut env_lookup: impl FnMut(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<AuthMode> {
-    if unsafe_no_auth {
-        return Ok(AuthMode::Disabled);
+    if unsafe_no_auth_mode.auth_disabled() {
+        return Ok(AuthMode::Disabled {
+            mode: unsafe_no_auth_mode,
+        });
     }
     if policy.auth.tokens.is_empty() {
         anyhow::bail!(
@@ -200,6 +204,24 @@ fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<[u8;
     Ok(hash_token_sha256(token))
 }
 
+fn unsafe_no_auth_guard_message(
+    mode: UnsafeNoAuthMode,
+    peer_ip: Option<IpAddr>,
+) -> Option<&'static str> {
+    match mode {
+        UnsafeNoAuthMode::Disabled | UnsafeNoAuthMode::AllowAnyPeer => None,
+        UnsafeNoAuthMode::LoopbackOnly => match peer_ip {
+            Some(ip) if ip.is_loopback() => None,
+            Some(_) => Some(
+                "unsafe-no-auth only permits loopback peers by default; opt into AllowAnyPeer only for intentional public exposure",
+            ),
+            None => Some(
+                "unsafe-no-auth requires ConnectInfo<SocketAddr> so the service can verify loopback-only callers; opt into AllowAnyPeer only for intentional peerless embedding or public exposure",
+            ),
+        },
+    }
+}
+
 fn parse_token_sha256(token: &str) -> anyhow::Result<[u8; 32]> {
     let Some(hex) = token.strip_prefix("sha256:") else {
         anyhow::bail!("auth token must be sha256:<64 hex chars>");
@@ -268,6 +290,41 @@ async fn log_unauthorized(
     Ok(())
 }
 
+async fn log_no_auth_guard_rejection(
+    state: &super::AppState,
+    request_id: Option<String>,
+    peer_ip: Option<IpAddr>,
+    path: &str,
+) -> Result<(), Response> {
+    if let (Some(audit), Some(request_id), Some(op)) = (
+        state.inner.audit.as_ref(),
+        request_id,
+        super::audit::op_from_path(path),
+    ) {
+        let event = super::audit::minimal_event(
+            request_id,
+            peer_ip,
+            op,
+            StatusCode::FORBIDDEN.as_u16(),
+            Some("not_permitted"),
+        );
+        if let Some(super::RequiredAuditGate { permit, budget }) =
+            super::try_acquire_required_audit_gate_for_path(state, path)
+                .await
+                .map_err(IntoResponse::into_response)?
+        {
+            super::log_audit_event_with_permit(audit, event, permit, budget)
+                .await
+                .map_err(IntoResponse::into_response)?;
+        } else {
+            super::log_audit_event(audit, event)
+                .await
+                .map_err(IntoResponse::into_response)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn auth_middleware(
     State(state): State<super::AppState>,
     mut req: Request,
@@ -284,10 +341,20 @@ pub(super) async fn auth_middleware(
         .map(|v| v.0.clone());
 
     let ctx = match &state.inner.auth {
-        AuthMode::Disabled => AuthContext {
-            allowed_workspaces: allow_all_workspaces(),
-            audit_subject: None,
-        },
+        AuthMode::Disabled { mode } => {
+            if let Some(message) = unsafe_no_auth_guard_message(*mode, peer_ip) {
+                if let Err(resp) =
+                    log_no_auth_guard_rejection(&state, request_id, peer_ip, &path).await
+                {
+                    return resp;
+                }
+                return super::err_response(StatusCode::FORBIDDEN, "not_permitted", message);
+            }
+            AuthContext {
+                allowed_workspaces: allow_all_workspaces(),
+                audit_subject: None,
+            }
+        }
         AuthMode::Enforced { rules } => {
             let Some(token) = parse_bearer_token(req.headers()) else {
                 if let Err(resp) =
@@ -456,11 +523,51 @@ mod tests {
     #[test]
     fn build_auth_mode_allows_unsafe_no_auth_with_no_tokens() {
         let policy = VfsPolicy::default();
-        let mode = build_auth_mode(&policy, true).unwrap();
-        assert!(matches!(mode, AuthMode::Disabled));
+        let mode = build_auth_mode(&policy, UnsafeNoAuthMode::LoopbackOnly).unwrap();
+        assert!(matches!(
+            mode,
+            AuthMode::Disabled {
+                mode: UnsafeNoAuthMode::LoopbackOnly
+            }
+        ));
 
-        let err = build_auth_mode(&policy, false).err().expect("should fail");
+        let mode = build_auth_mode(&policy, UnsafeNoAuthMode::AllowAnyPeer).unwrap();
+        assert!(matches!(
+            mode,
+            AuthMode::Disabled {
+                mode: UnsafeNoAuthMode::AllowAnyPeer
+            }
+        ));
+
+        let err = build_auth_mode(&policy, UnsafeNoAuthMode::Disabled)
+            .err()
+            .expect("should fail");
         assert!(err.to_string().contains("no auth tokens configured"));
+    }
+
+    #[test]
+    fn loopback_only_unsafe_no_auth_requires_verified_loopback_peer() {
+        assert!(
+            unsafe_no_auth_guard_message(
+                UnsafeNoAuthMode::LoopbackOnly,
+                Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            )
+            .is_none()
+        );
+        assert!(unsafe_no_auth_guard_message(UnsafeNoAuthMode::AllowAnyPeer, None).is_none());
+        assert!(
+            unsafe_no_auth_guard_message(UnsafeNoAuthMode::LoopbackOnly, None)
+                .expect("missing peer must be rejected")
+                .contains("ConnectInfo")
+        );
+        assert!(
+            unsafe_no_auth_guard_message(
+                UnsafeNoAuthMode::LoopbackOnly,
+                Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
+            )
+            .expect("non-loopback peer must be rejected")
+            .contains("loopback peers")
+        );
     }
 
     #[test]
@@ -480,7 +587,7 @@ mod tests {
             },
         ];
 
-        let err = build_auth_mode(&policy, false)
+        let err = build_auth_mode(&policy, UnsafeNoAuthMode::Disabled)
             .err()
             .expect("duplicate token hashes should be rejected");
         assert!(err.to_string().contains("duplicates a previous token hash"));
@@ -498,7 +605,7 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        let err = build_auth_mode_for_test(&policy, [(&var, token)], false)
+        let err = build_auth_mode_for_test(&policy, [(&var, token)], UnsafeNoAuthMode::Disabled)
             .err()
             .expect("whitespace-bearing env token should be rejected");
         assert!(err.to_string().contains("valid HTTP Bearer token"));
@@ -517,8 +624,8 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        let mode =
-            build_auth_mode_for_test(&policy, [(&var, token)], false).expect("build auth mode");
+        let mode = build_auth_mode_for_test(&policy, [(&var, token)], UnsafeNoAuthMode::Disabled)
+            .expect("build auth mode");
 
         let AuthMode::Enforced { rules } = mode else {
             panic!("expected enforced auth mode");
@@ -543,9 +650,13 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
 
-        let err = build_auth_mode_for_test(&policy, [(&var, token.as_str())], false)
-            .err()
-            .expect("sha256-prefixed env value should be treated as invalid plaintext");
+        let err = build_auth_mode_for_test(
+            &policy,
+            [(&var, token.as_str())],
+            UnsafeNoAuthMode::Disabled,
+        )
+        .err()
+        .expect("sha256-prefixed env value should be treated as invalid plaintext");
 
         assert!(err.to_string().contains("valid HTTP Bearer token"));
     }
@@ -553,13 +664,13 @@ mod tests {
     fn build_auth_mode_for_test<'a>(
         policy: &VfsPolicy,
         env: impl IntoIterator<Item = (&'a String, &'a str)>,
-        unsafe_no_auth: bool,
+        unsafe_no_auth_mode: UnsafeNoAuthMode,
     ) -> anyhow::Result<AuthMode> {
         let env_map: HashMap<&str, &str> = env
             .into_iter()
             .map(|(key, value)| (key.as_str(), value))
             .collect();
-        build_auth_mode_with_env_lookup(policy, unsafe_no_auth, |name| {
+        build_auth_mode_with_env_lookup(policy, unsafe_no_auth_mode, |name| {
             env_map
                 .get(name)
                 .map(|value| (*value).to_string())
@@ -619,7 +730,11 @@ mod tests {
             allowed_workspaces: vec!["ws".to_string()],
         }];
         policy.audit.required = true;
-        let state = super::super::test_state_with_policy_audit_and_auth(policy, Some(audit), false);
+        let state = super::super::test_state_with_policy_audit_and_auth(
+            policy,
+            Some(audit),
+            UnsafeNoAuthMode::Disabled,
+        );
 
         let app = Router::new()
             .route("/v1/read", post(|| async { StatusCode::OK }))
@@ -688,7 +803,11 @@ mod tests {
             token_env_var: None,
             allowed_workspaces: vec!["ws".to_string()],
         }];
-        let state = super::super::test_state_with_policy_audit_and_auth(policy, Some(audit), false);
+        let state = super::super::test_state_with_policy_audit_and_auth(
+            policy,
+            Some(audit),
+            UnsafeNoAuthMode::Disabled,
+        );
 
         let app = Router::new()
             .route("/v1/read", post(|| async { StatusCode::OK }))

@@ -143,6 +143,9 @@ lifetime by accident.
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
+- Library builders keep `unsafe_no_auth=true` loopback-only by default; peerless embedding or
+  non-loopback unauthenticated traffic now requires an explicit `UnsafeNoAuthMode::AllowAnyPeer`
+  opt-in.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
 - `auth.tokens[*].token_env_var` always carries the raw bearer token; only
   `auth.tokens[*].token` accepts a pre-hashed `sha256:<64 hex>` value.
@@ -931,6 +934,9 @@ All endpoints are `POST` JSON.
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
   - `<token>` must satisfy HTTP Bearer `token68` syntax; whitespace-bearing or malformed tokens are rejected before auth matching.
+- Library callers using `build_app*(_, _, true)` still get a loopback-only unauthenticated router by
+  default; peerless embedding or intentional public unauthenticated traffic must opt into
+  `UnsafeNoAuthMode::AllowAnyPeer`.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
@@ -1148,6 +1154,8 @@ Use this checklist for production:
 
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
+- [ ] if you embed the router with auth disabled, keep the default loopback-only mode unless you
+  intentionally need unauthenticated non-loopback or peerless traffic;
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
 - [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
@@ -1159,7 +1167,7 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，compatibility 构造器会回退成 policy 编译结果并发出一次显式告警。
+- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，需要 policy 编译结果时应直接使用 `DbVfs::new_validated()`。
 
 ## Untrusted mode checklist
 

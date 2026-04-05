@@ -7,6 +7,9 @@ All endpoints are `POST` JSON.
 - Header `content-type: application/json`
 - Header `authorization: Bearer <token>` (unless service runs with `--unsafe-no-auth`)
   - `<token>` must satisfy HTTP Bearer `token68` syntax; whitespace-bearing or malformed tokens are rejected before auth matching.
+- Library callers using `build_app*(_, _, true)` still get a loopback-only unauthenticated router by
+  default; peerless embedding or intentional public unauthenticated traffic must opt into
+  `UnsafeNoAuthMode::AllowAnyPeer`.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.

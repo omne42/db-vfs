@@ -24,6 +24,27 @@ use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsafeNoAuthMode {
+    Disabled,
+    LoopbackOnly,
+    AllowAnyPeer,
+}
+
+impl UnsafeNoAuthMode {
+    const fn from_legacy_flag(unsafe_no_auth: bool) -> Self {
+        if unsafe_no_auth {
+            Self::LoopbackOnly
+        } else {
+            Self::Disabled
+        }
+    }
+
+    const fn auth_disabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::server) struct AppState {
     inner: Arc<AppInner>,
@@ -249,7 +270,7 @@ async fn try_acquire_required_audit_gate_for_path(
 
 fn prepare_state(
     policy: ValidatedVfsPolicy,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
 ) -> anyhow::Result<PreparedState> {
     let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&policy);
     if estimated_scan_inflight_bytes > RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES {
@@ -268,7 +289,7 @@ fn prepare_state(
     let io_concurrency = policy.limits.max_concurrency_io;
     let scan_concurrency = policy.limits.max_concurrency_scan;
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
-    let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
+    let auth = auth::build_auth_mode(&policy, unsafe_no_auth_mode)?;
     let audit = if let Some(path) = policy.audit.jsonl_path.as_deref() {
         let flush_every_events = policy
             .audit
@@ -308,7 +329,7 @@ fn prepare_state(
         .map(|rule| rule.allowed_workspaces.len())
         .sum();
     tracing::info!(
-        auth_enabled = !unsafe_no_auth,
+        auth_enabled = !unsafe_no_auth_mode.auth_disabled(),
         auth_token_count,
         auth_allowed_workspace_patterns,
         "auth configuration loaded"
@@ -405,9 +426,9 @@ fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
 pub(in crate::server) fn test_state_with_policy_audit_and_auth(
     policy: VfsPolicy,
     audit: Option<audit::AuditLogger>,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
 ) -> AppState {
-    let auth_mode = auth::build_auth_mode(&policy, unsafe_no_auth).expect("auth mode");
+    let auth_mode = auth::build_auth_mode(&policy, unsafe_no_auth_mode).expect("auth mode");
     let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
     let manager = sqlite_connection_manager(
         std::path::Path::new(":memory:"),
@@ -437,7 +458,11 @@ pub(in crate::server) fn test_state_with_policy_audit_and_auth(
 
 #[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_audit(audit: Option<audit::AuditLogger>) -> AppState {
-    test_state_with_policy_audit_and_auth(VfsPolicy::default(), audit, true)
+    test_state_with_policy_audit_and_auth(
+        VfsPolicy::default(),
+        audit,
+        UnsafeNoAuthMode::LoopbackOnly,
+    )
 }
 
 #[cfg(all(test, feature = "sqlite"))]
@@ -445,17 +470,23 @@ pub(in crate::server) fn test_state_with_policy_and_audit(
     policy: VfsPolicy,
     audit: Option<audit::AuditLogger>,
 ) -> AppState {
-    test_state_with_policy_audit_and_auth(policy, audit, true)
+    test_state_with_policy_audit_and_auth(policy, audit, UnsafeNoAuthMode::LoopbackOnly)
 }
 
 #[cfg(feature = "sqlite")]
-pub fn build_app_sqlite(
+/// Safe-by-default SQLite builder.
+///
+/// Passing `unsafe_no_auth = true` keeps the historical convenience surface, but the resulting
+/// router still rejects requests unless it can verify a loopback peer address. Call
+/// [`build_app_sqlite_with_unsafe_no_auth_mode`] with [`UnsafeNoAuthMode::AllowAnyPeer`] only
+/// when a caller intentionally wants unauthenticated non-loopback or peerless traffic.
+pub fn build_app_sqlite_with_unsafe_no_auth_mode(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
-    let prepared = prepare_state(policy, unsafe_no_auth)?;
+    let prepared = prepare_state(policy, unsafe_no_auth_mode)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
     let manager = sqlite_connection_manager(&db_path, migration_timeout);
     let max_pool_size = sqlite_pool_max_size(&db_path, prepared.policy.limits.max_db_connections);
@@ -482,13 +513,14 @@ pub fn build_app_sqlite(
 }
 
 #[cfg(feature = "postgres")]
-pub fn build_app_postgres(
+/// Safe-by-default Postgres builder.
+pub fn build_app_postgres_with_unsafe_no_auth_mode(
     url: String,
     policy: VfsPolicy,
-    unsafe_no_auth: bool,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
-    let prepared = prepare_state(policy, unsafe_no_auth)?;
+    let prepared = prepare_state(policy, unsafe_no_auth_mode)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
 
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
@@ -513,19 +545,60 @@ pub fn build_app_postgres(
 }
 
 #[cfg(feature = "sqlite")]
+pub fn build_app_sqlite(
+    db_path: std::path::PathBuf,
+    policy: VfsPolicy,
+    unsafe_no_auth: bool,
+) -> anyhow::Result<Router> {
+    build_app_sqlite_with_unsafe_no_auth_mode(
+        db_path,
+        policy,
+        UnsafeNoAuthMode::from_legacy_flag(unsafe_no_auth),
+    )
+}
+
+#[cfg(feature = "postgres")]
+pub fn build_app_postgres(
+    url: String,
+    policy: VfsPolicy,
+    unsafe_no_auth: bool,
+) -> anyhow::Result<Router> {
+    build_app_postgres_with_unsafe_no_auth_mode(
+        url,
+        policy,
+        UnsafeNoAuthMode::from_legacy_flag(unsafe_no_auth),
+    )
+}
+
+#[cfg(feature = "sqlite")]
 /// Convenience entrypoint using the SQLite backend.
 ///
 /// For PostgreSQL, call `build_app_postgres` when the `postgres` feature is enabled.
 ///
-/// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When no peer
-/// address is installed by the outer server, request handling still succeeds; audit `peer_ip`
-/// stays unset and rate limiting falls back to the shared unspecified-IP bucket.
+/// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When auth is
+/// enabled, missing peer metadata only affects audit `peer_ip` and rate-limit bucketing. When
+/// unauthenticated mode is enabled, the legacy bool wrapper remains loopback-only by default; use
+/// [`UnsafeNoAuthMode::AllowAnyPeer`] explicitly for peerless embedding or intentional public
+/// exposure.
+pub fn build_app_with_unsafe_no_auth_mode(
+    db_path: std::path::PathBuf,
+    policy: VfsPolicy,
+    unsafe_no_auth_mode: UnsafeNoAuthMode,
+) -> anyhow::Result<Router> {
+    build_app_sqlite_with_unsafe_no_auth_mode(db_path, policy, unsafe_no_auth_mode)
+}
+
+#[cfg(feature = "sqlite")]
 pub fn build_app(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    build_app_sqlite(db_path, policy, unsafe_no_auth)
+    build_app_with_unsafe_no_auth_mode(
+        db_path,
+        policy,
+        UnsafeNoAuthMode::from_legacy_flag(unsafe_no_auth),
+    )
 }
 
 #[cfg(test)]
@@ -599,7 +672,8 @@ mod tests {
         }];
 
         let validated = ValidatedVfsPolicy::new(raw).expect("validated policy");
-        let prepared = prepare_state(validated, false).expect("prepared state");
+        let prepared =
+            prepare_state(validated, UnsafeNoAuthMode::Disabled).expect("prepared state");
 
         assert_eq!(prepared.policy.auth.tokens.len(), 1);
         assert_eq!(

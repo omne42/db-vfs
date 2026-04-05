@@ -959,7 +959,9 @@ mod tests {
                 redactor,
                 traversal,
                 audit,
-                auth: super::super::auth::AuthMode::Disabled,
+                auth: super::super::auth::AuthMode::Disabled {
+                    mode: super::super::UnsafeNoAuthMode::AllowAnyPeer,
+                },
                 rate_limiter: super::super::rate_limiter::RateLimiter::new(policy.as_ref()),
                 io_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
                 scan_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
