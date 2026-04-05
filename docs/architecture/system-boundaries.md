@@ -43,6 +43,9 @@
     `max_walk_ms = None`，也不能把 body parse 变成无界等待。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
+  - service 对外暴露的 Router builder 不能再用一个裸 `unsafe_no_auth: bool` 静默关闭鉴权；
+    无鉴权启动必须通过显式的 builder auth mode 选择，让 loopback-only 和 allow-non-loopback
+    风险在调用点可见。
   - `auth.tokens[*].token_env_var` 只承载明文 bearer token；预哈希输入只允许放在
     `auth.tokens[*].token`。把字面 `sha256:<hex>` 放进 `token_env_var` 必须在启动时直接拒绝，
     不能被当成预哈希 token 接受。

@@ -143,6 +143,8 @@ lifetime by accident.
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
+- Embedded callers should keep auth enabled by default too; programmatic no-auth now requires an
+  explicit `db_vfs_service::server::BuilderAuthMode` opt-in instead of a bare boolean.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
 - `auth.tokens[*].token_env_var` always carries the raw bearer token; only
   `auth.tokens[*].token` accepts a pre-hashed `sha256:<64 hex>` value.
@@ -368,6 +370,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
+- service/builders: make unauthenticated embedded Router construction require an explicit `BuilderAuthMode` instead of silently accepting `unsafe_no_auth=true` through the legacy bool helpers.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
 - core/policy: make omitted `limits.max_walk_ms` deserialize to the default `Some(2000)` scan budget.
@@ -515,7 +518,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 - tests/service-policy: add an explicit FIFO regression test so policy loading keeps rejecting special files before `open`, instead of only covering generic non-regular paths.
 - tests: add regression coverage to ensure audit worker keeps provided event timestamps unchanged.
-- tests: add regression coverage for legacy unsorted prefix-pagination fallback correctness and disabled rate-limiter minimal allocation behavior.
 
 
 ---
@@ -1148,6 +1150,8 @@ Use this checklist for production:
 
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
+- [ ] if you embed the Router from Rust, stay on `BuilderAuthMode::Enforced` by default; only use
+  the explicit unauthenticated builder modes when that risk is intentional and reviewed;
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
 - [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);

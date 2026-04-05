@@ -219,8 +219,12 @@ async fn setup_with_policy(policy: VfsPolicy) -> Option<TestServer> {
 #[tokio::test]
 async fn embedded_router_write_works_without_connect_info() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app_with_auth_mode(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        db_vfs_service::server::BuilderAuthMode::UnsafeNoAuthLoopbackOnly,
+    )
+    .expect("build app");
 
     let req = Request::builder()
         .method("POST")
@@ -247,8 +251,12 @@ async fn embedded_router_write_works_without_connect_info() {
 #[tokio::test]
 async fn workspace_id_with_wildcard_is_rejected() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app_with_auth_mode(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        db_vfs_service::server::BuilderAuthMode::UnsafeNoAuthLoopbackOnly,
+    )
+    .expect("build app");
 
     let req = Request::builder()
         .method("POST")
@@ -289,7 +297,11 @@ async fn setup_postgres() -> Option<(String, reqwest::Client, tokio::task::JoinH
         return None;
     };
     let app = tokio::task::spawn_blocking(move || {
-        db_vfs_service::server::build_app_postgres(url, policy_allow_all(), false)
+        db_vfs_service::server::build_app_postgres_with_auth_mode(
+            url,
+            policy_allow_all(),
+            db_vfs_service::server::BuilderAuthMode::Enforced,
+        )
     })
     .await
     .expect("join postgres app builder")
