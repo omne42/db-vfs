@@ -17,12 +17,14 @@ pub(super) const DEFAULT_AUDIT_FLUSH_MAX_INTERVAL: Duration = Duration::from_mil
 pub(super) const UNKNOWN_WORKSPACE_ID: &str = "<unknown>";
 
 static DROPPED_AUDIT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static OPTIONAL_AUDIT_RECOVERY_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(super) struct AuditLogger {
-    sender: mpsc::SyncSender<QueuedAuditEvent>,
+    sender: Arc<std::sync::Mutex<mpsc::SyncSender<QueuedAuditEvent>>>,
     disconnected_warned: Arc<AtomicBool>,
     required: bool,
+    optional_recovery: Option<Arc<OptionalAuditRecovery>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,13 @@ impl std::error::Error for AuditFailure {}
 struct QueuedAuditEvent {
     event: AuditEvent,
     ack: Option<mpsc::SyncSender<Result<(), String>>>,
+}
+
+struct OptionalAuditRecovery {
+    path: PathBuf,
+    flush_every_events: usize,
+    flush_max_interval: Duration,
+    respawn_lock: std::sync::Mutex<()>,
 }
 
 pub(super) fn op_from_path(path: &str) -> Option<&'static str> {
@@ -196,28 +205,25 @@ impl AuditLogger {
         }
 
         let path = path.as_ref().to_path_buf();
-        let (lock_file, file) = open_audit_file(&path)?;
-        let (sender, receiver) = mpsc::sync_channel::<QueuedAuditEvent>(AUDIT_CHANNEL_CAPACITY);
-
-        std::thread::Builder::new()
-            .name("db-vfs-audit".to_string())
-            .spawn(move || {
-                audit_worker(
-                    file,
-                    receiver,
-                    path,
-                    lock_file,
-                    required,
-                    flush_every_events,
-                    flush_max_interval,
-                )
-            })
-            .map_err(anyhow::Error::msg)?;
+        let sender = spawn_audit_worker(
+            path.clone(),
+            required,
+            flush_every_events,
+            flush_max_interval,
+        )?;
 
         Ok(Self {
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(sender)),
             disconnected_warned: Arc::new(AtomicBool::new(false)),
             required,
+            optional_recovery: (!required).then(|| {
+                Arc::new(OptionalAuditRecovery {
+                    path,
+                    flush_every_events,
+                    flush_max_interval,
+                    respawn_lock: std::sync::Mutex::new(()),
+                })
+            }),
         })
     }
 
@@ -228,7 +234,12 @@ impl AuditLogger {
     ) -> Result<(), AuditFailure> {
         if self.required {
             let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-            match self.sender.try_send(QueuedAuditEvent {
+            let sender = self
+                .sender
+                .lock()
+                .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
+                .clone();
+            match sender.try_send(QueuedAuditEvent {
                 event,
                 ack: Some(ack_tx),
             }) {
@@ -255,29 +266,52 @@ impl AuditLogger {
             return Ok(());
         }
 
-        match self.sender.try_send(QueuedAuditEvent { event, ack: None }) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                let dropped = DROPPED_AUDIT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
-                if dropped == 1 || dropped.is_multiple_of(1000) {
-                    tracing::warn!(
-                        dropped,
-                        capacity = AUDIT_CHANNEL_CAPACITY,
-                        "audit log channel is full; dropping audit events"
-                    );
+        let mut queued = QueuedAuditEvent { event, ack: None };
+        loop {
+            let sender = self
+                .sender
+                .lock()
+                .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
+                .clone();
+            match sender.try_send(queued) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Full(_returned)) => {
+                    let dropped = DROPPED_AUDIT_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if dropped == 1 || dropped.is_multiple_of(1000) {
+                        tracing::warn!(
+                            dropped,
+                            capacity = AUDIT_CHANNEL_CAPACITY,
+                            "audit log channel is full; dropping audit events"
+                        );
+                    }
+                    return Ok(());
                 }
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                if !self.disconnected_warned.swap(true, Ordering::Relaxed) {
-                    let dropped = DROPPED_AUDIT_EVENTS.load(Ordering::Relaxed);
-                    tracing::warn!(
-                        dropped,
-                        "audit log worker thread has stopped; audit events will be dropped"
-                    );
+                Err(mpsc::TrySendError::Disconnected(returned)) => {
+                    queued = returned;
+                    let Some(recovery) = self.optional_recovery.as_ref() else {
+                        if !self.disconnected_warned.swap(true, Ordering::Relaxed) {
+                            let dropped = DROPPED_AUDIT_EVENTS.load(Ordering::Relaxed);
+                            tracing::warn!(
+                                dropped,
+                                "audit log worker thread has stopped; audit events will be dropped"
+                            );
+                        }
+                        return Ok(());
+                    };
+                    if let Err(err) =
+                        recovery.recover_sender(&self.sender, self.disconnected_warned.as_ref())
+                    {
+                        if !self.disconnected_warned.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(
+                                err = %err,
+                                "audit log worker stopped and automatic recovery failed; dropping audit events"
+                            );
+                        }
+                        return Ok(());
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     pub(super) fn is_required(&self) -> bool {
@@ -289,9 +323,10 @@ impl AuditLogger {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
         Self {
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(sender)),
             disconnected_warned: Arc::new(AtomicBool::new(false)),
             required: true,
+            optional_recovery: None,
         }
     }
 
@@ -314,9 +349,10 @@ impl AuditLogger {
             .expect("spawn blocking audit test worker");
         (
             Self {
-                sender,
+                sender: Arc::new(std::sync::Mutex::new(sender)),
                 disconnected_warned: Arc::new(AtomicBool::new(false)),
                 required: true,
+                optional_recovery: None,
             },
             BlockingRequiredAuditControl {
                 blocked,
@@ -336,9 +372,10 @@ impl AuditLogger {
             .expect("fill required audit queue");
         (
             Self {
-                sender,
+                sender: Arc::new(std::sync::Mutex::new(sender)),
                 disconnected_warned: Arc::new(AtomicBool::new(false)),
                 required: true,
+                optional_recovery: None,
             },
             FullRequiredAuditControl {
                 _receiver: receiver,
@@ -406,11 +443,43 @@ fn open_audit_file(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)
         }
     })?;
 
+    let file = open_audit_append_file(path)?;
+    Ok((lock_file, file))
+}
+
+fn open_audit_append_file(path: &Path) -> anyhow::Result<std::fs::File> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     if !file.metadata()?.is_file() {
         anyhow::bail!("audit.jsonl_path must be a regular file: {path:?}");
     }
-    Ok((lock_file, file))
+    Ok(file)
+}
+
+fn spawn_audit_worker(
+    path: PathBuf,
+    required: bool,
+    flush_every_events: usize,
+    flush_max_interval: Duration,
+) -> anyhow::Result<mpsc::SyncSender<QueuedAuditEvent>> {
+    let (lock_file, file) = open_audit_file(&path)?;
+    let (sender, receiver) = mpsc::sync_channel::<QueuedAuditEvent>(AUDIT_CHANNEL_CAPACITY);
+
+    std::thread::Builder::new()
+        .name("db-vfs-audit".to_string())
+        .spawn(move || {
+            audit_worker(
+                file,
+                receiver,
+                path,
+                lock_file,
+                required,
+                flush_every_events,
+                flush_max_interval,
+            )
+        })
+        .map_err(anyhow::Error::msg)?;
+
+    Ok(sender)
 }
 
 fn is_lock_already_held(err: &std::io::Error) -> bool {
@@ -439,6 +508,58 @@ fn lock_path_for(log_path: &Path) -> PathBuf {
     PathBuf::from(lock_path)
 }
 
+impl OptionalAuditRecovery {
+    fn recover_sender(
+        &self,
+        sender: &std::sync::Mutex<mpsc::SyncSender<QueuedAuditEvent>>,
+        disconnected_warned: &AtomicBool,
+    ) -> anyhow::Result<()> {
+        let _respawn_guard = self
+            .respawn_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit respawn lock poisoned"))?;
+        let rotated = rotate_corrupt_audit_log(&self.path)?;
+        let next_sender = spawn_audit_worker(
+            self.path.clone(),
+            false,
+            self.flush_every_events,
+            self.flush_max_interval,
+        )?;
+        *sender
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit sender lock poisoned"))? = next_sender;
+        disconnected_warned.store(false, Ordering::Release);
+        tracing::warn!(
+            audit_path = %self.path.display(),
+            rotated_path = rotated.as_ref().map(|path| path.display().to_string()),
+            "optional audit worker stopped; rotated previous log and started a new worker"
+        );
+        Ok(())
+    }
+}
+
+fn rotate_corrupt_audit_log(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let rotated = corrupt_audit_log_path(path);
+    std::fs::rename(path, &rotated).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to rotate possibly corrupted audit log {} to {}: {err}",
+            path.display(),
+            rotated.display()
+        )
+    })?;
+    Ok(Some(rotated))
+}
+
+fn corrupt_audit_log_path(path: &Path) -> PathBuf {
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(format!(".corrupt-{}", now_ms()));
+    PathBuf::from(rotated)
+}
+
 fn audit_worker(
     file: std::fs::File,
     receiver: mpsc::Receiver<QueuedAuditEvent>,
@@ -448,29 +569,59 @@ fn audit_worker(
     flush_every_events: usize,
     flush_max_interval: Duration,
 ) {
-    let mut out = BufWriter::new(file);
-    audit_worker_with_writer(
-        &mut out,
+    audit_worker_with_recovery(
+        BufWriter::new(file),
         receiver,
         &path,
         required,
         flush_every_events,
         flush_max_interval,
+        || {
+            recover_optional_audit_writer(&path)
+                .ok()
+                .map(BufWriter::new)
+        },
     );
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn audit_worker_with_writer<W: Write>(
-    out: &mut BufWriter<W>,
+    out: BufWriter<W>,
     receiver: mpsc::Receiver<QueuedAuditEvent>,
     path: &Path,
     required: bool,
     flush_every_events: usize,
     flush_max_interval: Duration,
 ) {
+    audit_worker_with_recovery(
+        out,
+        receiver,
+        path,
+        required,
+        flush_every_events,
+        flush_max_interval,
+        || None::<BufWriter<W>>,
+    );
+}
+
+fn audit_worker_with_recovery<W, Recover>(
+    out: BufWriter<W>,
+    receiver: mpsc::Receiver<QueuedAuditEvent>,
+    path: &Path,
+    required: bool,
+    flush_every_events: usize,
+    flush_max_interval: Duration,
+    mut recover: Recover,
+) where
+    W: Write,
+    Recover: FnMut() -> Option<BufWriter<W>>,
+{
     let mut write_failures: u64 = 0;
     let mut pending: usize = 0;
     let mut last_flush: Instant = Instant::now();
     let mut writer_failed = false;
+    let mut out = Some(out);
 
     loop {
         match receiver.recv_timeout(flush_max_interval) {
@@ -479,7 +630,11 @@ fn audit_worker_with_writer<W: Write>(
                     event.ts_ms = now_ms();
                 }
 
-                if let Err(err) = serde_json::to_writer(&mut *out, &event) {
+                let Some(writer) = out.as_mut() else {
+                    break;
+                };
+
+                if let Err(err) = serde_json::to_writer(writer, &event) {
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
@@ -496,9 +651,26 @@ fn audit_worker_with_writer<W: Write>(
                         &err,
                         "serialize audit event",
                     );
-                    break;
+                    if !try_recover_optional_writer(
+                        required,
+                        &mut out,
+                        &mut pending,
+                        &mut last_flush,
+                        &mut recover,
+                        path,
+                        write_failures,
+                        "serialize audit event",
+                        &err,
+                    ) {
+                        break;
+                    }
+                    writer_failed = false;
+                    continue;
                 }
-                if let Err(err) = out.write_all(b"\n") {
+                let Some(writer) = out.as_mut() else {
+                    break;
+                };
+                if let Err(err) = writer.write_all(b"\n") {
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
@@ -515,11 +687,28 @@ fn audit_worker_with_writer<W: Write>(
                         &err,
                         "append audit newline",
                     );
-                    break;
+                    if !try_recover_optional_writer(
+                        required,
+                        &mut out,
+                        &mut pending,
+                        &mut last_flush,
+                        &mut recover,
+                        path,
+                        write_failures,
+                        "append audit newline",
+                        &err,
+                    ) {
+                        break;
+                    }
+                    writer_failed = false;
+                    continue;
                 }
 
                 if required {
-                    if let Err(err) = out.flush() {
+                    let Some(writer) = out.as_mut() else {
+                        break;
+                    };
+                    if let Err(err) = writer.flush() {
                         write_failures = write_failures.saturating_add(1);
                         writer_failed = true;
                         if let Some(ack) = ack {
@@ -536,7 +725,21 @@ fn audit_worker_with_writer<W: Write>(
                             &err,
                             "flush audit log",
                         );
-                        break;
+                        if !try_recover_optional_writer(
+                            required,
+                            &mut out,
+                            &mut pending,
+                            &mut last_flush,
+                            &mut recover,
+                            path,
+                            write_failures,
+                            "flush audit log",
+                            &err,
+                        ) {
+                            break;
+                        }
+                        writer_failed = false;
+                        continue;
                     }
                     if let Some(ack) = ack {
                         drop(ack.send(Ok(())));
@@ -556,7 +759,10 @@ fn audit_worker_with_writer<W: Write>(
         }
 
         if pending >= flush_every_events || last_flush.elapsed() >= flush_max_interval {
-            if let Err(err) = out.flush() {
+            let Some(writer) = out.as_mut() else {
+                break;
+            };
+            if let Err(err) = writer.flush() {
                 write_failures = write_failures.saturating_add(1);
                 writer_failed = true;
                 log_unrecoverable_write_failure(
@@ -566,7 +772,21 @@ fn audit_worker_with_writer<W: Write>(
                     &err,
                     "flush audit log",
                 );
-                break;
+                if !try_recover_optional_writer(
+                    required,
+                    &mut out,
+                    &mut pending,
+                    &mut last_flush,
+                    &mut recover,
+                    path,
+                    write_failures,
+                    "flush audit log",
+                    &err,
+                ) {
+                    break;
+                }
+                writer_failed = false;
+                continue;
             }
             pending = 0;
             last_flush = Instant::now();
@@ -575,7 +795,8 @@ fn audit_worker_with_writer<W: Write>(
 
     if !writer_failed
         && pending > 0
-        && let Err(err) = out.flush()
+        && let Some(writer) = out.as_mut()
+        && let Err(err) = writer.flush()
     {
         tracing::warn!(
             err = %err,
@@ -583,6 +804,70 @@ fn audit_worker_with_writer<W: Write>(
             "failed to flush audit log during worker shutdown"
         );
     }
+}
+
+fn try_recover_optional_writer<W, Recover>(
+    required: bool,
+    out: &mut Option<BufWriter<W>>,
+    pending: &mut usize,
+    last_flush: &mut Instant,
+    recover: &mut Recover,
+    path: &Path,
+    write_failures: u64,
+    stage: &'static str,
+    _err: &dyn std::fmt::Display,
+) -> bool
+where
+    W: Write,
+    Recover: FnMut() -> Option<BufWriter<W>>,
+{
+    if required {
+        return false;
+    }
+
+    drop(out.take());
+    match recover() {
+        Some(writer) => {
+            *out = Some(writer);
+            *pending = 0;
+            *last_flush = Instant::now();
+            tracing::warn!(
+                audit_path = ?path,
+                write_failures,
+                stage,
+                "optional audit writer recovered after write failure; the failed event was dropped"
+            );
+            true
+        }
+        None => false,
+    }
+}
+
+fn recover_optional_audit_writer(path: &Path) -> anyhow::Result<std::fs::File> {
+    let rotated_path = broken_audit_path(path);
+    if path.exists() {
+        std::fs::rename(path, &rotated_path).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to rotate broken audit log {} to {}: {err}",
+                path.display(),
+                rotated_path.display()
+            )
+        })?;
+    }
+
+    tracing::warn!(
+        audit_path = ?path,
+        rotated_path = ?rotated_path,
+        "rotated broken optional audit log before reopening writer"
+    );
+    open_audit_append_file(path)
+}
+
+fn broken_audit_path(path: &Path) -> PathBuf {
+    let seq = OPTIONAL_AUDIT_RECOVERY_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(format!(".broken-{}-{seq}", now_ms()));
+    PathBuf::from(rotated)
 }
 
 fn log_unrecoverable_write_failure(
@@ -622,6 +907,7 @@ fn format_unrecoverable_write_failure(
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufWriter;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -672,6 +958,57 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct SharedBufferWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedBufferWriter {
+        fn new() -> (Self, Arc<Mutex<Vec<u8>>>) {
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    bytes: bytes.clone(),
+                },
+                bytes,
+            )
+        }
+    }
+
+    impl std::io::Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("lock shared bytes")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    enum TestAuditWriter {
+        Failing(FailAfterPartialWrite),
+        Recovery(SharedBufferWriter),
+    }
+
+    impl std::io::Write for TestAuditWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self {
+                TestAuditWriter::Failing(writer) => writer.write(buf),
+                TestAuditWriter::Recovery(writer) => writer.write(buf),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self {
+                TestAuditWriter::Failing(writer) => writer.flush(),
+                TestAuditWriter::Recovery(writer) => writer.flush(),
+            }
         }
     }
 
@@ -765,9 +1102,10 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         drop(receiver);
         let logger = super::AuditLogger {
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(sender)),
             disconnected_warned: Arc::new(AtomicBool::new(false)),
             required: true,
+            optional_recovery: None,
         };
 
         let err = logger
@@ -828,10 +1166,8 @@ mod tests {
         drop(sender);
 
         let (writer, bytes, writes) = FailAfterPartialWrite::new(64);
-        let mut out = std::io::BufWriter::with_capacity(1, writer);
-
         super::audit_worker_with_writer(
-            &mut out,
+            std::io::BufWriter::with_capacity(1, writer),
             receiver,
             Path::new("audit.jsonl"),
             false,
@@ -855,6 +1191,83 @@ mod tests {
     }
 
     #[test]
+    fn optional_audit_worker_recovers_later_events_when_recovery_writer_is_available() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender
+            .send(super::QueuedAuditEvent {
+                event: super::minimal_event("req-1".to_string(), None, "read", 200, None),
+                ack: None,
+            })
+            .expect("send first event");
+        sender
+            .send(super::QueuedAuditEvent {
+                event: super::minimal_event("req-2".to_string(), None, "read", 200, None),
+                ack: None,
+            })
+            .expect("send second event");
+        drop(sender);
+
+        let (writer, broken_bytes, _) = FailAfterPartialWrite::new(64);
+        let (recovery_writer, recovery_bytes) = SharedBufferWriter::new();
+        let mut recovery_writer = Some(BufWriter::with_capacity(
+            1,
+            TestAuditWriter::Recovery(recovery_writer),
+        ));
+
+        super::audit_worker_with_recovery(
+            BufWriter::with_capacity(1, TestAuditWriter::Failing(writer)),
+            receiver,
+            Path::new("audit.jsonl"),
+            false,
+            1,
+            Duration::from_millis(1),
+            || recovery_writer.take(),
+        );
+
+        let broken_raw = String::from_utf8(broken_bytes.lock().expect("lock broken bytes").clone())
+            .expect("utf8");
+        assert!(broken_raw.contains("req-1"));
+        assert!(!broken_raw.contains("req-2"));
+
+        let recovered_raw =
+            String::from_utf8(recovery_bytes.lock().expect("lock recovery bytes").clone())
+                .expect("utf8");
+        assert!(!recovered_raw.contains("req-1"));
+        assert!(recovered_raw.contains("req-2"));
+    }
+
+    #[test]
+    fn recover_optional_audit_writer_rotates_broken_log_and_reopens_primary_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, b"broken-json").expect("seed broken log");
+
+        let reopened = super::recover_optional_audit_writer(&path).expect("recover optional audit");
+        drop(reopened);
+
+        let reopened_raw = std::fs::read_to_string(&path).expect("read reopened log");
+        assert!(
+            reopened_raw.is_empty(),
+            "reopened primary log should start empty"
+        );
+
+        let rotated = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|entry| {
+                entry != &path
+                    && entry
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("audit.jsonl.broken-"))
+            })
+            .expect("rotated broken log path");
+        let rotated_raw = std::fs::read_to_string(rotated).expect("read rotated log");
+        assert_eq!(rotated_raw, "broken-json");
+    }
+
+    #[test]
     fn required_audit_worker_reports_write_failure_to_caller() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
@@ -867,9 +1280,8 @@ mod tests {
         drop(sender);
 
         let (writer, _, _) = FailAfterPartialWrite::new(8);
-        let mut out = std::io::BufWriter::with_capacity(1, writer);
         super::audit_worker_with_writer(
-            &mut out,
+            std::io::BufWriter::with_capacity(1, writer),
             receiver,
             Path::new("audit.jsonl"),
             true,
@@ -882,5 +1294,62 @@ mod tests {
             .expect("required audit ack")
             .expect_err("required audit should surface write failure");
         assert!(err.contains("serialize audit event") || err.contains("append audit newline"));
+    }
+
+    #[test]
+    fn optional_audit_logger_rotates_corrupt_log_and_recovers_after_disconnect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, "{\"broken\":").expect("seed corrupt audit log");
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(receiver);
+        let logger = super::AuditLogger {
+            sender: Arc::new(std::sync::Mutex::new(sender)),
+            disconnected_warned: Arc::new(AtomicBool::new(false)),
+            required: false,
+            optional_recovery: Some(Arc::new(super::OptionalAuditRecovery {
+                path: path.clone(),
+                flush_every_events: 1,
+                flush_max_interval: Duration::from_millis(1),
+                respawn_lock: std::sync::Mutex::new(()),
+            })),
+        };
+
+        logger
+            .try_log(
+                super::minimal_event("req-recovered".to_string(), None, "read", 200, None),
+                None,
+            )
+            .expect("optional audit logger should recover");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let active = loop {
+            let active = std::fs::read_to_string(&path).unwrap_or_default();
+            if active.contains("req-recovered") {
+                break active;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for recovered audit event"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(active.contains("req-recovered"));
+
+        let rotated = std::fs::read_dir(dir.path())
+            .expect("read tempdir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|candidate| {
+                candidate != &path
+                    && candidate
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("audit.jsonl.corrupt-"))
+            })
+            .expect("rotated corrupt audit log");
+        let rotated_raw = std::fs::read_to_string(rotated).expect("read rotated log");
+        assert_eq!(rotated_raw, "{\"broken\":");
     }
 }
