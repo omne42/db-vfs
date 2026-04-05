@@ -23,6 +23,9 @@
   - 开启 `secrets.redact_regexes` 时，`patch` 不能再对 raw backing text 做 unified diff apply；
     service/vfs 必须显式拒绝这类请求，避免通过 patch context match/no-match 把被遮蔽的 secret
     再次暴露成 oracle。
+  - `patch` 请求里的 unified diff 头路径如果存在，必须和 `request.path` 归一化后指向同一
+    个 root-relative 路径；git 风格 `a/` / `b/` 前缀可以接受，但不能把错文件 patch 静默应用到
+    当前请求目标上。
   - 启用 redaction 规则时，`grep` 的 literal/regex 匹配必须基于 redacted line view，而不是
     hidden raw content；被遮蔽的 secret 不能继续通过 match/no-match 语义泄漏存在性。
   - redaction 路径的原始输入和中间结果都必须受 `max_read_bytes` 约束；当 ranged `read`

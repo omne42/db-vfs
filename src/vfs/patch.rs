@@ -25,6 +25,48 @@ pub struct PatchResponse {
 
 const MAX_PATCH_HUNKS: usize = 512;
 
+fn patch_header_matches_request(header_path: &str, requested_path: &str) -> bool {
+    [
+        Some(header_path),
+        header_path.strip_prefix("a/"),
+        header_path.strip_prefix("b/"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|candidate| normalize_path(candidate).ok())
+    .any(|candidate| candidate == requested_path)
+}
+
+fn validate_patch_header_path(
+    header_kind: &str,
+    header_path: Option<&str>,
+    requested_path: &str,
+) -> Result<()> {
+    let Some(header_path) = header_path else {
+        return Ok(());
+    };
+    if matches!(
+        (header_kind, header_path),
+        ("original", "original") | ("modified", "modified")
+    ) {
+        return Ok(());
+    }
+
+    if patch_header_matches_request(header_path, requested_path) {
+        return Ok(());
+    }
+
+    Err(Error::Patch(format!(
+        "unified diff {header_kind} path {header_path:?} must match request.path {requested_path:?}"
+    )))
+}
+
+fn validate_patch_headers(parsed: &diffy::Patch<'_, str>, requested_path: &str) -> Result<()> {
+    validate_patch_header_path("original", parsed.original(), requested_path)?;
+    validate_patch_header_path("modified", parsed.modified(), requested_path)?;
+    Ok(())
+}
+
 pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: PatchRequest,
@@ -66,6 +108,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
 
     let parsed =
         diffy::Patch::from_str(&request.patch).map_err(|err| Error::Patch(err.to_string()))?;
+    validate_patch_headers(&parsed, &requested_path)?;
     if parsed.hunks().len() > MAX_PATCH_HUNKS {
         let hunk_count = u64::try_from(parsed.hunks().len()).unwrap_or(u64::MAX);
         let max_hunks = u64::try_from(MAX_PATCH_HUNKS).unwrap_or(u64::MAX);
@@ -183,6 +226,7 @@ mod tests {
 
     use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::{SecretRules, VfsPolicy};
+    use diffy::DiffOptions;
 
     struct InconsistentSizeStore {
         meta: FileMeta,
@@ -304,6 +348,81 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             panic!("patch test should not scan through store")
+        }
+    }
+
+    struct RecordingPatchStore {
+        meta: FileMeta,
+        content: String,
+        updated_content: Option<String>,
+        update_calls: usize,
+    }
+
+    impl Store for RecordingPatchStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.meta.path && version == self.meta.version {
+                Ok(Some(self.content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            content: &str,
+            expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            if path != self.meta.path || expected_version != self.meta.version {
+                return Err(Error::Conflict("version mismatch".to_string()));
+            }
+            self.update_calls = self.update_calls.saturating_add(1);
+            self.updated_content = Some(content.to_string());
+            self.meta.version = self.meta.version.saturating_add(1);
+            Ok(self.meta.version)
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
         }
     }
 
@@ -501,5 +620,80 @@ mod tests {
             matching_err.to_string(),
             "operation is not permitted: patch is not supported when secret redaction rules are active"
         );
+    }
+
+    #[test]
+    fn patch_rejects_mismatched_header_paths_before_applying() {
+        let store = RecordingPatchStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "hello\n".to_string(),
+            updated_content: None,
+            update_calls: 0,
+        };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+
+        let patch = "\
+--- docs/other.txt
++++ docs/other.txt
+@@ -1 +1 @@
+-hello
++hullo
+";
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch: patch.to_string(),
+                expected_version: 1,
+            })
+            .expect_err("mismatched patch headers should be rejected");
+
+        assert_eq!(err.code(), "patch");
+        assert!(err.to_string().contains("must match request.path"));
+        assert_eq!(vfs.store_mut().update_calls, 0);
+        assert!(vfs.store_mut().updated_content.is_none());
+    }
+
+    #[test]
+    fn patch_accepts_git_style_header_prefixes_for_requested_path() {
+        let store = RecordingPatchStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            content: "hello\n".to_string(),
+            updated_content: None,
+            update_calls: 0,
+        };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+
+        let patch = DiffOptions::new()
+            .set_original_filename("a/docs/a.txt")
+            .set_modified_filename("b/docs/a.txt")
+            .create_patch("hello\n", "hullo\n")
+            .to_string();
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let resp = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch,
+                expected_version: 1,
+            })
+            .expect("git-style patch headers should be accepted");
+
+        assert_eq!(resp.version, 2);
+        assert_eq!(vfs.store_mut().update_calls, 1);
+        assert_eq!(vfs.store_mut().updated_content.as_deref(), Some("hullo\n"));
     }
 }
