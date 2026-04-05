@@ -182,15 +182,16 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
 
 fn max_body_bytes(policy: &VfsPolicy) -> usize {
     const MAX_BODY_BYTES: u64 = 256 * 1024 * 1024 + 64 * 1024;
+    const MAX_JSON_STRING_EXPANSION: u64 = 6;
     let patch = policy
         .limits
         .max_patch_bytes
         .unwrap_or(policy.limits.max_read_bytes);
+    let max_decoded_string_bytes = policy.limits.max_write_bytes.max(patch);
     let max = policy
         .limits
         .max_read_bytes
-        .max(policy.limits.max_write_bytes)
-        .max(patch);
+        .max(max_decoded_string_bytes.saturating_mul(MAX_JSON_STRING_EXPANSION));
     let max = max.saturating_add(64 * 1024);
     let max = max.min(MAX_BODY_BYTES);
     usize::try_from(max).unwrap_or(usize::MAX)
@@ -636,6 +637,16 @@ mod tests {
             max_body_bytes(&policy),
             (256 * 1024 * 1024 + 64 * 1024) as usize
         );
+    }
+
+    #[test]
+    fn max_body_bytes_accounts_for_worst_case_json_string_escaping() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_read_bytes = 1024;
+        policy.limits.max_write_bytes = 4096;
+        policy.limits.max_patch_bytes = Some(8192);
+
+        assert_eq!(max_body_bytes(&policy), (8192 * 6 + 64 * 1024) as usize);
     }
 
     #[cfg(feature = "sqlite")]
