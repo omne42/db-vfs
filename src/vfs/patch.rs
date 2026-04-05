@@ -25,6 +25,50 @@ pub struct PatchResponse {
 
 const MAX_PATCH_HUNKS: usize = 512;
 
+fn normalized_patch_header_candidates(header: &str) -> Result<Vec<String>> {
+    let header = header.trim();
+    if header.is_empty() || matches!(header, "original" | "modified") {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::with_capacity(2);
+    let raw = normalize_path(header)
+        .map_err(|err| Error::Patch(format!("invalid patch header path {header:?}: {err}")))?;
+    candidates.push(raw);
+
+    if let Some(stripped) = header
+        .strip_prefix("a/")
+        .or_else(|| header.strip_prefix("b/"))
+    {
+        let stripped = normalize_path(stripped)
+            .map_err(|err| Error::Patch(format!("invalid patch header path {header:?}: {err}")))?;
+        if !candidates.iter().any(|candidate| candidate == &stripped) {
+            candidates.push(stripped);
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn validate_patch_header_path(
+    label: &str,
+    header: Option<&str>,
+    requested_path: &str,
+) -> Result<()> {
+    let Some(header) = header else {
+        return Ok(());
+    };
+    let candidates = normalized_patch_header_candidates(header)?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    if candidates.iter().any(|path| path == requested_path) {
+        return Ok(());
+    }
+    Err(Error::Patch(format!(
+        "{label} patch header path {header:?} does not match request path {requested_path:?}"
+    )))
+}
+
 pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: PatchRequest,
@@ -74,6 +118,8 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
             max_bytes: max_hunks,
         });
     }
+    validate_patch_header_path("original", parsed.original(), &requested_path)?;
+    validate_patch_header_path("modified", parsed.modified(), &requested_path)?;
 
     let Some(mut meta) = vfs.store.get_meta(&request.workspace_id, &requested_path)? else {
         return Err(Error::NotFound(format!(
@@ -426,7 +472,10 @@ mod tests {
         policy.limits.max_read_bytes = 4;
         policy.limits.max_patch_bytes = Some(1024);
 
-        let patch = diffy::create_patch("ok", "go").to_string();
+        let patch = diffy::create_patch("ok", "go")
+            .to_string()
+            .replacen("--- original", "--- a/docs/a.txt", 1)
+            .replacen("+++ modified", "+++ b/docs/a.txt", 1);
         let mut vfs = DbVfs::new(store, policy).expect("vfs");
         let resp = vfs
             .apply_unified_patch(PatchRequest {
@@ -500,6 +549,36 @@ mod tests {
         assert_eq!(
             matching_err.to_string(),
             "operation is not permitted: patch is not supported when secret redaction rules are active"
+        );
+    }
+
+    #[test]
+    fn patch_rejects_mismatched_header_paths_before_loading_store_state() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+
+        let mut vfs = DbVfs::new(PanicStore, policy).expect("vfs");
+        let err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch: concat!(
+                    "--- a/docs/other.txt\n",
+                    "+++ b/docs/other.txt\n",
+                    "@@ -1 +1 @@\n",
+                    "-hello\n",
+                    "+goodbye\n",
+                )
+                .to_string(),
+                expected_version: 1,
+            })
+            .expect_err("mismatched patch headers must be rejected before touching the store");
+
+        assert_eq!(err.code(), "patch");
+        assert!(
+            err.to_string()
+                .contains("does not match request path \"docs/a.txt\""),
+            "{err}"
         );
     }
 }

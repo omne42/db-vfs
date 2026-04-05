@@ -45,6 +45,9 @@ Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, requ
 When `secrets.redact_regexes` is active, `/v1/patch` returns `403 not_permitted` instead of
 applying unified diffs against the raw backing text. This closes the otherwise unavoidable oracle
 between redacted `read` / `grep` output and raw-content patch context matching.
+When unified diff headers are present, both file names must normalize to the same request `path`;
+cross-file diffs are rejected with `400 patch` instead of being silently applied to the JSON
+target.
 
 Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
