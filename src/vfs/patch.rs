@@ -252,6 +252,62 @@ mod tests {
         }
     }
 
+    struct PanicStore;
+
+    impl Store for PanicStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            panic!("patch should reject before loading metadata when redaction is active")
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            panic!("patch should reject before loading content when redaction is active")
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            panic!("patch test should not insert through store")
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            panic!("patch test should not update through store")
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            panic!("patch test should not delete through store")
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            panic!("patch test should not scan through store")
+        }
+    }
+
     #[test]
     fn patch_fails_when_actual_content_exceeds_read_limit_even_if_meta_is_stale() {
         let store = InconsistentSizeStore {
@@ -382,6 +438,33 @@ mod tests {
             })
             .expect("patch should succeed after stale meta re-check");
         assert_eq!(resp.version, 2);
+    }
+
+    #[test]
+    fn patch_rejects_malformed_input_before_parsing_or_loading_when_redaction_is_active() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+        policy.secrets = SecretRules {
+            redact_regexes: vec!["secret".to_string()],
+            replacement: "REDACTED".to_string(),
+            ..SecretRules::default()
+        };
+
+        let mut vfs = DbVfs::new(PanicStore, policy).expect("vfs");
+        let err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                patch: "not a unified diff".to_string(),
+                expected_version: 1,
+            })
+            .expect_err("redaction-backed patch should be rejected before parsing or loading");
+
+        assert_eq!(err.code(), "not_permitted");
+        assert_eq!(
+            err.to_string(),
+            "operation is not permitted: patch is not supported when secret redaction rules are active"
+        );
     }
 
     #[test]
