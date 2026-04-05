@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use db_vfs_core::{Error, Result};
 
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
-const DEFAULT_RANGE_READ_CHUNK_CHARS: usize = 4096;
+const MAX_UTF8_CHAR_BYTES: usize = 4;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
 
 static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
@@ -241,6 +241,7 @@ pub trait Store {
         max_bytes: u64,
     ) -> Result<Option<LineRangeData>> {
         let chunk_chars = range_read_chunk_chars(max_bytes);
+        let chunk_byte_budget = range_read_chunk_byte_budget(max_bytes);
         let mut start_char = 1u64;
         let mut current_line = 1u64;
         let mut bytes_read = 0u64;
@@ -255,6 +256,7 @@ pub trait Store {
             else {
                 return Ok(None);
             };
+            let (chunk, chunk_char_count) = trim_range_read_chunk(chunk, chunk_byte_budget)?;
             if chunk.is_empty() {
                 let mut pos = 0usize;
                 while let Some((next_pos, segment)) = next_line_segment_from(&carry, pos, true) {
@@ -295,8 +297,6 @@ pub trait Store {
             }
 
             saw_content = true;
-            let chunk_char_count = u64::try_from(chunk.chars().count())
-                .map_err(|_| Error::Db("integer overflow converting chunk size".to_string()))?;
             carry.push_str(&chunk);
 
             let mut consumed = 0usize;
@@ -471,8 +471,42 @@ fn legacy_range_read_fallback_warn_count_for_test() -> usize {
 }
 
 fn range_read_chunk_chars(max_bytes: u64) -> usize {
-    let budget_chars = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
-    budget_chars.clamp(DEFAULT_RANGE_READ_CHUNK_CHARS, MAX_RANGE_READ_CHUNK_CHARS)
+    let budget_bytes = range_read_chunk_byte_budget(max_bytes);
+    budget_bytes
+        .saturating_add(MAX_UTF8_CHAR_BYTES - 1)
+        .saturating_div(MAX_UTF8_CHAR_BYTES)
+        .clamp(1, MAX_RANGE_READ_CHUNK_CHARS)
+}
+
+fn range_read_chunk_byte_budget(max_bytes: u64) -> usize {
+    usize::try_from(max_bytes).unwrap_or(usize::MAX)
+}
+
+fn trim_range_read_chunk(chunk: String, byte_budget: usize) -> Result<(String, u64)> {
+    if chunk.is_empty() {
+        return Ok((chunk, 0));
+    }
+
+    let effective_budget = byte_budget.max(1);
+    let mut end = 0usize;
+    let mut chars = 0u64;
+    for (idx, ch) in chunk.char_indices() {
+        let next_end = idx.saturating_add(ch.len_utf8());
+        if chars > 0 && next_end > effective_budget {
+            break;
+        }
+        end = next_end;
+        chars = chars.saturating_add(1);
+        if next_end >= effective_budget {
+            break;
+        }
+    }
+
+    if end == chunk.len() {
+        return Ok((chunk, chars));
+    }
+
+    Ok((chunk[..end].to_string(), chars))
 }
 
 fn append_range_segment(content: &mut String, bytes_read: &mut u64, max_bytes: u64, segment: &str) {
@@ -951,6 +985,7 @@ mod tests {
     struct ChunkOnlyStore {
         content: String,
         chunk_chars: usize,
+        requested_max_chars: Vec<usize>,
     }
 
     impl Store for ChunkOnlyStore {
@@ -975,6 +1010,7 @@ mod tests {
             start_char: u64,
             max_chars: usize,
         ) -> Result<Option<String>> {
+            self.requested_max_chars.push(max_chars);
             let take = max_chars.min(self.chunk_chars);
             let start_idx = usize::try_from(start_char.saturating_sub(1))
                 .map_err(|_| Error::Db("integer overflow converting start_char".to_string()))?;
@@ -1080,6 +1116,7 @@ mod tests {
         let mut store = ChunkOnlyStore {
             content: "line1\r\nline2\r\n".to_string(),
             chunk_chars: 4,
+            requested_max_chars: Vec::new(),
         };
 
         let range = store
@@ -1093,6 +1130,56 @@ mod tests {
                 bytes_read: 7,
                 total_lines: 2,
             }
+        );
+    }
+
+    #[test]
+    fn range_read_chunk_chars_scales_multibyte_budget_conservatively() {
+        assert_eq!(range_read_chunk_chars(1), 1);
+        assert_eq!(range_read_chunk_chars(4), 1);
+        assert_eq!(range_read_chunk_chars(5), 2);
+        assert_eq!(range_read_chunk_chars(8), 2);
+    }
+
+    #[test]
+    fn trim_range_read_chunk_keeps_first_multibyte_scalar_for_tiny_budget() {
+        let (chunk, chars) = trim_range_read_chunk("你好".to_string(), 1).expect("trim chunk");
+        assert_eq!(chunk, "你");
+        assert_eq!(chars, 1);
+    }
+
+    #[test]
+    fn default_range_read_impl_bounds_multibyte_chunk_requests_by_byte_budget() {
+        let _guard = LEGACY_RANGE_READ_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy range read fallback test state");
+        reset_legacy_range_read_fallback_warning_for_test();
+        let mut store = ChunkOnlyStore {
+            content: "你你\n好好\n".to_string(),
+            chunk_chars: usize::MAX,
+            requested_max_chars: Vec::new(),
+        };
+
+        let range = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 12)
+            .expect("load line range")
+            .expect("range data");
+
+        assert_eq!(
+            range,
+            LineRangeData {
+                content: Some("好好\n".to_string()),
+                bytes_read: 7,
+                total_lines: 2,
+            }
+        );
+        assert!(
+            store
+                .requested_max_chars
+                .iter()
+                .all(|&max_chars| max_chars <= 3),
+            "expected conservative char requests, got {:?}",
+            store.requested_max_chars
         );
     }
 
