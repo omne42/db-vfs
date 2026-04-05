@@ -654,14 +654,17 @@ fn audit_worker_with_recovery<W, Recover>(
                     );
                     if !try_recover_optional_writer(
                         required,
-                        &mut out,
-                        &mut pending,
-                        &mut last_flush,
-                        &mut recover,
-                        path,
-                        write_failures,
-                        "serialize audit event",
-                        &err,
+                        OptionalWriterRecoveryState {
+                            out: &mut out,
+                            pending: &mut pending,
+                            last_flush: &mut last_flush,
+                            recover: &mut recover,
+                        },
+                        OptionalWriterRecoveryMeta {
+                            path,
+                            write_failures,
+                            stage: "serialize audit event",
+                        },
                     ) {
                         break;
                     }
@@ -690,14 +693,17 @@ fn audit_worker_with_recovery<W, Recover>(
                     );
                     if !try_recover_optional_writer(
                         required,
-                        &mut out,
-                        &mut pending,
-                        &mut last_flush,
-                        &mut recover,
-                        path,
-                        write_failures,
-                        "append audit newline",
-                        &err,
+                        OptionalWriterRecoveryState {
+                            out: &mut out,
+                            pending: &mut pending,
+                            last_flush: &mut last_flush,
+                            recover: &mut recover,
+                        },
+                        OptionalWriterRecoveryMeta {
+                            path,
+                            write_failures,
+                            stage: "append audit newline",
+                        },
                     ) {
                         break;
                     }
@@ -728,14 +734,17 @@ fn audit_worker_with_recovery<W, Recover>(
                         );
                         if !try_recover_optional_writer(
                             required,
-                            &mut out,
-                            &mut pending,
-                            &mut last_flush,
-                            &mut recover,
-                            path,
-                            write_failures,
-                            "flush audit log",
-                            &err,
+                            OptionalWriterRecoveryState {
+                                out: &mut out,
+                                pending: &mut pending,
+                                last_flush: &mut last_flush,
+                                recover: &mut recover,
+                            },
+                            OptionalWriterRecoveryMeta {
+                                path,
+                                write_failures,
+                                stage: "flush audit log",
+                            },
                         ) {
                             break;
                         }
@@ -775,14 +784,17 @@ fn audit_worker_with_recovery<W, Recover>(
                 );
                 if !try_recover_optional_writer(
                     required,
-                    &mut out,
-                    &mut pending,
-                    &mut last_flush,
-                    &mut recover,
-                    path,
-                    write_failures,
-                    "flush audit log",
-                    &err,
+                    OptionalWriterRecoveryState {
+                        out: &mut out,
+                        pending: &mut pending,
+                        last_flush: &mut last_flush,
+                        recover: &mut recover,
+                    },
+                    OptionalWriterRecoveryMeta {
+                        path,
+                        write_failures,
+                        stage: "flush audit log",
+                    },
                 ) {
                     break;
                 }
@@ -807,16 +819,27 @@ fn audit_worker_with_recovery<W, Recover>(
     }
 }
 
-fn try_recover_optional_writer<W, Recover>(
-    required: bool,
-    out: &mut Option<BufWriter<W>>,
-    pending: &mut usize,
-    last_flush: &mut Instant,
-    recover: &mut Recover,
-    path: &Path,
+struct OptionalWriterRecoveryState<'a, W, Recover>
+where
+    W: Write,
+    Recover: FnMut() -> Option<BufWriter<W>>,
+{
+    out: &'a mut Option<BufWriter<W>>,
+    pending: &'a mut usize,
+    last_flush: &'a mut Instant,
+    recover: &'a mut Recover,
+}
+
+struct OptionalWriterRecoveryMeta<'a> {
+    path: &'a Path,
     write_failures: u64,
     stage: &'static str,
-    _err: &dyn std::fmt::Display,
+}
+
+fn try_recover_optional_writer<W, Recover>(
+    required: bool,
+    state: OptionalWriterRecoveryState<'_, W, Recover>,
+    meta: OptionalWriterRecoveryMeta<'_>,
 ) -> bool
 where
     W: Write,
@@ -825,6 +848,18 @@ where
     if required {
         return false;
     }
+
+    let OptionalWriterRecoveryState {
+        out,
+        pending,
+        last_flush,
+        recover,
+    } = state;
+    let OptionalWriterRecoveryMeta {
+        path,
+        write_failures,
+        stage,
+    } = meta;
 
     drop(out.take());
     match recover() {
