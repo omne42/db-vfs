@@ -108,6 +108,8 @@ lifetime by accident.
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
+- Embedded callers should keep auth enabled by default too; programmatic no-auth now requires an
+  explicit `db_vfs_service::server::BuilderAuthMode` opt-in instead of a bare boolean.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
 - `auth.tokens[*].token_env_var` always carries the raw bearer token; only
   `auth.tokens[*].token` accepts a pre-hashed `sha256:<64 hex>` value.

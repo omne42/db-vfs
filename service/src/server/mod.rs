@@ -64,6 +64,19 @@ enum RequestClass {
     Scan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuilderAuthMode {
+    Enforced,
+    UnsafeNoAuthLoopbackOnly,
+    UnsafeNoAuthAllowNonLoopback,
+}
+
+impl BuilderAuthMode {
+    fn unsafe_no_auth(self) -> bool {
+        !matches!(self, Self::Enforced)
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 struct ErrorBody {
     code: &'static str,
@@ -249,7 +262,7 @@ async fn try_acquire_required_audit_gate_for_path(
 
 fn prepare_state(
     policy: ValidatedVfsPolicy,
-    unsafe_no_auth: bool,
+    auth_mode: BuilderAuthMode,
 ) -> anyhow::Result<PreparedState> {
     let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&policy);
     if estimated_scan_inflight_bytes > RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES {
@@ -268,7 +281,7 @@ fn prepare_state(
     let io_concurrency = policy.limits.max_concurrency_io;
     let scan_concurrency = policy.limits.max_concurrency_scan;
     let rate_limiter = rate_limiter::RateLimiter::new(&policy);
-    let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
+    let auth = auth::build_auth_mode(&policy, auth_mode.unsafe_no_auth())?;
     let audit = if let Some(path) = policy.audit.jsonl_path.as_deref() {
         let flush_every_events = policy
             .audit
@@ -308,7 +321,7 @@ fn prepare_state(
         .map(|rule| rule.allowed_workspaces.len())
         .sum();
     tracing::info!(
-        auth_enabled = !unsafe_no_auth,
+        auth_enabled = !auth_mode.unsafe_no_auth(),
         auth_token_count,
         auth_allowed_workspace_patterns,
         "auth configuration loaded"
@@ -344,6 +357,17 @@ fn build_state(backend: backend::Backend, prepared: PreparedState) -> (AppState,
     };
 
     (state, prepared.body_limit)
+}
+
+fn legacy_builder_auth_mode(unsafe_no_auth: bool) -> anyhow::Result<BuilderAuthMode> {
+    if unsafe_no_auth {
+        anyhow::bail!(
+            "public bool-based builders no longer accept unsafe_no_auth=true; \
+use build_app*_with_auth_mode(..., BuilderAuthMode::UnsafeNoAuthLoopbackOnly) \
+or BuilderAuthMode::UnsafeNoAuthAllowNonLoopback to make unauthenticated exposure explicit"
+        );
+    }
+    Ok(BuilderAuthMode::Enforced)
 }
 
 fn build_router(state: AppState, body_limit: usize) -> Router {
@@ -449,13 +473,13 @@ pub(in crate::server) fn test_state_with_policy_and_audit(
 }
 
 #[cfg(feature = "sqlite")]
-pub fn build_app_sqlite(
+pub fn build_app_sqlite_with_auth_mode(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
-    unsafe_no_auth: bool,
+    auth_mode: BuilderAuthMode,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
-    let prepared = prepare_state(policy, unsafe_no_auth)?;
+    let prepared = prepare_state(policy, auth_mode)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
     let manager = sqlite_connection_manager(&db_path, migration_timeout);
     let max_pool_size = sqlite_pool_max_size(&db_path, prepared.policy.limits.max_db_connections);
@@ -482,13 +506,13 @@ pub fn build_app_sqlite(
 }
 
 #[cfg(feature = "postgres")]
-pub fn build_app_postgres(
+pub fn build_app_postgres_with_auth_mode(
     url: String,
     policy: VfsPolicy,
-    unsafe_no_auth: bool,
+    auth_mode: BuilderAuthMode,
 ) -> anyhow::Result<Router> {
     let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
-    let prepared = prepare_state(policy, unsafe_no_auth)?;
+    let prepared = prepare_state(policy, auth_mode)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
 
     let mut config: r2d2_postgres::postgres::Config = url.parse()?;
@@ -515,17 +539,59 @@ pub fn build_app_postgres(
 #[cfg(feature = "sqlite")]
 /// Convenience entrypoint using the SQLite backend.
 ///
-/// For PostgreSQL, call `build_app_postgres` when the `postgres` feature is enabled.
+/// This legacy bool-based API only supports the safe default (`unsafe_no_auth = false`). Call
+/// [`build_app_sqlite_with_auth_mode`] when you intentionally need unauthenticated mode and want
+/// that exposure to stay explicit at the call site.
+pub fn build_app_sqlite(
+    db_path: std::path::PathBuf,
+    policy: VfsPolicy,
+    unsafe_no_auth: bool,
+) -> anyhow::Result<Router> {
+    build_app_sqlite_with_auth_mode(db_path, policy, legacy_builder_auth_mode(unsafe_no_auth)?)
+}
+
+#[cfg(feature = "postgres")]
+/// Convenience entrypoint using the Postgres backend.
+///
+/// This legacy bool-based API only supports the safe default (`unsafe_no_auth = false`). Call
+/// [`build_app_postgres_with_auth_mode`] when you intentionally need unauthenticated mode and
+/// want that exposure to stay explicit at the call site.
+pub fn build_app_postgres(
+    url: String,
+    policy: VfsPolicy,
+    unsafe_no_auth: bool,
+) -> anyhow::Result<Router> {
+    build_app_postgres_with_auth_mode(url, policy, legacy_builder_auth_mode(unsafe_no_auth)?)
+}
+
+#[cfg(feature = "sqlite")]
+/// Convenience entrypoint using the SQLite backend.
+///
+/// For PostgreSQL, call `build_app_postgres_with_auth_mode` when the `postgres` feature is enabled.
 ///
 /// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When no peer
 /// address is installed by the outer server, request handling still succeeds; audit `peer_ip`
 /// stays unset and rate limiting falls back to the shared unspecified-IP bucket.
+pub fn build_app_with_auth_mode(
+    db_path: std::path::PathBuf,
+    policy: VfsPolicy,
+    auth_mode: BuilderAuthMode,
+) -> anyhow::Result<Router> {
+    build_app_sqlite_with_auth_mode(db_path, policy, auth_mode)
+}
+
+#[cfg(feature = "sqlite")]
+/// Convenience entrypoint using the SQLite backend.
+///
+/// This legacy bool-based API only supports the safe default (`unsafe_no_auth = false`). Call
+/// [`build_app_with_auth_mode`] with an explicit [`BuilderAuthMode`] when you intentionally need
+/// unauthenticated mode.
 pub fn build_app(
     db_path: std::path::PathBuf,
     policy: VfsPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    build_app_sqlite(db_path, policy, unsafe_no_auth)
+    build_app_with_auth_mode(db_path, policy, legacy_builder_auth_mode(unsafe_no_auth)?)
 }
 
 #[cfg(test)]
@@ -549,7 +615,14 @@ mod tests {
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
         policy.audit.required = false;
 
-        assert!(build_app_sqlite(db_path, policy, true).is_ok());
+        assert!(
+            build_app_sqlite_with_auth_mode(
+                db_path,
+                policy,
+                BuilderAuthMode::UnsafeNoAuthLoopbackOnly
+            )
+            .is_ok()
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -563,7 +636,12 @@ mod tests {
         let mut policy = VfsPolicy::default();
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
 
-        let err = build_app_sqlite(db_path.clone(), policy, true).expect_err("should fail");
+        let err = build_app_sqlite_with_auth_mode(
+            db_path.clone(),
+            policy,
+            BuilderAuthMode::UnsafeNoAuthLoopbackOnly,
+        )
+        .expect_err("should fail");
         assert!(
             err.to_string()
                 .contains("audit.jsonl_path must be a regular file")
@@ -589,6 +667,17 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn legacy_bool_builders_reject_unsafe_no_auth() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+
+        let err = build_app_sqlite(db_path, VfsPolicy::default(), true)
+            .expect_err("legacy bool builder should reject unsafe_no_auth=true");
+        assert!(err.to_string().contains("build_app*_with_auth_mode"));
+    }
+
     #[test]
     fn prepare_state_keeps_validated_policy_as_the_real_config_source() {
         let mut raw = VfsPolicy::default();
@@ -599,7 +688,7 @@ mod tests {
         }];
 
         let validated = ValidatedVfsPolicy::new(raw).expect("validated policy");
-        let prepared = prepare_state(validated, false).expect("prepared state");
+        let prepared = prepare_state(validated, BuilderAuthMode::Enforced).expect("prepared state");
 
         assert_eq!(prepared.policy.auth.tokens.len(), 1);
         assert_eq!(

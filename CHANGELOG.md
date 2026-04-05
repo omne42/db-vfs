@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
+- service/builders: make unauthenticated embedded Router construction require an explicit `BuilderAuthMode` instead of silently accepting `unsafe_no_auth=true` through the legacy bool helpers.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
 - core/policy: make omitted `limits.max_walk_ms` deserialize to the default `Some(2000)` scan budget.

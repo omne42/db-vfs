@@ -6,6 +6,8 @@ Use this checklist for production:
 
 - [ ] run behind HTTPS/TLS end-to-end;
 - [ ] keep auth enabled (do **not** use `--unsafe-no-auth`);
+- [ ] if you embed the Router from Rust, stay on `BuilderAuthMode::Enforced` by default; only use
+  the explicit unauthenticated builder modes when that risk is intentional and reviewed;
 - [ ] scope tokens with `allowed_workspaces` (avoid `*`);
 - [ ] keep `workspace_id` values literal; do not treat `*` as a valid namespace character;
 - [ ] set rate limiting (`limits.max_requests_per_ip_per_sec` and burst);
