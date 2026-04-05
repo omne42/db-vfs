@@ -361,8 +361,6 @@ fn literal_glob_prefix(pattern: &str) -> Option<String> {
 }
 
 fn audit_path_probes(path: &str) -> Vec<String> {
-    const MAX_PATH_PROBES: usize = 64;
-
     let normalized = path.trim().replace('\\', "/");
     if normalized.is_empty() {
         return Vec::new();
@@ -383,17 +381,14 @@ fn audit_path_probes(path: &str) -> Vec<String> {
             continue;
         }
 
-        push_unique(&mut probes, segment.clone(), MAX_PATH_PROBES);
+        push_unique_unbounded(&mut probes, segment.clone());
         let joined = if current.is_empty() {
             segment
         } else {
             format!("{current}/{segment}")
         };
-        push_unique(&mut probes, joined.clone(), MAX_PATH_PROBES);
+        push_unique_unbounded(&mut probes, joined.clone());
         current = joined;
-        if probes.len() >= MAX_PATH_PROBES {
-            break;
-        }
     }
 
     probes
@@ -586,6 +581,13 @@ fn push_unique(values: &mut Vec<String>, candidate: String, limit: usize) {
     values.push(candidate);
 }
 
+fn push_unique_unbounded(values: &mut Vec<String>, candidate: String) {
+    if values.iter().any(|value| value == &candidate) {
+        return;
+    }
+    values.push(candidate);
+}
+
 fn preserved_line_break_bytes(matched: &str) -> usize {
     matched
         .bytes()
@@ -755,6 +757,22 @@ mod tests {
     }
 
     #[test]
+    fn path_or_any_descendant_is_denied_checks_late_secret_segments() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        let deep_prefix = (0..80)
+            .map(|idx| format!("dir{idx}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let malformed = format!("{deep_prefix}/.env/../visible.txt");
+
+        assert!(redactor.path_or_any_descendant_is_denied(&malformed));
+        assert_eq!(
+            redactor.redact_audit_path(&malformed),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+    }
+
+    #[test]
     fn glob_may_match_denied_path_uses_real_glob_matching() {
         let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
 
@@ -762,6 +780,22 @@ mod tests {
         assert!(redactor.glob_may_match_denied_path(".{envrc,netrc}"));
         assert!(redactor.glob_may_match_denied_path("docs/**/.env*"));
         assert!(!redactor.glob_may_match_denied_path("docs/*.txt"));
+    }
+
+    #[test]
+    fn glob_may_match_denied_path_checks_late_secret_segments() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        let deep_prefix = (0..80)
+            .map(|idx| format!("dir{idx}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        let malformed = format!("{deep_prefix}/.env/../*.txt");
+
+        assert!(redactor.glob_may_match_denied_path(&malformed));
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(&malformed),
+            AUDIT_SECRET_PLACEHOLDER
+        );
     }
 
     #[test]

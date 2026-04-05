@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-handlers+core/redaction: keep the original concurrency permit held through required-audit waits for JSON/workspace early rejects too, and drive audit glob redaction from real deny-glob matching so secret patterns like `.[en]nv` no longer leak into JSONL.
 - core/policy+vfs: make `ValidatedVfsPolicy::new()` prove policy-derived matcher construction up front, so validated-policy constructor families no longer carry a reachable matcher fallback panic path.
 - service/audit-redaction: conservatively mask malformed secret-ish request paths in audit fields, so inputs like `.env/../visible.txt` or control-character variants do not leak denied roots into JSONL.
+- core/audit-redaction: remove the fixed malformed-path probe cap from audit secret detection so deep secret-ish path/glob segments still redact instead of leaking after many benign prefixes.
 - store/vfs/read: finish the chunked no-redaction ranged-read path across the `Store` trait plus SQLite/Postgres backends, so narrow line-range reads no longer require whole-file materialization.
 - store/sqlite+postgres: make versioned delete distinguish `conflict` from `not_found` without a post-delete race window, and add regression coverage for the three-way outcome.
 - service/postgres: set `statement_timeout` per checked-out request budget so scan operations honor `max_walk_ms` semantics instead of inheriting `max_io_ms`.
