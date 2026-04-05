@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use clap::{ArgGroup, Parser};
 
 use db_vfs_service::TrustMode;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use db_vfs_service::server::UnsafeNoAuthMode;
 
 #[derive(Debug, Parser)]
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let policy =
         db_vfs_service::policy_io::load_policy(&args.policy, args.trust_mode, args.unsafe_no_auth)?;
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     let unsafe_no_auth_mode = if args.unsafe_no_auth {
         if args.unsafe_no_auth_allow_non_loopback {
             UnsafeNoAuthMode::AllowAnyPeer
