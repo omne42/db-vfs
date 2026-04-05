@@ -30,11 +30,21 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     request: PatchRequest,
 ) -> Result<PatchResponse> {
     vfs.ensure_allowed(vfs.policy.permissions.patch, "patch")?;
+    if vfs.redactor.has_redact_rules() {
+        return Err(Error::NotPermitted(
+            "patch is not supported when secret redaction rules are active".to_string(),
+        ));
+    }
     validate_workspace_id(&request.workspace_id)?;
 
     let requested_path = normalize_path(&request.path)?;
     if vfs.redactor.is_path_denied(&requested_path) {
         return Err(Error::SecretPathDenied(requested_path));
+    }
+    if vfs.redactor.has_redact_rules() {
+        return Err(Error::NotPermitted(
+            "patch is not supported when secrets.redact_regexes are active".to_string(),
+        ));
     }
     if request.expected_version > i64::MAX as u64 {
         return Err(Error::Conflict(format!(

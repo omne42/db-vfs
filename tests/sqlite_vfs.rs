@@ -202,6 +202,38 @@ fn write_rejects_expected_version_overflow() {
 }
 
 #[test]
+fn patch_is_rejected_when_secret_redaction_rules_are_active() {
+    let mut policy = policy_all_perms();
+    policy.secrets.redact_regexes = vec!["secret".to_string()];
+    policy.secrets.replacement = "REDACTED".to_string();
+    let mut vfs = open_vfs(policy);
+
+    let write = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "secret\npublic\n".to_string(),
+            expected_version: None,
+        })
+        .expect("seed write");
+
+    let patch = diffy::create_patch("REDACTED\npublic\n", "REDACTED\nPUBLIC\n").to_string();
+    let err = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            patch,
+            expected_version: write.version,
+        })
+        .expect_err("patch should be rejected when redaction rules are active");
+    assert_eq!(err.code(), "not_permitted");
+    assert!(
+        err.to_string()
+            .contains("patch is not supported when secret redaction rules are active")
+    );
+}
+
+#[test]
 fn delete_ignore_missing_returns_deleted_false() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);
@@ -486,6 +518,44 @@ fn patch_rejects_expected_version_overflow() {
         })
         .expect_err("should reject expected_version overflow");
     assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn patch_is_rejected_when_secret_redaction_rules_are_active() {
+    let mut policy = policy_all_perms();
+    policy.secrets.redact_regexes = vec!["secret".to_string()];
+    policy.secrets.replacement = "REDACTED".to_string();
+    let mut vfs = open_vfs(policy);
+
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "docs/a.txt".to_string(),
+        content: "secret\npublic\n".to_string(),
+        expected_version: None,
+    })
+    .expect("seed write");
+
+    let err = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            expected_version: 1,
+            patch: concat!(
+                "--- a/docs/a.txt\n",
+                "+++ b/docs/a.txt\n",
+                "@@ -1,2 +1,2 @@\n",
+                "-REDACTED\n",
+                "+changed\n",
+                " public\n",
+            )
+            .to_string(),
+        })
+        .expect_err("patch should be rejected when redaction rules are active");
+    assert_eq!(err.code(), "not_permitted");
+    assert!(
+        err.to_string()
+            .contains("patch is not supported when secrets.redact_regexes are active")
+    );
 }
 
 #[test]
