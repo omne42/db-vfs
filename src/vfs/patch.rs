@@ -181,7 +181,6 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
 mod tests {
     use super::*;
 
-    use crate::store::sqlite::SqliteStore;
     use crate::store::{DeleteOutcome, FileMeta, Store};
     use db_vfs_core::policy::{SecretRules, VfsPolicy};
 
@@ -469,11 +468,6 @@ mod tests {
 
     #[test]
     fn patch_is_rejected_when_secret_redaction_rules_are_active() {
-        let mut store = SqliteStore::open_in_memory().expect("sqlite");
-        store
-            .insert_file_new("ws", "docs/a.txt", "secret\npublic\n", 1)
-            .expect("seed file");
-
         let mut policy = VfsPolicy::default();
         policy.permissions.patch = true;
         policy.secrets = SecretRules {
@@ -482,7 +476,7 @@ mod tests {
             ..SecretRules::default()
         };
 
-        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let mut vfs = DbVfs::new(PanicStore, policy).expect("vfs");
         let matching_err = vfs
             .apply_unified_patch(PatchRequest {
                 workspace_id: "ws".to_string(),
