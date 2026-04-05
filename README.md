@@ -87,7 +87,9 @@ rules, the store can stop after the requested range instead of materializing the
 secret redaction rules are active, both the raw backing file and the redacted whole-file
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
 before slice extraction. Line-oriented reads treat `\n`, `\r\n`, and lone `\r` as equivalent line
-boundaries, including mixed-ending files.
+boundaries, including mixed-ending files. The chunked no-redaction path derives progress
+conservatively from the byte budget, so multi-byte UTF-8 content cannot reinterpret
+`max_read_bytes` as an equally large character budget.
 
 `grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and

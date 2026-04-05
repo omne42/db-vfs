@@ -122,7 +122,9 @@ rules, the store can stop after the requested range instead of materializing the
 secret redaction rules are active, both the raw backing file and the redacted whole-file
 intermediate must fit within the same budget; otherwise the request fails with `file_too_large`
 before slice extraction. Line-oriented reads treat `\n`, `\r\n`, and lone `\r` as equivalent line
-boundaries, including mixed-ending files.
+boundaries, including mixed-ending files. The chunked no-redaction path derives progress
+conservatively from the byte budget, so multi-byte UTF-8 content cannot reinterpret
+`max_read_bytes` as an equally large character budget.
 
 `grep` is line-oriented for both literal and regex queries. `regex = true` patterns that can
 consume `\n` or `\r` are rejected instead of silently behaving like whole-file regex search, and
@@ -428,6 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/runtime: keep the validated policy in service state intact after auth setup instead of mutating it into a token-cleared shadow copy, so the in-memory policy remains the single config source seen by later runtime stages and tests.
 - vfs/grep: short-circuit newline-containing literal queries before file-size gating so impossible line matches no longer inflate `skipped_too_large_files`, while also skipping unnecessary hot-path checks.
 - vfs/read: simplify newline-scan index arithmetic in line-range extraction (bounds-proven `+` instead of saturating math) to trim per-line CPU overhead.
+- store/vfs/read: derive chunked ranged-read progress from byte budgets instead of raw character counts, so multi-byte UTF-8 content can no longer inflate no-redaction line-range traversal work beyond a single-scalar boundary.
 - vfs/grep: short-circuit literal queries containing `\n` before content fetch so line-based impossible matches no longer trigger unnecessary `get_content` I/O on scanned files.
 - service/audit: make `audit_preview` enforce the configured byte budget even when adding the truncation marker, avoiding oversize preview fields on truncated inputs.
 - vfs/grep: skip impossible per-line scan work when a literal query contains `\n` (line-based grep cannot match newline-delimited literals), and trim per-match hot-path overhead by using a saturating line counter plus deferred text allocation until response-byte budget passes.
@@ -507,7 +510,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `db-vfs-core`: Policy + Secrets + Limits, error codes, path normalization, deny+redaction helpers.
 
 
 ---
@@ -930,7 +932,7 @@ Request fields:
 | --- | --- | --- | --- |
 | `workspace_id` | string | yes | literal namespace; no whitespace, path separators, `:`, `..`, or `*` |
 | `path` | string | yes | root-relative path |
-| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file |
+| `start_line` | u64|null | no | must pair with `end_line`; `max_read_bytes` applies to the returned slice. Without secret redaction rules, the store may stop once the requested range is collected instead of materializing the whole file, and chunked traversal derives progress conservatively from the byte budget so UTF-8 content cannot reinterpret that limit as an equally large character budget |
 | `end_line` | u64|null | no | must pair with `start_line`; multi-line redaction preserves line numbering before the slice is selected, and redaction-enabled ranged reads require both the raw file and any redacted whole-file intermediate to stay within `max_read_bytes`. Line boundaries treat `\n`, `\r\n`, and lone `\r` equivalently, including mixed-ending files |
 
 Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`, `start_line`, `end_line`, `version`.

@@ -78,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/runtime: keep the validated policy in service state intact after auth setup instead of mutating it into a token-cleared shadow copy, so the in-memory policy remains the single config source seen by later runtime stages and tests.
 - vfs/grep: short-circuit newline-containing literal queries before file-size gating so impossible line matches no longer inflate `skipped_too_large_files`, while also skipping unnecessary hot-path checks.
 - vfs/read: simplify newline-scan index arithmetic in line-range extraction (bounds-proven `+` instead of saturating math) to trim per-line CPU overhead.
+- store/vfs/read: derive chunked ranged-read progress from byte budgets instead of raw character counts, so multi-byte UTF-8 content can no longer inflate no-redaction line-range traversal work beyond a single-scalar boundary.
 - vfs/grep: short-circuit literal queries containing `\n` before content fetch so line-based impossible matches no longer trigger unnecessary `get_content` I/O on scanned files.
 - service/audit: make `audit_preview` enforce the configured byte budget even when adding the truncation marker, avoiding oversize preview fields on truncated inputs.
 - vfs/grep: skip impossible per-line scan work when a literal query contains `\n` (line-based grep cannot match newline-delimited literals), and trim per-match hot-path overhead by using a saturating line counter plus deferred text allocation until response-byte budget passes.
