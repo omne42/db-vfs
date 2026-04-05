@@ -97,6 +97,9 @@ Secrets semantics:
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
 - `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` expect
   caller-supplied matchers to match that same policy and fail fast on mismatch.
+- `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
+  against raw stored text would otherwise let callers probe masked content through context-match
+  success or failure.
 - Multi-line `secrets.redact_regexes` matches are redacted with original line-break structure preserved so ranged `read` and `grep` stay line-oriented.
 - Redaction-enabled ranged `read` rejects raw files larger than `max_read_bytes` before full-content load, and also rejects redacted whole-file intermediates that would overflow the same budget.
 
@@ -120,3 +123,7 @@ panic-driven connection abort. Required-audit queue saturation also fails closed
 the same error instead of blocking forever on the enqueue path. That error means the request
 outcome may already be committed, so callers should verify state before retrying non-idempotent
 writes.
+
+When `audit.required = false`, sink failures still fail open, but the optional logger now rotates
+the possibly corrupted JSONL file and respawns a fresh worker on the next event instead of
+remaining permanently disconnected for the rest of the process lifetime.
