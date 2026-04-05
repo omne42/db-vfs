@@ -505,6 +505,47 @@ async fn invalid_json_returns_json_error_body() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn escaped_write_body_is_accepted_when_decoded_content_fits_policy_limit() {
+    let mut policy = policy_allow_all();
+    policy.limits.max_read_bytes = 1024;
+    policy.limits.max_write_bytes = 20_000;
+    policy.limits.max_patch_bytes = Some(1024);
+    let Some(server) = setup_with_policy(policy).await else {
+        return;
+    };
+
+    let content = "\0".repeat(20_000);
+    let raw = serde_json::json!({
+        "workspace_id": "ws",
+        "path": "docs/escaped.txt",
+        "content": content,
+        "expected_version": null
+    })
+    .to_string();
+    let legacy_limit = 20_000usize + 64 * 1024;
+    assert!(
+        raw.len() > legacy_limit,
+        "escaped payload should exceed the pre-fix body limit to prove the regression"
+    );
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/write", server.base))
+        .header("authorization", format!("Bearer {DEV_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(raw)
+        .send()
+        .await
+        .expect("send escaped write");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.json::<WriteBody>().await.expect("write json");
+    assert_eq!(body.path, "docs/escaped.txt");
+    assert_eq!(body.version, 1);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn missing_content_type_returns_json_error_body() {
     let Some(server) = setup().await else {
         return;
