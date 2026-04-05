@@ -25,6 +25,35 @@ pub struct PatchResponse {
 
 const MAX_PATCH_HUNKS: usize = 512;
 
+fn ensure_patch_targets_requested_path(
+    patch: &diffy::Patch<'_, str>,
+    requested_path: &str,
+) -> Result<()> {
+    for (kind, path) in [
+        ("original", patch.original()),
+        ("modified", patch.modified()),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        if (kind == "original" && path == "original") || (kind == "modified" && path == "modified")
+        {
+            continue;
+        }
+        let matches = [Some(path), path.strip_prefix("a/"), path.strip_prefix("b/")]
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| normalize_path(candidate).ok())
+            .any(|candidate| candidate == requested_path);
+        if !matches {
+            return Err(Error::Patch(format!(
+                "{kind} patch header path {path:?} does not match request.path {requested_path:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: PatchRequest,
@@ -66,6 +95,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
 
     let parsed =
         diffy::Patch::from_str(&request.patch).map_err(|err| Error::Patch(err.to_string()))?;
+    ensure_patch_targets_requested_path(&parsed, &requested_path)?;
     if parsed.hunks().len() > MAX_PATCH_HUNKS {
         let hunk_count = u64::try_from(parsed.hunks().len()).unwrap_or(u64::MAX);
         let max_hunks = u64::try_from(MAX_PATCH_HUNKS).unwrap_or(u64::MAX);
@@ -500,6 +530,36 @@ mod tests {
         assert_eq!(
             matching_err.to_string(),
             "operation is not permitted: patch is not supported when secret redaction rules are active"
+        );
+    }
+
+    #[test]
+    fn patch_rejects_header_paths_for_other_files_before_loading_store_state() {
+        let mut policy = VfsPolicy::default();
+        policy.permissions.patch = true;
+
+        let mut vfs = DbVfs::new(PanicStore, policy).expect("vfs");
+        let err = vfs
+            .apply_unified_patch(PatchRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/a.txt".to_string(),
+                expected_version: 1,
+                patch: concat!(
+                    "--- a/docs/other.txt\n",
+                    "+++ b/docs/other.txt\n",
+                    "@@ -1 +1 @@\n",
+                    "-hello\n",
+                    "+HELLO\n",
+                )
+                .to_string(),
+            })
+            .expect_err("mismatched patch header should be rejected");
+
+        assert_eq!(err.code(), "patch");
+        assert!(
+            err.to_string()
+                .contains("does not match request.path \"docs/a.txt\""),
+            "unexpected error: {err}"
         );
     }
 }
