@@ -341,7 +341,9 @@ impl AuditLogger {
             .spawn(move || {
                 let queued: QueuedAuditEvent = receiver.recv().expect("receive queued audit event");
                 blocked_for_worker.store(true, Ordering::Release);
-                release_rx.recv().expect("wait for audit release");
+                if release_rx.recv().is_err() {
+                    return;
+                }
                 if let Some(ack) = queued.ack {
                     ack.send(Ok(())).expect("ack audit success");
                 }
@@ -584,7 +586,6 @@ fn audit_worker(
     );
 }
 
-#[cfg(test)]
 #[cfg(test)]
 fn audit_worker_with_writer<W: Write>(
     out: BufWriter<W>,
