@@ -19,6 +19,8 @@ use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{
     AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
+#[cfg(feature = "sqlite")]
+use db_vfs_service::server::UnsafeNoAuthMode;
 use sha2::{Digest, Sha256};
 #[cfg(feature = "sqlite")]
 use tower::ServiceExt;
@@ -217,10 +219,14 @@ async fn setup_with_policy(policy: VfsPolicy) -> Option<TestServer> {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn embedded_router_write_works_without_connect_info() {
+async fn embedded_router_write_works_without_connect_info_when_explicitly_allowed() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app_with_unsafe_no_auth_mode(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        UnsafeNoAuthMode::AllowAnyPeer,
+    )
+    .expect("build app");
 
     let req = Request::builder()
         .method("POST")
@@ -245,10 +251,39 @@ async fn embedded_router_write_works_without_connect_info() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn workspace_id_with_wildcard_is_rejected() {
+async fn embedded_router_legacy_unsafe_no_auth_requires_peer_metadata() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
     let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
         .expect("build app");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/write")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"workspace_id":"ws","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+        ))
+        .expect("request");
+
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let err = serde_json::from_slice::<ErrorBody>(&body).expect("error json");
+    assert_eq!(err.code, "not_permitted");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn workspace_id_with_wildcard_is_rejected() {
+    let db = tempfile::NamedTempFile::new().expect("temp db");
+    let app = db_vfs_service::server::build_app_with_unsafe_no_auth_mode(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        UnsafeNoAuthMode::AllowAnyPeer,
+    )
+    .expect("build app");
 
     let req = Request::builder()
         .method("POST")

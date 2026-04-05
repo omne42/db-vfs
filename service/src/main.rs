@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use clap::{ArgGroup, Parser};
 
 use db_vfs_service::TrustMode;
+use db_vfs_service::server::UnsafeNoAuthMode;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -75,6 +76,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let policy =
         db_vfs_service::policy_io::load_policy(&args.policy, args.trust_mode, args.unsafe_no_auth)?;
+    let unsafe_no_auth_mode = if args.unsafe_no_auth {
+        if args.unsafe_no_auth_allow_non_loopback {
+            UnsafeNoAuthMode::AllowAnyPeer
+        } else {
+            UnsafeNoAuthMode::LoopbackOnly
+        }
+    } else {
+        UnsafeNoAuthMode::Disabled
+    };
 
     let backend_kind = if args.postgres.is_some() {
         "postgres"
@@ -84,12 +94,20 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(all(feature = "sqlite", feature = "postgres"))]
     let app = if let Some(url) = args.postgres {
-        db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
+        db_vfs_service::server::build_app_postgres_with_unsafe_no_auth_mode(
+            url,
+            policy,
+            unsafe_no_auth_mode,
+        )?
     } else {
         let Some(sqlite) = args.sqlite else {
             anyhow::bail!("missing --sqlite argument (clap should enforce exactly one DB backend)");
         };
-        db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
+        db_vfs_service::server::build_app_sqlite_with_unsafe_no_auth_mode(
+            sqlite,
+            policy,
+            unsafe_no_auth_mode,
+        )?
     };
 
     #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
@@ -101,12 +119,20 @@ async fn main() -> anyhow::Result<()> {
         let Some(sqlite) = args.sqlite else {
             anyhow::bail!("missing --sqlite argument (clap should enforce exactly one DB backend)");
         };
-        db_vfs_service::server::build_app_sqlite(sqlite, policy, args.unsafe_no_auth)?
+        db_vfs_service::server::build_app_sqlite_with_unsafe_no_auth_mode(
+            sqlite,
+            policy,
+            unsafe_no_auth_mode,
+        )?
     };
 
     #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
     let app = if let Some(url) = args.postgres {
-        db_vfs_service::server::build_app_postgres(url, policy, args.unsafe_no_auth)?
+        db_vfs_service::server::build_app_postgres_with_unsafe_no_auth_mode(
+            url,
+            policy,
+            unsafe_no_auth_mode,
+        )?
     } else {
         anyhow::bail!(
             "db-vfs-service was built without SQLite support; rebuild with `--features sqlite-bundled` or `--features sqlite`"

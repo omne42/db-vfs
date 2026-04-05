@@ -33,8 +33,12 @@
     不能只按单 buffer 估算。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
-  - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响 `peer_ip`
-    与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
+  - service `Router` 在 auth 开启时可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响
+    `peer_ip` 与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
+  - 旧的 `build_app*(_, _, unsafe_no_auth=true)` 便利入口仍保留，但默认只允许经
+    `ConnectInfo<SocketAddr>` 证明的 loopback peer；peerless embedding 或非 loopback
+    的无鉴权流量必须显式选择 `UnsafeNoAuthMode::AllowAnyPeer`，不能只靠库入口绕过 CLI 的
+    公网暴露保护。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
   - `max_concurrency_io` / `max_concurrency_scan` 的 permit 必须在 JSON body buffering / decode

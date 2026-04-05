@@ -108,6 +108,9 @@ lifetime by accident.
 ## Security Baseline
 
 - Keep auth enabled; avoid `--unsafe-no-auth` outside local isolated dev.
+- Library builders keep `unsafe_no_auth=true` loopback-only by default; peerless embedding or
+  non-loopback unauthenticated traffic now requires an explicit `UnsafeNoAuthMode::AllowAnyPeer`
+  opt-in.
 - Prefer `sha256:<64 hex>` tokens or env-backed runtime tokens.
 - `auth.tokens[*].token_env_var` always carries the raw bearer token; only
   `auth.tokens[*].token` accepts a pre-hashed `sha256:<64 hex>` value.
