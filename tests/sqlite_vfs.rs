@@ -489,7 +489,7 @@ fn patch_rejects_expected_version_overflow() {
 }
 
 #[test]
-fn patch_is_rejected_when_secret_redaction_rules_are_active() {
+fn patch_is_disabled_when_secret_redaction_rules_are_active() {
     let mut policy = policy_all_perms();
     policy.secrets.redact_regexes = vec!["secret".to_string()];
     policy.secrets.replacement = "REDACTED".to_string();
@@ -503,26 +503,20 @@ fn patch_is_rejected_when_secret_redaction_rules_are_active() {
     })
     .expect("seed write");
 
+    let patch = diffy::create_patch("secret\npublic\n", "secret\nvisible\n").to_string();
     let err = vfs
         .apply_unified_patch(PatchRequest {
             workspace_id: "ws".to_string(),
             path: "docs/a.txt".to_string(),
+            patch,
             expected_version: 1,
-            patch: concat!(
-                "--- a/docs/a.txt\n",
-                "+++ b/docs/a.txt\n",
-                "@@ -1,2 +1,2 @@\n",
-                "-REDACTED\n",
-                "+changed\n",
-                " public\n",
-            )
-            .to_string(),
         })
-        .expect_err("patch should be rejected when redaction rules are active");
+        .expect_err("redaction-enabled patch should be rejected");
     assert_eq!(err.code(), "not_permitted");
     assert!(
         err.to_string()
-            .contains("patch is not supported when secret redaction rules are active")
+            .contains("patch is not supported when secret redaction rules are active"),
+        "unexpected error: {err}"
     );
 }
 
