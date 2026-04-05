@@ -100,6 +100,8 @@ semantics, including files that mix those terminators.
 `patch` is disabled whenever `secrets.redact_regexes` is active. Applying unified diffs against the
 raw backing text would otherwise turn patch context match/no-match into a secret oracle, so the
 service now returns `not_permitted` instead of pretending redacted files are safely patchable.
+When a unified diff includes `---` / `+++` filename headers, those headers must target the same
+normalized path as `request.path`; cross-file patches are rejected with `patch`.
 
 `expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
 a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
