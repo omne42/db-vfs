@@ -133,9 +133,10 @@ mod tests {
     use axum::Router;
     use axum::body::Body;
     use axum::routing::post;
-    use db_vfs_core::policy::{AuditPolicy, Limits, VfsPolicy};
     use std::time::Duration;
     use tower::ServiceExt;
+
+    use crate::policy::{AuditPolicy, ServiceLimits, ServicePolicy};
 
     #[test]
     fn request_id_validation_accepts_whitelisted_characters() {
@@ -169,18 +170,18 @@ mod tests {
     async fn rate_limit_middleware_keeps_io_permit_while_required_audit_blocks() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
-        let policy = VfsPolicy {
-            limits: Limits {
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
                 max_requests_per_ip_per_sec: 1,
                 max_requests_burst_per_ip: 1,
                 max_rate_limit_ips: 16,
-                ..Limits::default()
+                ..ServiceLimits::default()
             },
             audit: AuditPolicy {
                 required: true,
                 ..AuditPolicy::default()
             },
-            ..VfsPolicy::default()
+            ..ServicePolicy::default()
         };
         let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
 
@@ -235,19 +236,19 @@ mod tests {
     async fn rate_limit_middleware_times_out_required_audit_and_releases_io_permit() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
-        let policy = VfsPolicy {
-            limits: Limits {
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
                 max_io_ms: 10,
                 max_requests_per_ip_per_sec: 1,
                 max_requests_burst_per_ip: 1,
                 max_rate_limit_ips: 16,
-                ..Limits::default()
+                ..ServiceLimits::default()
             },
             audit: AuditPolicy {
                 required: true,
                 ..AuditPolicy::default()
             },
-            ..VfsPolicy::default()
+            ..ServicePolicy::default()
         };
         let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
 

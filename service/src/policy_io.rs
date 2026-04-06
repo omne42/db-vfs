@@ -2,9 +2,8 @@ use std::borrow::Cow;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use db_vfs_core::policy::VfsPolicy;
-
 use crate::TrustMode;
+use crate::policy::ServicePolicy;
 
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
 
@@ -18,7 +17,7 @@ pub fn load_policy(
     path: impl AsRef<Path>,
     trust_mode: TrustMode,
     unsafe_no_auth: bool,
-) -> anyhow::Result<VfsPolicy> {
+) -> anyhow::Result<ServicePolicy> {
     let path = path.as_ref();
     let raw = read_policy_file(path)?;
     let format = policy_format(path)?;
@@ -81,7 +80,7 @@ fn parse_policy_str(
     format: PolicyFormat,
     trust_mode: TrustMode,
     path: Option<&Path>,
-) -> anyhow::Result<VfsPolicy> {
+) -> anyhow::Result<ServicePolicy> {
     parse_policy_str_with(raw, format, trust_mode, path, |name| std::env::var(name))
 }
 
@@ -91,7 +90,7 @@ fn parse_policy_str_with(
     trust_mode: TrustMode,
     path: Option<&Path>,
     lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
-) -> anyhow::Result<VfsPolicy> {
+) -> anyhow::Result<ServicePolicy> {
     match format {
         PolicyFormat::Json => parse_json_policy(raw, trust_mode, path, lookup),
         PolicyFormat::Toml => parse_toml_policy(raw, trust_mode, path, lookup),
@@ -103,7 +102,7 @@ fn parse_json_policy(
     trust_mode: TrustMode,
     path: Option<&Path>,
     lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
-) -> anyhow::Result<VfsPolicy> {
+) -> anyhow::Result<ServicePolicy> {
     let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|err| match path {
         Some(path) => anyhow::anyhow!("failed to parse JSON policy {}: {err}", path.display()),
         None => anyhow::anyhow!("failed to parse JSON policy: {err}"),
@@ -121,7 +120,7 @@ fn parse_toml_policy(
     trust_mode: TrustMode,
     path: Option<&Path>,
     lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
-) -> anyhow::Result<VfsPolicy> {
+) -> anyhow::Result<ServicePolicy> {
     let mut value: toml::Value = toml::from_str(raw).map_err(|err| match path {
         Some(path) => anyhow::anyhow!("failed to parse TOML policy {}: {err}", path.display()),
         None => anyhow::anyhow!("failed to parse TOML policy: {err}"),
@@ -299,7 +298,7 @@ fn is_valid_env_var_name(name: &str) -> bool {
 }
 
 fn validate_trust_mode(
-    policy: &VfsPolicy,
+    policy: &ServicePolicy,
     trust_mode: TrustMode,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<()> {
@@ -349,7 +348,9 @@ mod tests {
     #[cfg(unix)]
     use std::process::Command;
 
-    use db_vfs_core::policy::{AuthPolicy, AuthToken, Limits, Permissions};
+    use db_vfs_core::policy::Permissions;
+
+    use crate::policy::{AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
     use tempfile::tempdir;
 
     #[test]
@@ -493,7 +494,7 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
 
     #[test]
     fn untrusted_rejects_env_tokens_and_writes() {
-        let policy = VfsPolicy {
+        let policy = ServicePolicy {
             permissions: Permissions {
                 read: true,
                 glob: true,
@@ -503,12 +504,12 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
                 delete: false,
                 allow_full_scan: false,
             },
-            limits: Limits {
+            limits: ServiceLimits {
                 max_walk_ms: Some(1000),
                 max_requests_per_ip_per_sec: 10,
                 max_requests_burst_per_ip: 10,
                 max_rate_limit_ips: 4,
-                ..Limits::default()
+                ..ServiceLimits::default()
             },
             auth: AuthPolicy {
                 tokens: vec![AuthToken {
@@ -517,7 +518,7 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
                     allowed_workspaces: vec!["ws".to_string()],
                 }],
             },
-            ..VfsPolicy::default()
+            ..ServicePolicy::default()
         };
 
         let err = validate_trust_mode(&policy, TrustMode::Untrusted, false).unwrap_err();
@@ -534,7 +535,7 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
         format: PolicyFormat,
         trust_mode: TrustMode,
         path: Option<&Path>,
-    ) -> anyhow::Result<VfsPolicy> {
+    ) -> anyhow::Result<ServicePolicy> {
         super::parse_policy_str(raw, format, trust_mode, path)
     }
 
@@ -544,7 +545,7 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
         trust_mode: TrustMode,
         path: Option<&Path>,
         lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
-    ) -> anyhow::Result<VfsPolicy> {
+    ) -> anyhow::Result<ServicePolicy> {
         super::parse_policy_str_with(raw, format, trust_mode, path, lookup)
     }
 

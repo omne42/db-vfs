@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
+- service/policy+core/policy: split service-only auth/audit/DB-pool/rate-limit configuration into `db_vfs_service::policy::ServicePolicy` so `db_vfs_core::policy::VfsPolicy` stays scoped to VFS-domain semantics while the service keeps the same on-disk policy shape.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
@@ -40,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/rate-limiter: make missing peer IPs hit the same shared fallback bucket even when `RateLimiter` is exercised directly, so its internal contract matches the HTTP middleware behavior.
 - vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.

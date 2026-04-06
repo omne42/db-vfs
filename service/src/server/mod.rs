@@ -19,6 +19,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
+use crate::policy::ServicePolicy;
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
 use db_vfs_core::redaction::SecretRedactor;
@@ -43,6 +44,7 @@ struct AppInner {
 
 struct PreparedState {
     policy: Arc<ValidatedVfsPolicy>,
+    max_db_connections: u32,
     redactor: Arc<SecretRedactor>,
     traversal: Arc<TraversalSkipper>,
     audit: Option<audit::AuditLogger>,
@@ -247,28 +249,28 @@ async fn try_acquire_required_audit_gate_for_path(
     }))
 }
 
-fn prepare_state(
-    policy: ValidatedVfsPolicy,
-    unsafe_no_auth: bool,
-) -> anyhow::Result<PreparedState> {
-    let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&policy);
+fn prepare_state(policy: ServicePolicy, unsafe_no_auth: bool) -> anyhow::Result<PreparedState> {
+    let validated_policy = policy.validated_vfs_policy().map_err(anyhow::Error::msg)?;
+    let estimated_scan_inflight_bytes = estimated_scan_inflight_bytes(&validated_policy);
     if estimated_scan_inflight_bytes > RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES {
         tracing::warn!(
-            max_read_bytes = policy.limits.max_read_bytes,
-            max_concurrency_scan = policy.limits.max_concurrency_scan,
-            redaction_copies_input = !policy.secrets.redact_regexes.is_empty(),
+            max_read_bytes = validated_policy.limits.max_read_bytes,
+            max_concurrency_scan = validated_policy.limits.max_concurrency_scan,
+            redaction_copies_input = !validated_policy.secrets.redact_regexes.is_empty(),
             estimated_scan_inflight_bytes,
             recommended_max_scan_inflight_bytes = RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES,
             "scan memory budget is high; consider lowering limits.max_read_bytes or limits.max_concurrency_scan"
         );
     }
 
-    let redactor = SecretRedactor::from_rules(&policy.secrets).map_err(anyhow::Error::msg)?;
-    let traversal = TraversalSkipper::from_rules(&policy.traversal).map_err(anyhow::Error::msg)?;
-    let io_concurrency = policy.limits.max_concurrency_io;
-    let scan_concurrency = policy.limits.max_concurrency_scan;
-    let rate_limiter = rate_limiter::RateLimiter::new(&policy);
-    let auth = auth::build_auth_mode(&policy, unsafe_no_auth)?;
+    let redactor =
+        SecretRedactor::from_rules(&validated_policy.secrets).map_err(anyhow::Error::msg)?;
+    let traversal =
+        TraversalSkipper::from_rules(&validated_policy.traversal).map_err(anyhow::Error::msg)?;
+    let io_concurrency = validated_policy.limits.max_concurrency_io;
+    let scan_concurrency = validated_policy.limits.max_concurrency_scan;
+    let rate_limiter = rate_limiter::RateLimiter::new(&policy.limits);
+    let auth = auth::build_auth_mode(&policy.auth, unsafe_no_auth)?;
     let audit = if let Some(path) = policy.audit.jsonl_path.as_deref() {
         let flush_every_events = policy
             .audit
@@ -314,9 +316,10 @@ fn prepare_state(
         "auth configuration loaded"
     );
 
-    let body_limit = max_body_bytes(&policy);
+    let body_limit = max_body_bytes(&validated_policy);
     Ok(PreparedState {
-        policy: Arc::new(policy),
+        policy: Arc::new(validated_policy),
+        max_db_connections: policy.limits.max_db_connections,
         redactor: Arc::new(redactor),
         traversal: Arc::new(traversal),
         audit,
@@ -403,12 +406,13 @@ fn sqlite_pool_max_size(db_path: &std::path::Path, configured: u32) -> u32 {
 
 #[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_policy_audit_and_auth(
-    policy: VfsPolicy,
+    policy: ServicePolicy,
     audit: Option<audit::AuditLogger>,
     unsafe_no_auth: bool,
 ) -> AppState {
-    let auth_mode = auth::build_auth_mode(&policy, unsafe_no_auth).expect("auth mode");
-    let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
+    let auth_mode = auth::build_auth_mode(&policy.auth, unsafe_no_auth).expect("auth mode");
+    let rate_limiter = rate_limiter::RateLimiter::new(&policy.limits);
+    let policy = Arc::new(policy.validated_vfs_policy().expect("validated policy"));
     let manager = sqlite_connection_manager(
         std::path::Path::new(":memory:"),
         startup_migration_timeout(policy.as_ref()),
@@ -428,7 +432,7 @@ pub(in crate::server) fn test_state_with_policy_audit_and_auth(
             ),
             audit,
             auth: auth_mode,
-            rate_limiter: rate_limiter::RateLimiter::new(policy.as_ref()),
+            rate_limiter,
             io_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
             scan_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
         }),
@@ -437,12 +441,12 @@ pub(in crate::server) fn test_state_with_policy_audit_and_auth(
 
 #[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_audit(audit: Option<audit::AuditLogger>) -> AppState {
-    test_state_with_policy_audit_and_auth(VfsPolicy::default(), audit, true)
+    test_state_with_policy_audit_and_auth(ServicePolicy::default(), audit, true)
 }
 
 #[cfg(all(test, feature = "sqlite"))]
 pub(in crate::server) fn test_state_with_policy_and_audit(
-    policy: VfsPolicy,
+    policy: ServicePolicy,
     audit: Option<audit::AuditLogger>,
 ) -> AppState {
     test_state_with_policy_audit_and_auth(policy, audit, true)
@@ -451,17 +455,16 @@ pub(in crate::server) fn test_state_with_policy_and_audit(
 #[cfg(feature = "sqlite")]
 pub fn build_app_sqlite(
     db_path: std::path::PathBuf,
-    policy: VfsPolicy,
+    policy: ServicePolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
     let manager = sqlite_connection_manager(&db_path, migration_timeout);
-    let max_pool_size = sqlite_pool_max_size(&db_path, prepared.policy.limits.max_db_connections);
-    if max_pool_size != prepared.policy.limits.max_db_connections {
+    let max_pool_size = sqlite_pool_max_size(&db_path, prepared.max_db_connections);
+    if max_pool_size != prepared.max_db_connections {
         tracing::warn!(
-            configured_max_db_connections = prepared.policy.limits.max_db_connections,
+            configured_max_db_connections = prepared.max_db_connections,
             effective_max_db_connections = max_pool_size,
             "sqlite :memory: forces a single pooled connection so schema and data stay consistent"
         );
@@ -484,10 +487,9 @@ pub fn build_app_sqlite(
 #[cfg(feature = "postgres")]
 pub fn build_app_postgres(
     url: String,
-    policy: VfsPolicy,
+    policy: ServicePolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    let policy = ValidatedVfsPolicy::new(policy).map_err(anyhow::Error::msg)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
 
@@ -504,7 +506,7 @@ pub fn build_app_postgres(
     let manager =
         r2d2_postgres::PostgresConnectionManager::new(config, r2d2_postgres::postgres::NoTls);
     let pool = r2d2::Pool::builder()
-        .max_size(prepared.policy.limits.max_db_connections)
+        .max_size(prepared.max_db_connections)
         .connection_timeout(migration_timeout)
         .build(manager)?;
 
@@ -522,7 +524,7 @@ pub fn build_app_postgres(
 /// stays unset and rate limiting falls back to the shared unspecified-IP bucket.
 pub fn build_app(
     db_path: std::path::PathBuf,
-    policy: VfsPolicy,
+    policy: ServicePolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
     build_app_sqlite(db_path, policy, unsafe_no_auth)
@@ -545,7 +547,7 @@ mod tests {
         let audit_path = dir.path().join("audit.jsonl");
         std::fs::create_dir_all(&audit_path).expect("create_dir_all");
 
-        let mut policy = VfsPolicy::default();
+        let mut policy = ServicePolicy::default();
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
         policy.audit.required = false;
 
@@ -560,7 +562,7 @@ mod tests {
         let audit_path = dir.path().join("audit.jsonl");
         std::fs::create_dir_all(&audit_path).expect("create_dir_all");
 
-        let mut policy = VfsPolicy::default();
+        let mut policy = ServicePolicy::default();
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
 
         let err = build_app_sqlite(db_path.clone(), policy, true).expect_err("should fail");
@@ -580,7 +582,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("db.sqlite");
 
-        let err = build_app_sqlite(db_path.clone(), VfsPolicy::default(), false)
+        let err = build_app_sqlite(db_path.clone(), ServicePolicy::default(), false)
             .expect_err("missing auth tokens should fail");
         assert!(err.to_string().contains("no auth tokens configured"));
         assert!(
@@ -590,22 +592,21 @@ mod tests {
     }
 
     #[test]
-    fn prepare_state_keeps_validated_policy_as_the_real_config_source() {
-        let mut raw = VfsPolicy::default();
-        raw.auth.tokens = vec![db_vfs_core::policy::AuthToken {
+    fn prepare_state_keeps_core_policy_and_service_limits_separate() {
+        let mut raw = ServicePolicy::default();
+        raw.auth.tokens = vec![crate::policy::AuthToken {
             token: Some(format!("sha256:{}", "11".repeat(32))),
             token_env_var: None,
             allowed_workspaces: vec!["team-*".to_string()],
         }];
+        raw.permissions.read = true;
+        raw.limits.max_db_connections = 7;
 
-        let validated = ValidatedVfsPolicy::new(raw).expect("validated policy");
-        let prepared = prepare_state(validated, false).expect("prepared state");
+        let prepared = prepare_state(raw, false).expect("prepared state");
 
-        assert_eq!(prepared.policy.auth.tokens.len(), 1);
-        assert_eq!(
-            prepared.policy.auth.tokens[0].allowed_workspaces,
-            vec!["team-*".to_string()]
-        );
+        assert!(prepared.policy.permissions.read);
+        assert_eq!(prepared.max_db_connections, 7);
+        assert!(matches!(prepared.auth, auth::AuthMode::Enforced { .. }));
     }
 
     #[test]

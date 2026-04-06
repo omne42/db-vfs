@@ -1,6 +1,9 @@
 # Policy
 
-Service policy is loaded as `db_vfs_core::policy::VfsPolicy` (`.toml` or `.json`).
+Service policy is loaded as `db_vfs_service::policy::ServicePolicy` (`.toml` or `.json`).
+
+Its core VFS subset projects to `db_vfs_core::policy::VfsPolicy`; auth/audit/runtime-only fields
+stay in the service layer instead of leaking into `db-vfs-core`.
 
 The service binary backend is feature-gated independently from policy loading:
 
@@ -30,7 +33,7 @@ expanded.
 | `limits` | `max_walk_ms` | `Some(2000)` |
 
 `policy.example.toml` is an opt-in example for a real service deployment, not a dump of literal
-`VfsPolicy::default()` values.
+`ServicePolicy::default()` values.
 
 ## `allowed_workspaces` matching
 

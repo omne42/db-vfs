@@ -9,8 +9,7 @@ use db_vfs::vfs::{
     DbVfs, DeleteRequest, GlobRequest, GrepRequest, PatchRequest, ReadRequest, WriteRequest,
 };
 use db_vfs_core::policy::{
-    AuditPolicy, AuthPolicy, Limits, Permissions, SecretRules, TraversalRules, ValidatedVfsPolicy,
-    VfsPolicy,
+    Limits, Permissions, SecretRules, TraversalRules, ValidatedVfsPolicy, VfsPolicy,
 };
 use db_vfs_core::redaction::SecretRedactor;
 use db_vfs_core::traversal::TraversalSkipper;
@@ -40,8 +39,6 @@ fn policy_all_perms() -> VfsPolicy {
         limits: Limits::default(),
         secrets: SecretRules::default(),
         traversal: TraversalRules::default(),
-        audit: AuditPolicy::default(),
-        auth: AuthPolicy::default(),
     }
 }
 
@@ -825,8 +822,6 @@ fn deny_globs_hide_descendants_under_dir_star() {
             ..SecretRules::default()
         },
         traversal: TraversalRules::default(),
-        audit: AuditPolicy::default(),
-        auth: AuthPolicy::default(),
     };
 
     let mut vfs = DbVfs::new(store, policy).unwrap();

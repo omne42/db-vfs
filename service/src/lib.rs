@@ -1,8 +1,10 @@
 //! HTTP service layer for `db-vfs`.
 //!
+//! - `policy`: service-facing policy schema and validation
 //! - `policy_io`: policy loading + trust mode validation
 //! - `server`: Axum router, middleware, auth, audit and execution plumbing
 
+pub mod policy;
 pub mod policy_io;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod server;
