@@ -453,6 +453,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
+- store/api: require every `Store` impl to declare whether chunked ranged reads and cursor pagination are native or legacy fallback paths, and fail closed when an impl claims native behavior but still hits the default compatibility fallback.
 - tests/vfs: add regression coverage for the deprecated validated-matcher constructor alias so policy/matcher mismatches stay fail-fast instead of silently rebuilding policy-derived matchers.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
@@ -557,7 +558,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
 - store/pagination: sort legacy fallback first-page results too, so `glob`/`grep` stay compatible with unsorted prefix-only stores from the initial page instead of failing with non-monotonic page errors.
-- vfs/read+grep+patch: enforce actual loaded content size against `limits.max_read_bytes` even when persisted metadata is stale/inconsistent, preventing oversized processing and tightening policy correctness.
 
 
 ---
