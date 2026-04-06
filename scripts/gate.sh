@@ -39,6 +39,11 @@ echo "gate: rust (fmt/check/clippy/test)" >&2
   cargo test --workspace --locked
   cargo test --workspace --no-default-features --locked
   cargo test --workspace --all-features --locked
+  if [[ -n "${DB_VFS_TEST_POSTGRES_URL:-}" ]]; then
+    echo "gate: live Postgres integration is enabled via DB_VFS_TEST_POSTGRES_URL" >&2
+  else
+    echo "gate: DB_VFS_TEST_POSTGRES_URL unset; Postgres-feature tests may self-skip live backend coverage" >&2
+  fi
   cargo tree -d --workspace --locked
   if command -v cargo-audit >/dev/null 2>&1; then
     cargo audit
