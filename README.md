@@ -82,6 +82,10 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
+For `glob` and `grep`, omitting `path_prefix` is only allowed when the request still has a safe
+literal scope. Exact-file patterns auto-scope to that one path; wildcard patterns auto-scope only
+to their longest literal directory prefix.
+
 Line-range `read` still enforces `max_read_bytes` on the returned slice. Without secret redaction
 rules, the store can stop after the requested range instead of materializing the whole file. When
 secret redaction rules are active, both the raw backing file and the redacted whole-file

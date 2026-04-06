@@ -68,6 +68,9 @@ Response fields: `requested_path`, `path`, `deleted`.
 
 Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
 
+If `path_prefix` is omitted, `pattern` still needs a safe literal scope. Exact-file patterns scope
+to that one file; wildcard patterns scope only to their longest literal directory prefix.
+
 Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`,
 `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and public skip counters.
 
@@ -77,6 +80,9 @@ kept internal/audit-only and are not serialized in the public response.
 ### `/v1/grep`
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
+
+If `path_prefix` is omitted, `glob` still needs a safe literal scope. Exact-file globs scope to
+that one file; wildcard globs scope only to their longest literal directory prefix.
 
 `grep` is line-oriented for both literal and regex queries. When `regex = true`, patterns that can
 consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is

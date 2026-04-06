@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
+- docs/vfs-scan-scope: clarify that omitted `path_prefix` on exact-file `glob` / `grep` scopes to a single path instead of widening to sibling prefix traversal.
 - vfs/grep+service/handlers+docs: treat literal `\r` queries the same as `\n` for line-oriented grep short-circuiting so CRLF inputs no longer do useless content work or return silent false negatives, and rename the internal permit helper to reflect its immediate `503 busy` semantics.
 - vfs/grep+docs: evaluate grep matches against the redacted line view whenever secret redaction is active, so masked secrets no longer remain discoverable via match/no-match behavior.
 - store/vfs/read+grep+docs: treat lone `\r` as a real line boundary alongside `\n`/`\r\n`, fixing CR-only ranged reads, grep line numbering, and legacy store line-range fallback semantics.
