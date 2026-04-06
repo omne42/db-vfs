@@ -16,7 +16,12 @@ jobs:
   test:
     name: Test (windows-latest)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: windows-latest
+    runs-on:
+      group: windows-local
+      labels: omne42-local
+    concurrency:
+      group: persistent-worktree-${{ github.repository }}
+      cancel-in-progress: false
     timeout-minutes: 30
     env:
       CARGO_HOME: C:\actions-cache\cargo
