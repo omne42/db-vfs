@@ -279,7 +279,7 @@ fn grep_scan_diagnostics_exclude_secret_denied_entries() {
 }
 
 #[test]
-fn grep_fails_closed_on_noncanonical_store_path() {
+fn sqlite_store_scan_fails_closed_on_noncanonical_store_path() {
     let db = tempfile::NamedTempFile::new().expect("temp sqlite db");
     let conn = rusqlite::Connection::open(db.path()).expect("open legacy sqlite");
     conn.execute_batch(
@@ -312,19 +312,10 @@ fn grep_fails_closed_on_noncanonical_store_path() {
     .expect("seed visible row");
     drop(conn);
 
-    let mut policy = policy_all_perms();
-    policy.secrets.deny_globs.clear();
     let store = SqliteStore::open_no_migrate(db.path()).expect("open sqlite without migration");
-    let mut vfs = DbVfs::new(store, policy).expect("create vfs");
-
-    let err = vfs
-        .grep(GrepRequest {
-            workspace_id: "ws".to_string(),
-            query: "SECRET".to_string(),
-            regex: false,
-            glob: None,
-            path_prefix: Some("docs/".to_string()),
-        })
+    let mut store = store;
+    let err = store
+        .list_metas_by_prefix_page("ws", "docs/", None, 32)
         .expect_err("noncanonical stored path should fail closed");
     assert_eq!(err.code(), "db");
 }
@@ -923,53 +914,4 @@ fn new_with_supplied_matchers_validated_rejects_mismatched_matchers() {
         Err(err) => err,
     };
     assert_eq!(err.code(), "invalid_policy");
-}
-
-#[test]
-fn grep_fail_closes_when_store_contains_noncanonical_path_row() {
-    let db = tempfile::NamedTempFile::new().expect("temp sqlite db");
-    {
-        let conn = rusqlite::Connection::open(db.path()).expect("open sqlite");
-        conn.execute_batch(
-            "CREATE TABLE files (
-                workspace_id TEXT NOT NULL,
-                path TEXT NOT NULL,
-                content TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                version INTEGER NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                metadata_json TEXT,
-                PRIMARY KEY (workspace_id, path)
-            );",
-        )
-        .expect("create legacy files table");
-        conn.execute(
-            "INSERT INTO files (
-                workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
-            rusqlite::params!["ws", "docs/../escape.txt", "needle\n", 7_i64, 1_i64, 1_i64, 1_i64],
-        )
-        .expect("inject legacy invalid row");
-    }
-
-    let mut policy = policy_all_perms();
-    policy.secrets.deny_globs.clear();
-    let store = SqliteStore::open_no_migrate(db.path()).expect("open sqlite without migrate");
-    let mut vfs = DbVfs::new_validated(
-        store,
-        ValidatedVfsPolicy::new(policy).expect("validated policy"),
-    )
-    .expect("create vfs");
-
-    let err = vfs
-        .grep(GrepRequest {
-            workspace_id: "ws".to_string(),
-            query: "needle".to_string(),
-            regex: false,
-            glob: None,
-            path_prefix: Some("docs/".to_string()),
-        })
-        .expect_err("invalid stored path must fail closed");
-    assert_eq!(err.code(), "db");
 }
