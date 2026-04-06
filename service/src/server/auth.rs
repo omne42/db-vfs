@@ -125,13 +125,11 @@ fn build_auth_mode_with_env_lookup(
 
 fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let mut parts = raw.split_whitespace();
-    let scheme = parts.next()?;
-    let token = parts.next()?;
-    if parts.next().is_some() {
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
     }
-    if !scheme.eq_ignore_ascii_case("bearer") {
+    if token.is_empty() {
         return None;
     }
     if !is_valid_bearer_token(token) {
@@ -375,6 +373,24 @@ mod tests {
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer a b"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer\tabc"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc\tdef"),
+        );
+        assert_eq!(parse_bearer_token(&headers), None);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer  abc"),
         );
         assert_eq!(parse_bearer_token(&headers), None);
 
