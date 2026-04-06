@@ -115,6 +115,8 @@ lifetime by accident.
   valid Bearer token value.
 - If you use plaintext env-backed tokens, keep them valid HTTP Bearer tokens (`token68` syntax; no whitespace or disallowed punctuation).
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
+- Trailing wildcard rules like `team-a-*` require at least one additional character after the
+  prefix, so they do not also authorize the bare `team-a-` namespace by accident.
 - Use TLS/HTTPS end-to-end for bearer token transport.
 - Enable audit log with `audit.required = true`.
 
@@ -133,6 +135,7 @@ Budget semantics:
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
+- Once the JSON body is buffered, the service preflights the top-level `workspace_id` before full request-schema deserialization, so token-valid requests aimed at a disallowed workspace can fail with `403 not_permitted` without materializing large `content` / `patch` fields.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.

@@ -26,7 +26,7 @@ Actual timelines depend on exploitability and patch validation.
 | Version line | Status | Security fixes |
 | --- | --- | --- |
 | `Unreleased` / `main` | active | yes |
-| latest stable (`0.1.x`) | active | yes |
+| latest stable (`1.0.x`) | active | yes |
 | older than latest stable | EOL | no guarantee |
 
 ## Security baseline requirements
@@ -35,6 +35,8 @@ Actual timelines depend on exploitability and patch validation.
 - Keep auth enabled in production; avoid `--unsafe-no-auth`.
 - Use high-entropy tokens (random, >= 32 bytes recommended) and rotate regularly.
 - Scope tokens by `allowed_workspaces` (avoid global wildcard in production).
+- Trailing wildcard rules like `team-a-*` require at least one additional character after the
+  prefix, so they do not also authorize the bare `team-a-` namespace.
 - Enable per-IP rate limiting and audit logging.
 
 ## Threat model notes
