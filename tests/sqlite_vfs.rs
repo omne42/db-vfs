@@ -674,6 +674,35 @@ fn glob_keeps_scanning_when_denied_entries_precede_visible_files() {
 }
 
 #[test]
+fn glob_exact_file_pattern_ignores_sibling_prefix_entries() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .insert_file_new("ws", "docs/a.txt", "visible", now_ms())
+        .unwrap();
+    store
+        .insert_file_new("ws", "docs/a.txt.bak", "backup", now_ms())
+        .unwrap();
+
+    let mut policy = policy_all_perms();
+    policy.limits.max_walk_entries = 8;
+    policy.limits.max_walk_files = 1;
+    let mut vfs = DbVfs::new(store, policy).unwrap();
+
+    let resp = vfs
+        .glob(GlobRequest {
+            workspace_id: "ws".to_string(),
+            pattern: "docs/a.txt".to_string(),
+            path_prefix: None,
+        })
+        .unwrap();
+
+    assert_eq!(resp.matches, vec!["docs/a.txt".to_string()]);
+    assert!(!resp.truncated);
+    assert_eq!(resp.scanned_entries, 1);
+    assert_eq!(resp.scanned_files, 1);
+}
+
+#[test]
 fn grep_keeps_scanning_when_denied_entries_precede_visible_files() {
     let mut store = SqliteStore::open_in_memory().unwrap();
     store
@@ -701,6 +730,38 @@ fn grep_keeps_scanning_when_denied_entries_precede_visible_files() {
         .unwrap();
     assert_eq!(resp.matches.len(), 1);
     assert_eq!(resp.matches[0].path, "b/visible.txt");
+}
+
+#[test]
+fn grep_exact_file_glob_ignores_sibling_prefix_entries() {
+    let mut store = SqliteStore::open_in_memory().unwrap();
+    store
+        .insert_file_new("ws", "docs/a.txt", "needle", now_ms())
+        .unwrap();
+    store
+        .insert_file_new("ws", "docs/a.txt.bak", "needle", now_ms())
+        .unwrap();
+
+    let mut policy = policy_all_perms();
+    policy.limits.max_walk_entries = 8;
+    policy.limits.max_walk_files = 1;
+    let mut vfs = DbVfs::new(store, policy).unwrap();
+
+    let resp = vfs
+        .grep(GrepRequest {
+            workspace_id: "ws".to_string(),
+            query: "needle".to_string(),
+            regex: false,
+            glob: Some("docs/a.txt".to_string()),
+            path_prefix: None,
+        })
+        .unwrap();
+
+    assert_eq!(resp.matches.len(), 1);
+    assert_eq!(resp.matches[0].path, "docs/a.txt");
+    assert!(!resp.truncated);
+    assert_eq!(resp.scanned_entries, 1);
+    assert_eq!(resp.scanned_files, 1);
 }
 
 #[test]
