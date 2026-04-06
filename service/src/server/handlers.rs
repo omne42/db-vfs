@@ -5,11 +5,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::async_trait;
+use axum::body::Bytes;
 use axum::extract::Request;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{ConnectInfo, Extension, FromRequest, FromRequestParts, State};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{StatusCode, header};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use db_vfs::vfs::{
@@ -115,38 +117,131 @@ where
     }
 }
 
-fn map_json_rejection(err: JsonRejection) -> (StatusCode, Json<super::ErrorBody>) {
-    match err {
-        JsonRejection::MissingJsonContentType(_) => super::err(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported_media_type",
-            "missing or invalid content-type; expected application/json",
-        ),
-        JsonRejection::JsonSyntaxError(_) => super::err(
+fn map_json_bytes_rejection(err: BytesRejection) -> (StatusCode, Json<super::ErrorBody>) {
+    let status = err.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return super::err(status, "payload_too_large", "request body is too large");
+    }
+    super::err(status, "invalid_json", "invalid JSON body")
+}
+
+fn has_json_content_type(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .is_some_and(|mime| {
+            mime == "application/json"
+                || (mime.starts_with("application/")
+                    && mime.len() > "application/".len()
+                    && mime.ends_with("+json"))
+        })
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspacePrelude {
+    workspace_id: Option<String>,
+}
+
+enum PreludeDecision {
+    Continue,
+    Reject {
+        audit_req: AuditRequest,
+        status: StatusCode,
+        body: super::ErrorBody,
+    },
+}
+
+fn map_json_slice_error(err: serde_json::Error) -> (StatusCode, Json<super::ErrorBody>) {
+    match err.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => super::err(
             StatusCode::BAD_REQUEST,
             "invalid_json_syntax",
             "invalid JSON syntax",
         ),
-        JsonRejection::JsonDataError(_) => super::err(
+        serde_json::error::Category::Data => super::err(
             StatusCode::BAD_REQUEST,
             "invalid_json_schema",
             "JSON payload does not match request schema",
         ),
-        other => {
-            let status = other.status();
-            if status == StatusCode::PAYLOAD_TOO_LARGE {
-                return super::err(status, "payload_too_large", "request body is too large");
-            }
-            if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
-                return super::err(
-                    status,
-                    "unsupported_media_type",
-                    "missing or invalid content-type; expected application/json",
-                );
-            }
-            super::err(status, "invalid_json", "invalid JSON body")
+        serde_json::error::Category::Io => {
+            super::err(StatusCode::BAD_REQUEST, "invalid_json", "invalid JSON body")
         }
     }
+}
+
+fn preflight_workspace_authorization(
+    patterns: &[super::auth::WorkspacePattern],
+    body: &[u8],
+) -> PreludeDecision {
+    let prelude: WorkspacePrelude = match serde_json::from_slice(body) {
+        Ok(prelude) => prelude,
+        Err(err) => {
+            let (status, Json(body)) = map_json_slice_error(err);
+            return PreludeDecision::Reject {
+                audit_req: AuditRequest {
+                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                    requested_path: None,
+                    path_prefix: None,
+                    glob_pattern: None,
+                    grep_regex: None,
+                    grep_query_len: None,
+                },
+                status,
+                body,
+            };
+        }
+    };
+
+    let Some(workspace_id) = prelude.workspace_id else {
+        return PreludeDecision::Continue;
+    };
+
+    let audit_workspace_id = audit_preview(&workspace_id, 256);
+    if let Err(err) = db_vfs_core::path::validate_workspace_id(&workspace_id) {
+        let (status, Json(body)) = super::map_err(err);
+        return PreludeDecision::Reject {
+            audit_req: AuditRequest {
+                workspace_id: audit_workspace_id,
+                requested_path: None,
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            },
+            status,
+            body,
+        };
+    }
+    if !super::auth::workspace_allowed(patterns, &workspace_id) {
+        let (status, Json(body)) = super::err(
+            StatusCode::FORBIDDEN,
+            super::CODE_NOT_PERMITTED,
+            "workspace is not allowed for this token",
+        );
+        return PreludeDecision::Reject {
+            audit_req: AuditRequest {
+                workspace_id: audit_workspace_id,
+                requested_path: None,
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            },
+            status,
+            body,
+        };
+    }
+
+    PreludeDecision::Continue
 }
 
 async fn try_acquire_permit(
@@ -170,20 +265,19 @@ async fn try_acquire_permit(
     Ok((permit, budget))
 }
 
-async fn parse_json_payload<Req, S>(request: Request, state: &S) -> Result<Req, JsonRejection>
+async fn buffer_json_payload<S>(request: Request, state: &S) -> Result<Bytes, BytesRejection>
 where
-    Req: DeserializeOwned,
     S: Send + Sync,
 {
-    Ok(Json::<Req>::from_request(request, state).await?.0)
+    Bytes::from_request(request, state).await
 }
 
 #[derive(Debug)]
-enum PermitThenParseJson<Req> {
-    Parsed {
+enum PermitThenBufferJson {
+    Buffered {
         permit: tokio::sync::OwnedSemaphorePermit,
         remaining: Option<Duration>,
-        req: Req,
+        body: Bytes,
     },
     Rejected {
         permit: tokio::sync::OwnedSemaphorePermit,
@@ -193,21 +287,33 @@ enum PermitThenParseJson<Req> {
     },
 }
 
-async fn try_acquire_permit_then_parse_json<Req, S>(
+async fn try_acquire_permit_then_buffer_json<S>(
     semaphore: Arc<tokio::sync::Semaphore>,
     budget: Option<Duration>,
     request: Request,
     state: &S,
-) -> Result<PermitThenParseJson<Req>, (StatusCode, Json<super::ErrorBody>)>
+) -> Result<PermitThenBufferJson, (StatusCode, Json<super::ErrorBody>)>
 where
-    Req: DeserializeOwned,
     S: Send + Sync,
 {
     let (permit, remaining) = try_acquire_permit(semaphore, budget).await?;
+    if !has_json_content_type(&request) {
+        let (status, Json(body)) = super::err(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "missing or invalid content-type; expected application/json",
+        );
+        return Ok(PermitThenBufferJson::Rejected {
+            permit,
+            remaining,
+            status,
+            body,
+        });
+    }
     let started = Instant::now();
-    let parsed = if let Some(timeout) = remaining {
+    let buffered = if let Some(timeout) = remaining {
         if timeout.is_zero() {
-            return Ok(PermitThenParseJson::Rejected {
+            return Ok(PermitThenBufferJson::Rejected {
                 permit,
                 remaining: Some(Duration::ZERO),
                 status: StatusCode::REQUEST_TIMEOUT,
@@ -218,10 +324,10 @@ where
             });
         }
 
-        match tokio::time::timeout(timeout, parse_json_payload::<Req, S>(request, state)).await {
-            Ok(parsed) => parsed,
+        match tokio::time::timeout(timeout, buffer_json_payload::<S>(request, state)).await {
+            Ok(buffered) => buffered,
             Err(_) => {
-                return Ok(PermitThenParseJson::Rejected {
+                return Ok(PermitThenBufferJson::Rejected {
                     permit,
                     remaining: Some(Duration::ZERO),
                     status: StatusCode::REQUEST_TIMEOUT,
@@ -234,19 +340,19 @@ where
             }
         }
     } else {
-        parse_json_payload::<Req, S>(request, state).await
+        buffer_json_payload::<S>(request, state).await
     };
     let remaining = remaining.map(|budget| budget.saturating_sub(started.elapsed()));
 
-    match parsed {
-        Ok(req) => Ok(PermitThenParseJson::Parsed {
+    match buffered {
+        Ok(body) => Ok(PermitThenBufferJson::Buffered {
             permit,
             remaining,
-            req,
+            body,
         }),
         Err(err) => {
-            let (status, Json(body)) = map_json_rejection(err);
-            Ok(PermitThenParseJson::Rejected {
+            let (status, Json(body)) = map_json_bytes_rejection(err);
+            Ok(PermitThenBufferJson::Rejected {
                 permit,
                 remaining,
                 status,
@@ -622,39 +728,83 @@ where
         auth_subject: auth.audit_subject.as_deref(),
     };
 
-    let (permit, remaining, req) = match try_acquire_permit_then_parse_json::<Req, _>(
-        semaphore,
-        parse_budget,
-        request,
-        &state,
-    )
-    .await
-    {
-        Ok(PermitThenParseJson::Parsed {
-            permit,
-            remaining,
-            req,
-        }) => (permit, remaining, req),
-        Ok(PermitThenParseJson::Rejected {
-            permit,
-            remaining,
+    let (permit, remaining, body) =
+        match try_acquire_permit_then_buffer_json(semaphore, parse_budget, request, &state).await {
+            Ok(PermitThenBufferJson::Buffered {
+                permit,
+                remaining,
+                body,
+            }) => (permit, remaining, body),
+            Ok(PermitThenBufferJson::Rejected {
+                permit,
+                remaining,
+                status,
+                body,
+            }) => {
+                log_request_rejection_audit(
+                    RejectionAuditContext {
+                        state: &state,
+                        event_ctx: audit_event_ctx,
+                        audit_err: audit_err_noop,
+                    },
+                    AuditRequest {
+                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                        requested_path: None,
+                        path_prefix: None,
+                        glob_pattern: None,
+                        grep_regex: None,
+                        grep_query_len: None,
+                    },
+                    status,
+                    &body,
+                    Some(permit),
+                    remaining,
+                )
+                .await?;
+                return Err((status, Json(body)));
+            }
+            Err((status, Json(body))) => return Err((status, Json(body))),
+        };
+    let req = match preflight_workspace_authorization(&auth.allowed_workspaces, &body) {
+        PreludeDecision::Continue => match serde_json::from_slice::<Req>(&body) {
+            Ok(req) => req,
+            Err(err) => {
+                let (status, Json(body)) = map_json_slice_error(err);
+                log_request_rejection_audit(
+                    RejectionAuditContext {
+                        state: &state,
+                        event_ctx: audit_event_ctx,
+                        audit_err: audit_err_noop,
+                    },
+                    AuditRequest {
+                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                        requested_path: None,
+                        path_prefix: None,
+                        glob_pattern: None,
+                        grep_regex: None,
+                        grep_query_len: None,
+                    },
+                    status,
+                    &body,
+                    Some(permit),
+                    remaining,
+                )
+                .await?;
+                return Err((status, Json(body)));
+            }
+        },
+        PreludeDecision::Reject {
+            audit_req,
             status,
             body,
-        }) => {
+        } => {
             log_request_rejection_audit(
                 RejectionAuditContext {
                     state: &state,
                     event_ctx: audit_event_ctx,
-                    audit_err: audit_err_noop,
+                    audit_err,
                 },
-                AuditRequest {
-                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                    requested_path: None,
-                    path_prefix: None,
-                    glob_pattern: None,
-                    grep_regex: None,
-                    grep_query_len: None,
-                },
+                audit_req,
                 status,
                 &body,
                 Some(permit),
@@ -663,33 +813,11 @@ where
             .await?;
             return Err((status, Json(body)));
         }
-        Err((status, Json(body))) => return Err((status, Json(body))),
     };
     let audit_req = build_audit_req(&req);
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
-        log_request_rejection_audit(
-            RejectionAuditContext {
-                state: &state,
-                event_ctx: audit_event_ctx,
-                audit_err,
-            },
-            audit_req,
-            status,
-            &body,
-            Some(permit),
-            remaining,
-        )
-        .await?;
-        return Err((status, Json(body)));
-    }
-    if !super::auth::workspace_allowed(&auth.allowed_workspaces, req.workspace_id()) {
-        let (status, Json(body)) = super::err(
-            StatusCode::FORBIDDEN,
-            super::CODE_NOT_PERMITTED,
-            "workspace is not allowed for this token",
-        );
         log_request_rejection_audit(
             RejectionAuditContext {
                 state: &state,
@@ -921,9 +1049,9 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEventContext, AuditHooks, AuditRequest, PermitThenParseJson, VfsLimits, audit_preview,
-        handle_vfs_request, io_limits, request_ctx, try_acquire_permit,
-        try_acquire_permit_then_parse_json,
+        AuditEventContext, AuditHooks, AuditRequest, PermitThenBufferJson, PreludeDecision,
+        VfsLimits, audit_preview, handle_vfs_request, io_limits, preflight_workspace_authorization,
+        request_ctx, try_acquire_permit, try_acquire_permit_then_buffer_json,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -1016,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_acquire_permit_then_parse_json_returns_busy_before_invalid_json() {
+    async fn try_acquire_permit_then_buffer_json_returns_busy_before_invalid_json() {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let held_permit = semaphore
             .clone()
@@ -1030,10 +1158,9 @@ mod tests {
             .body(Body::from("{"))
             .expect("request");
 
-        let (status, body) =
-            try_acquire_permit_then_parse_json::<WriteRequest, _>(semaphore, None, request, &())
-                .await
-                .expect_err("saturated semaphore should short-circuit before JSON parsing");
+        let (status, body) = try_acquire_permit_then_buffer_json(semaphore, None, request, &())
+            .await
+            .expect_err("saturated semaphore should short-circuit before JSON parsing");
         drop(held_permit);
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1041,7 +1168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_acquire_permit_then_parse_json_returns_rejected_json_errors_with_permit() {
+    async fn try_acquire_permit_then_buffer_json_buffers_invalid_json_with_permit() {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/write")
@@ -1049,27 +1176,46 @@ mod tests {
             .body(Body::from("{"))
             .expect("request");
 
-        let outcome = try_acquire_permit_then_parse_json::<WriteRequest, _>(
+        let outcome = try_acquire_permit_then_buffer_json(
             Arc::new(tokio::sync::Semaphore::new(1)),
             None,
             request,
             &(),
         )
         .await
-        .expect("invalid JSON should still be reported once a permit is held");
+        .expect("body buffering should succeed even when later JSON parsing will fail");
 
         match outcome {
-            PermitThenParseJson::Rejected {
-                permit,
-                status,
-                body,
-                ..
-            } => {
-                assert_eq!(status, StatusCode::BAD_REQUEST);
-                assert_eq!(body.code, "invalid_json_syntax");
+            PermitThenBufferJson::Buffered { permit, body, .. } => {
+                assert_eq!(body.as_ref(), b"{");
                 drop(permit);
             }
-            PermitThenParseJson::Parsed { .. } => panic!("invalid JSON should not parse"),
+            PermitThenBufferJson::Rejected { .. } => {
+                panic!("invalid JSON bytes should still buffer successfully")
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_workspace_authorization_rejects_disallowed_workspace_before_full_schema_parse() {
+        let patterns = [super::super::auth::WorkspacePattern::Exact(
+            "allowed".to_string(),
+        )];
+        let body = br#"{"workspace_id":"denied","content":[]}"#;
+
+        match preflight_workspace_authorization(&patterns, body) {
+            PreludeDecision::Reject {
+                status,
+                body,
+                audit_req,
+            } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(body.code, "not_permitted");
+                assert_eq!(audit_req.workspace_id, "denied");
+            }
+            PreludeDecision::Continue => {
+                panic!("disallowed workspace should be rejected before full schema parsing")
+            }
         }
     }
 
@@ -1261,6 +1407,171 @@ mod tests {
             .expect_err("invalid workspace should be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert_eq!(err.1.0.code, "invalid_path");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn handle_vfs_request_rejects_disallowed_workspace_before_full_schema_parse() {
+        let state = test_state_with_audit(None);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"denied","path":"docs/a.txt","content":[],"expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state,
+                "req-disallowed-workspace".to_string(),
+                super::super::auth::AuthContext {
+                    allowed_workspaces: Arc::from(vec![
+                        super::super::auth::WorkspacePattern::Exact("allowed".to_string()),
+                    ]),
+                    audit_subject: None,
+                },
+                "write",
+            ),
+            request,
+            VfsLimits {
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                parse_budget: None,
+                runtime_budget: None,
+            },
+            |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
+            DbVfs::write,
+            AuditHooks {
+                ok: super::audit_ok_write,
+                err: super::audit_err_hide_secret_path,
+            },
+        )
+        .await
+        .expect_err("disallowed workspace should be rejected before full schema parsing");
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1.0.code, "not_permitted");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn handle_vfs_request_keeps_io_permit_during_required_audit_for_disallowed_workspace_rejects()
+     {
+        let (audit, control) =
+            super::super::audit::AuditLogger::blocking_required_logger_for_test();
+        let state = test_state_with_audit(Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"denied","path":"docs/a.txt","content":[],"expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let task = tokio::spawn({
+            let state = state.clone();
+            async move {
+                handle_vfs_request(
+                    request_ctx(
+                        None,
+                        state.clone(),
+                        "req-disallowed-workspace-audit".to_string(),
+                        super::super::auth::AuthContext {
+                            allowed_workspaces: Arc::from(vec![
+                                super::super::auth::WorkspacePattern::Exact("allowed".to_string()),
+                            ]),
+                            audit_subject: None,
+                        },
+                        "write",
+                    ),
+                    request,
+                    io_limits(&state),
+                    |req: &WriteRequest| {
+                        super::build_path_audit_req(req.workspace_id.as_str(), &req.path)
+                    },
+                    DbVfs::write,
+                    AuditHooks {
+                        ok: super::audit_ok_write,
+                        err: super::audit_err_hide_secret_path,
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_blocked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("required audit should block");
+        assert!(
+            state
+                .inner
+                .io_concurrency
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "required audit should keep the original IO permit on disallowed workspace rejects"
+        );
+
+        control.release_success();
+        let err = task
+            .await
+            .expect("join disallowed workspace task")
+            .expect_err("disallowed workspace should be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1.0.code, "not_permitted");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn handle_vfs_request_still_reports_schema_errors_for_allowed_workspace() {
+        let state = test_state_with_audit(None);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"allowed","path":"docs/a.txt","content":[],"expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state,
+                "req-allowed-workspace-schema".to_string(),
+                super::super::auth::AuthContext {
+                    allowed_workspaces: Arc::from(vec![
+                        super::super::auth::WorkspacePattern::Exact("allowed".to_string()),
+                    ]),
+                    audit_subject: None,
+                },
+                "write",
+            ),
+            request,
+            VfsLimits {
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                parse_budget: None,
+                runtime_budget: None,
+            },
+            |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
+            DbVfs::write,
+            AuditHooks {
+                ok: super::audit_ok_write,
+                err: super::audit_err_hide_secret_path,
+            },
+        )
+        .await
+        .expect_err("invalid schema should still be reported for allowed workspaces");
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1.0.code, "invalid_json_schema");
     }
 
     #[cfg(feature = "sqlite")]
