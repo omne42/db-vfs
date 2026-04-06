@@ -172,6 +172,24 @@ fn record_timed_out_worker_completion(elapsed: Duration) {
     }
 }
 
+#[cfg(test)]
+fn reset_timeout_completion_counters() {
+    TIMEOUT_COUNT.store(0, Ordering::Relaxed);
+    TIMEOUT_COMPLETED_COUNT.store(0, Ordering::Relaxed);
+    TIMEOUT_COMPLETED_TOTAL_MS.store(0, Ordering::Relaxed);
+    TIMEOUT_COMPLETED_LONG_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn timeout_completion_counters() -> (u64, u64, u64, u64) {
+    (
+        TIMEOUT_COUNT.load(Ordering::Relaxed),
+        TIMEOUT_COMPLETED_COUNT.load(Ordering::Relaxed),
+        TIMEOUT_COMPLETED_TOTAL_MS.load(Ordering::Relaxed),
+        TIMEOUT_COMPLETED_LONG_COUNT.load(Ordering::Relaxed),
+    )
+}
+
 pub(super) async fn run_vfs<T>(
     state: super::AppState,
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -260,6 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_releases_permit_when_request_wait_ends() {
+        reset_timeout_completion_counters();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
             .clone()
@@ -304,5 +323,63 @@ mod tests {
         drop(permit.expect("acquire result").expect("acquire permit"));
 
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_records_background_completion_once_worker_finishes() {
+        reset_timeout_completion_counters();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let run = tokio::spawn(async move {
+            run_blocking(
+                Some(Duration::from_millis(20)),
+                permit,
+                None,
+                move || -> db_vfs::Result<()> {
+                    let _ = started_tx.send(());
+                    std::thread::sleep(Duration::from_millis(60));
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("worker started")
+            .expect("start signal");
+
+        let (permit, status, body) = run
+            .await
+            .expect("run task join")
+            .expect_err("request should time out");
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.0.code, "timeout");
+        drop(permit);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let (timeouts, completions, total_ms, long_completions) =
+                    timeout_completion_counters();
+                if completions == 1 {
+                    assert_eq!(timeouts, 1);
+                    assert!(
+                        total_ms >= 60,
+                        "expected elapsed completion time to be recorded"
+                    );
+                    assert_eq!(long_completions, 0);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background completion should be recorded");
     }
 }
