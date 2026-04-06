@@ -384,7 +384,7 @@ pub(super) fn grep<S: crate::store::Store>(
             }
             if vfs.redactor.is_path_denied(&path) {
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
-                return Ok(ScanControl::Continue);
+                return Ok(ScanControl::ContinueWithoutBudget);
             }
             scanned_entries = scanned_entries.saturating_add(1);
 
@@ -654,6 +654,129 @@ mod tests {
         .expect("serialize grep response");
 
         assert!(value.get("skipped_secret_denied").is_none());
+    }
+
+    struct SecretDeniedBudgetStore {
+        rows: Vec<FileMeta>,
+        content: String,
+    }
+
+    impl Store for SecretDeniedBudgetStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            Ok(self.rows.iter().find(|meta| meta.path == path).cloned())
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            Ok(self
+                .rows
+                .iter()
+                .find(|meta| meta.path == path && meta.version == version)
+                .map(|_| self.content.clone()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            after: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self
+                .rows
+                .iter()
+                .filter(|meta| meta.path.starts_with(prefix))
+                .filter(|meta| after.is_none_or(|cursor| meta.path.as_str() > cursor))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn grep_entry_budget_ignores_secret_denied_rows() {
+        let store = SecretDeniedBudgetStore {
+            rows: vec![
+                FileMeta {
+                    path: "docs/secret/hidden.txt".to_string(),
+                    size_bytes: 5,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/visible.txt".to_string(),
+                    size_bytes: 5,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ],
+            content: "hello\n".to_string(),
+        };
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.limits.max_walk_entries = 1;
+        policy.secrets.deny_globs = vec!["docs/secret/**".to_string()];
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let response = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "hello".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "docs/visible.txt");
+        assert!(!response.truncated);
+        assert_eq!(response.scan_limit_reason, None);
+        assert_eq!(response.scanned_entries, 1);
+        assert_eq!(response.skipped_secret_denied, 1);
     }
 
     struct SingleFileStore {

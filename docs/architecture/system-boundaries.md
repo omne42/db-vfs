@@ -15,6 +15,7 @@
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
   - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` / `lock_timeout` 跟随当前请求预算。启动 migration 也必须复用有界预算，不能无限挂死在锁竞争上。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
+  - `max_walk_entries` 约束的是可公开扫描语义的 entry budget；`secret-denied` 这类不会出现在公开 diagnostics 里的隐藏路径不能消耗这个预算，也不能通过 `truncated` / `scan_limit_reason=Entries` 侧漏密度。
   - 这些 timeout/budget 是“请求等待预算”，不是对所有纯 CPU 路径都能强制抢占的硬 kill；
     一旦返回 `408 timeout`，非取消感知的后台工作仍可能继续收尾，所以 timeout 语义必须始终
     维持“状态未知，可能已完成”。
@@ -117,6 +118,8 @@
   - 仍保留 legacy `list_metas_by_prefix_page` / `get_content_chunk` compatibility fallback，
     但它们只保证正确性，不保证大前缀 scan budget 或 ranged-read 性能语义；fallback
     命中时会显式告警，提示 store 实现方补齐 cursor pagination / chunked line-range 边界。
+  - 原生 `list_metas_by_prefix_page` 实现必须返回按 `path` 严格递增、且严格位于 `after`
+    cursor 之后的页面；`glob` / `grep` 会把最后一条路径直接当下一页 cursor 使用。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `ServicePolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 
