@@ -181,7 +181,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
     use db_vfs_core::policy::{SecretRules, VfsPolicy};
 
     struct InconsistentSizeStore {
@@ -190,6 +190,10 @@ mod tests {
     }
 
     impl Store for InconsistentSizeStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.meta.path {
                 Ok(Some(self.meta.clone()))
@@ -249,11 +253,19 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     struct PanicStore;
 
     impl Store for PanicStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             panic!("patch should reject before loading metadata when redaction is active")
         }
@@ -305,6 +317,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             panic!("patch test should not scan through store")
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -342,6 +358,10 @@ mod tests {
     }
 
     impl Store for StaleLargeMetaStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             self.meta_calls = self.meta_calls.saturating_add(1);
             if self.meta_calls == 1 {
@@ -415,6 +435,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 

@@ -291,6 +291,10 @@ macro_rules! dispatch_store {
 }
 
 impl Store for BackendStore {
+    fn range_read_mode(&self) -> db_vfs::store::RangeReadMode {
+        dispatch_store!(self, range_read_mode())
+    }
+
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> db_vfs::Result<Option<FileMeta>> {
         dispatch_store!(self, get_meta(workspace_id, path))
     }

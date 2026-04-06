@@ -162,7 +162,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
     use db_vfs_core::policy::VfsPolicy;
 
     struct PrefixFilteringStore {
@@ -170,6 +170,10 @@ mod tests {
     }
 
     impl Store for PrefixFilteringStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             Ok(self.rows.iter().find(|meta| meta.path == path).cloned())
         }
@@ -227,6 +231,10 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -276,6 +284,10 @@ mod tests {
     }
 
     impl Store for NonMonotonicPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -326,6 +338,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -389,6 +405,10 @@ mod tests {
     struct SecretDeniedBudgetStore;
 
     impl Store for SecretDeniedBudgetStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -439,6 +459,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -504,6 +528,10 @@ mod tests {
     }
 
     impl Store for NonMonotonicWithinPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -554,6 +582,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -614,6 +646,10 @@ mod tests {
     struct NonMonotonicAcrossPagesStore;
 
     impl Store for NonMonotonicAcrossPagesStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -664,6 +700,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -728,6 +768,10 @@ mod tests {
     struct SlowEmptyPageStore;
 
     impl Store for SlowEmptyPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -778,6 +822,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
