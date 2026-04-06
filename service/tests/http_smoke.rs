@@ -648,6 +648,7 @@ async fn slow_body_holds_io_permit_and_second_io_request_fails_fast_with_busy() 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn read_and_grep_treat_cr_and_crlf_as_line_boundaries() {
+    let _env_guard = test_env_lock().lock().await;
     let server = setup().await;
 
     let write_resp = server
