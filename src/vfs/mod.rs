@@ -239,6 +239,7 @@ impl<S> DbVfs<S> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum ScanTarget<'a> {
     Prefix(&'a str),
     ExactPath(&'a str),
@@ -338,6 +339,7 @@ where
                 }
             }
         };
+        validate_scan_target_page(&metas, target, op)?;
 
         if metas.is_empty() {
             return Ok(ScanOutcome {
@@ -430,6 +432,34 @@ pub(super) fn validate_scan_page_order(
     Ok(())
 }
 
+fn validate_scan_target_page(
+    metas: &[FileMeta],
+    target: ScanTarget<'_>,
+    op: &'static str,
+) -> Result<()> {
+    for meta in metas {
+        match target {
+            ScanTarget::Prefix(prefix) => {
+                if !prefix.is_empty() && !meta.path.starts_with(prefix) {
+                    return Err(Error::Db(format!(
+                        "{op}: store returned path {:?} outside requested prefix {:?}",
+                        meta.path, prefix
+                    )));
+                }
+            }
+            ScanTarget::ExactPath(path) => {
+                if meta.path != path {
+                    return Err(Error::Db(format!(
+                        "{op}: store returned path {:?} for exact target {:?}",
+                        meta.path, path
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +533,63 @@ mod tests {
 
     fn validated_policy() -> Arc<ValidatedVfsPolicy> {
         Arc::new(ValidatedVfsPolicy::new(VfsPolicy::default()).expect("validated policy"))
+    }
+
+    #[test]
+    fn validate_scan_target_page_rejects_prefix_escape() {
+        let err = validate_scan_target_page(
+            &[FileMeta {
+                path: "secret/.env".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            }],
+            ScanTarget::Prefix("docs/"),
+            "glob",
+        )
+        .expect_err("path outside requested prefix should fail closed");
+        assert_eq!(err.code(), "db");
+        assert!(err.to_string().contains("outside requested prefix"));
+    }
+
+    #[test]
+    fn validate_scan_target_page_rejects_exact_path_mismatch() {
+        let err = validate_scan_target_page(
+            &[FileMeta {
+                path: "docs/other.txt".to_string(),
+                size_bytes: 1,
+                version: 1,
+                updated_at_ms: 0,
+            }],
+            ScanTarget::ExactPath("docs/a.txt"),
+            "grep",
+        )
+        .expect_err("wrong exact path should fail closed");
+        assert_eq!(err.code(), "db");
+        assert!(err.to_string().contains("exact target"));
+    }
+
+    #[test]
+    fn validate_scan_target_page_allows_matching_prefix_rows() {
+        validate_scan_target_page(
+            &[
+                FileMeta {
+                    path: "docs/a.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "docs/nested/b.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ],
+            ScanTarget::Prefix("docs/"),
+            "glob",
+        )
+        .expect("matching prefix rows should pass");
     }
 
     #[test]
