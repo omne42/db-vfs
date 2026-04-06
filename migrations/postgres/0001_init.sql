@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS files (
     version BIGINT NOT NULL CHECK (version >= 1),
     created_at_ms BIGINT NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms BIGINT NOT NULL CHECK (updated_at_ms >= created_at_ms),
-    metadata_json JSONB,
     PRIMARY KEY (workspace_id, path)
 );
 

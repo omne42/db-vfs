@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS files (
     updated_at_ms INTEGER NOT NULL
         DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
         CHECK (updated_at_ms >= created_at_ms),
-    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
     PRIMARY KEY (workspace_id, path)
 );
 

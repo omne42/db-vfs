@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
 
 pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
@@ -30,11 +31,12 @@ pub struct FileRecord {
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
-    pub metadata_json: Option<String>,
 }
 
 impl FileRecord {
     pub fn validated(self) -> Result<Self> {
+        validate_stored_workspace_id(&self.workspace_id)?;
+        validate_stored_path(&self.path)?;
         if self.version == 0 {
             return Err(Error::Db("invalid file version: 0".to_string()));
         }
@@ -66,11 +68,31 @@ pub struct FileMeta {
 
 impl FileMeta {
     pub fn validated(self) -> Result<Self> {
+        validate_stored_path(&self.path)?;
         if self.version == 0 {
             return Err(Error::Db("invalid file version: 0".to_string()));
         }
         Ok(self)
     }
+}
+
+fn validate_stored_path(path: &str) -> Result<()> {
+    let normalized = normalize_path(path)
+        .map_err(|err| Error::Db(format!("invalid stored path invariant for {path:?}: {err}")))?;
+    if normalized != path {
+        return Err(Error::Db(format!(
+            "invalid stored path invariant for {path:?}: expected canonical path {normalized:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_workspace_id(workspace_id: &str) -> Result<()> {
+    validate_workspace_id(workspace_id).map_err(|err| {
+        Error::Db(format!(
+            "invalid stored workspace_id invariant for {workspace_id:?}: {err}"
+        ))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,7 +627,6 @@ mod tests {
             version: 1,
             created_at_ms: 10,
             updated_at_ms: 10,
-            metadata_json: None,
         }
         .validated()
         .expect_err("invalid size");
@@ -619,7 +640,6 @@ mod tests {
             version: 0,
             created_at_ms: 10,
             updated_at_ms: 10,
-            metadata_json: None,
         }
         .validated()
         .expect_err("invalid version");
@@ -633,7 +653,6 @@ mod tests {
             version: 1,
             created_at_ms: 10,
             updated_at_ms: 9,
-            metadata_json: None,
         }
         .validated()
         .expect_err("invalid timestamps");
@@ -641,7 +660,17 @@ mod tests {
     }
 
     #[test]
-    fn file_meta_rejects_zero_version() {
+    fn file_meta_rejects_noncanonical_path_and_zero_version() {
+        let err = FileMeta {
+            path: "../secret".to_string(),
+            size_bytes: 1,
+            version: 1,
+            updated_at_ms: 1,
+        }
+        .validated()
+        .expect_err("noncanonical path");
+        assert_eq!(err.code(), "db");
+
         let err = FileMeta {
             path: "a.txt".to_string(),
             size_bytes: 1,
@@ -650,6 +679,22 @@ mod tests {
         }
         .validated()
         .expect_err("invalid version");
+        assert_eq!(err.code(), "db");
+    }
+
+    #[test]
+    fn file_record_rejects_invalid_workspace_id() {
+        let err = FileRecord {
+            workspace_id: "bad ws".to_string(),
+            path: "a.txt".to_string(),
+            content: "hello".to_string(),
+            size_bytes: 5,
+            version: 1,
+            created_at_ms: 10,
+            updated_at_ms: 10,
+        }
+        .validated()
+        .expect_err("invalid workspace id");
         assert_eq!(err.code(), "db");
     }
 
