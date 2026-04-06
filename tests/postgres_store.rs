@@ -424,9 +424,14 @@ fn postgres_schema_rejects_invalid_workspace_ids() {
             ],
         )
         .expect_err("invalid workspace_id insert must fail");
-    let message = err.to_string();
-    assert!(
-        message.contains("files_workspace_id_literal_check"),
-        "unexpected error: {message}"
+    let db_error = err.as_db_error().expect("check violation should be a db error");
+    assert_eq!(
+        db_error.code(),
+        &postgres::error::SqlState::CHECK_VIOLATION
+    );
+    assert_eq!(
+        db_error.constraint(),
+        Some("files_workspace_id_literal_check"),
+        "unexpected error: {db_error}"
     );
 }
