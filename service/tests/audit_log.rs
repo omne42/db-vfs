@@ -97,7 +97,9 @@ async fn setup(mut policy: ServicePolicy) -> TestServer {
         flush_max_interval_ms: Some(1),
     };
 
-    let app = db_vfs_service::server::build_app(db, policy, false).expect("build app");
+    let app =
+        db_vfs_service::server::build_app(db, policy, db_vfs_service::TrustMode::Trusted, false)
+            .expect("build app");
     TestServer {
         _dir: dir,
         app,

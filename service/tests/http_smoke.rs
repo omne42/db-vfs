@@ -278,8 +278,13 @@ async fn setup() -> TestServer {
 #[cfg(feature = "sqlite")]
 async fn setup_with_policy(policy: ServicePolicy) -> TestServer {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy, false)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app(
+        db.path().to_path_buf(),
+        policy,
+        db_vfs_service::TrustMode::Trusted,
+        false,
+    )
+    .expect("build app");
     TestServer::sqlite(app, db)
 }
 
@@ -287,8 +292,13 @@ async fn setup_with_policy(policy: ServicePolicy) -> TestServer {
 #[tokio::test]
 async fn embedded_router_write_works_without_connect_info() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        db_vfs_service::TrustMode::Trusted,
+        true,
+    )
+    .expect("build app");
     let server = TestServer::sqlite(app, db);
 
     let req = Request::builder()
@@ -316,8 +326,13 @@ async fn embedded_router_write_works_without_connect_info() {
 #[tokio::test]
 async fn workspace_id_with_wildcard_is_rejected() {
     let db = tempfile::NamedTempFile::new().expect("temp db");
-    let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy_allow_all(), true)
-        .expect("build app");
+    let app = db_vfs_service::server::build_app(
+        db.path().to_path_buf(),
+        policy_allow_all(),
+        db_vfs_service::TrustMode::Trusted,
+        true,
+    )
+    .expect("build app");
 
     let req = Request::builder()
         .method("POST")
@@ -358,7 +373,12 @@ async fn setup_postgres() -> Option<TestServer> {
         return None;
     };
     let app = tokio::task::spawn_blocking(move || {
-        db_vfs_service::server::build_app_postgres(url, policy_allow_all(), false)
+        db_vfs_service::server::build_app_postgres(
+            url,
+            policy_allow_all(),
+            db_vfs_service::TrustMode::Trusted,
+            false,
+        )
     })
     .await
     .expect("join postgres app builder")
