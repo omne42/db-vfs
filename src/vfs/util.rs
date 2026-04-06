@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use globset::GlobMatcher;
@@ -7,7 +6,7 @@ use db_vfs_core::glob_utils::{
     analyze_literal_glob_for_matching, build_glob_from_normalized,
     normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
-use db_vfs_core::path::is_canonical_runtime_relative_path;
+use db_vfs_core::path::normalize_runtime_relative_path_for_matching;
 use db_vfs_core::{Error, Result};
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
@@ -90,60 +89,11 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(glob.compile_matcher())
 }
 
-fn is_canonical_runtime_path(path: &str) -> bool {
-    is_canonical_runtime_relative_path(path)
-}
-
-fn strip_leading_dot_slashes(mut s: &str) -> &str {
-    while let Some(rest) = s.strip_prefix("./") {
-        s = rest;
-    }
-    s
-}
-
-fn strip_leading_slashes(s: &str) -> &str {
-    s.trim_start_matches('/')
-}
-
 pub(super) fn glob_is_match(glob: &GlobMatcher, path: &str) -> bool {
-    if is_canonical_runtime_path(path) {
-        return glob.is_match(std::path::Path::new(path));
-    }
-
-    let trimmed = path.trim();
-    let normalized: Cow<'_, str> = if trimmed.contains('\\') {
-        Cow::Owned(trimmed.replace('\\', "/"))
-    } else {
-        Cow::Borrowed(trimmed)
+    let Some(path) = normalize_runtime_relative_path_for_matching(path) else {
+        return false;
     };
-    let normalized = strip_leading_dot_slashes(normalized.as_ref());
-    let normalized = strip_leading_slashes(normalized);
-    if normalized.is_empty()
-        || normalized.contains('\0')
-        || normalized.chars().any(char::is_control)
-    {
-        return false;
-    }
-
-    let mut out = String::with_capacity(normalized.len());
-    for segment in normalized.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return false;
-        }
-        if !out.is_empty() {
-            out.push('/');
-        }
-        out.push_str(segment);
-    }
-
-    if out.is_empty() {
-        return false;
-    }
-
-    glob.is_match(std::path::Path::new(&out))
+    glob.is_match(std::path::Path::new(path.as_ref()))
 }
 
 pub(super) fn derive_safe_prefix_from_glob(pattern: &str) -> Option<String> {
@@ -184,17 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_runtime_path_detection_is_strict() {
-        assert!(is_canonical_runtime_path("docs/a.txt"));
-        assert!(!is_canonical_runtime_path("./docs/a.txt"));
-        assert!(!is_canonical_runtime_path("/docs/a.txt"));
-        assert!(!is_canonical_runtime_path("docs//a.txt"));
-        assert!(!is_canonical_runtime_path("docs/a.txt/"));
-    }
-
-    #[test]
     fn glob_match_runtime_normalization_rejects_invalid_paths() {
         let glob = compile_glob("docs/*.txt").expect("glob");
+        assert!(glob_is_match(&glob, "docs/a.txt"));
         assert!(glob_is_match(&glob, "./docs//a.txt"));
         assert!(glob_is_match(&glob, "///./docs//a.txt"));
         assert!(!glob_is_match(&glob, "docs/../a.txt"));

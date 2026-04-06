@@ -777,6 +777,7 @@ mod tests {
         let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
 
         assert!(redactor.glob_may_match_denied_path(".[en]nv"));
+        assert!(redactor.glob_may_match_denied_path(".e[!x]v"));
         assert!(redactor.glob_may_match_denied_path(".{envrc,netrc}"));
         assert!(redactor.glob_may_match_denied_path("docs/**/.env*"));
         assert!(!redactor.glob_may_match_denied_path("docs/*.txt"));
@@ -844,6 +845,10 @@ mod tests {
 
         assert_eq!(
             redactor.redact_audit_glob_pattern(".[en]nv"),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(".e[!x]v"),
             AUDIT_SECRET_PLACEHOLDER
         );
         assert_eq!(
