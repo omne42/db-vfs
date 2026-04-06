@@ -552,8 +552,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
 - service/audit-redaction: apply descendant-aware secret masking to audited `glob_pattern` values so protected roots (for example `.git`) are redacted consistently.
 - core/redaction+service/handlers: move audit path/glob masking behind `SecretRedactor` helper APIs so handlers no longer duplicate deny-glob probe semantics outside the core matcher boundary.
-- vfs/grep: defer escaped-path JSON-size accounting until a file produces a match, avoiding unnecessary per-file escape work for non-matching content.
-- vfs/grep+patch: replace remaining lossy `usize -> u64` casts in input-size error accounting with checked/saturating conversions to avoid theoretical truncation on wide-pointer targets.
 
 
 ---
@@ -1512,3 +1510,4 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
+
