@@ -1,5 +1,5 @@
 #[cfg(feature = "sqlite")]
-use db_vfs_core::path::normalize_path;
+use db_vfs_core::path::{normalize_path, validate_workspace_id};
 
 #[cfg(feature = "sqlite")]
 pub fn migrate_sqlite(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -13,7 +13,10 @@ pub fn migrate_sqlite(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch(include_str!(
         "../migrations/sqlite/0003_path_invariants.sql"
     ))?;
-    validate_existing_sqlite_paths(conn)?;
+    conn.execute_batch(include_str!(
+        "../migrations/sqlite/0004_workspace_id_invariants.sql"
+    ))?;
+    validate_existing_sqlite_invariants(conn)?;
     Ok(())
 }
 
@@ -25,6 +28,9 @@ pub fn migrate_postgres(client: &mut postgres::Client) -> Result<(), postgres::E
     ))?;
     client.batch_execute(include_str!(
         "../migrations/postgres/0003_path_invariants.sql"
+    ))?;
+    client.batch_execute(include_str!(
+        "../migrations/postgres/0004_workspace_id_invariants.sql"
     ))?;
     Ok(())
 }
@@ -58,11 +64,19 @@ fn sqlite_path_invariant_error(message: impl Into<String>) -> rusqlite::Error {
 }
 
 #[cfg(feature = "sqlite")]
-fn validate_existing_sqlite_paths(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
+fn validate_existing_sqlite_invariants(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT workspace_id, path FROM files ORDER BY workspace_id, path")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        let path = row.get::<_, String>(0)?;
+        let workspace_id = row.get::<_, String>(0)?;
+        validate_workspace_id(&workspace_id).map_err(|err| {
+            sqlite_path_invariant_error(format!(
+                "existing files.workspace_id violates literal-workspace invariant for {workspace_id:?}: {err}"
+            ))
+        })?;
+
+        let path = row.get::<_, String>(1)?;
         let normalized = normalize_path(&path).map_err(|err| {
             sqlite_path_invariant_error(format!(
                 "existing files.path violates canonical-path invariant for {path:?}: {err}"
@@ -86,7 +100,9 @@ mod tests {
     fn postgres_migration_contains_integrity_checks() {
         let sql = include_str!("../migrations/postgres/0001_init.sql");
         let generations_sql = include_str!("../migrations/postgres/0002_file_generations.sql");
-        let invariants_sql = include_str!("../migrations/postgres/0003_path_invariants.sql");
+        let path_invariants_sql = include_str!("../migrations/postgres/0003_path_invariants.sql");
+        let workspace_invariants_sql =
+            include_str!("../migrations/postgres/0004_workspace_id_invariants.sql");
 
         assert!(sql.contains("CHECK (length(workspace_id) > 0)"));
         assert!(sql.contains("CHECK (length(path) > 0)"));
@@ -96,8 +112,10 @@ mod tests {
         assert!(generations_sql.contains("CREATE TABLE IF NOT EXISTS file_generations"));
         assert!(generations_sql.contains("CHECK (last_version >= 0)"));
         assert!(generations_sql.contains("SELECT workspace_id, path, version"));
-        assert!(invariants_sql.contains("ALTER TABLE files DROP COLUMN metadata_json"));
-        assert!(invariants_sql.contains("db_vfs_is_canonical_path"));
+        assert!(path_invariants_sql.contains("ALTER TABLE files DROP COLUMN metadata_json"));
+        assert!(path_invariants_sql.contains("db_vfs_is_canonical_path"));
+        assert!(workspace_invariants_sql.contains("db_vfs_is_literal_workspace_id"));
+        assert!(workspace_invariants_sql.contains("files_workspace_id_literal_check"));
     }
 
     #[cfg(feature = "sqlite")]
@@ -147,6 +165,16 @@ mod tests {
             "noncanonical path must fail"
         );
 
+        let invalid_workspace_id = conn.execute(
+            "INSERT INTO files (workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["team-*", "docs/e.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
+        );
+        assert!(
+            invalid_workspace_id.is_err(),
+            "wildcard workspace_id must fail"
+        );
+
         assert!(
             !sqlite_has_column(&conn, "files", "metadata_json").expect("table_info"),
             "metadata_json should be removed from the active schema"
@@ -181,6 +209,39 @@ mod tests {
         let err = migrate_sqlite(&conn).expect_err("legacy invalid rows must fail migration");
         assert!(
             err.to_string().contains("canonical-path invariant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_migration_rejects_legacy_invalid_workspace_ids() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite memory");
+        conn.execute_batch(
+            "CREATE TABLE files (
+                workspace_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                metadata_json TEXT,
+                PRIMARY KEY (workspace_id, path)
+            );",
+        )
+        .expect("create legacy table");
+        conn.execute(
+            "INSERT INTO files (workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            rusqlite::params!["team-*", "docs/a.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
+        )
+        .expect("seed legacy invalid workspace row");
+
+        let err =
+            migrate_sqlite(&conn).expect_err("legacy invalid workspace ids must fail migration");
+        assert!(
+            err.to_string().contains("literal-workspace invariant"),
             "unexpected error: {err}"
         );
     }
