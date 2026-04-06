@@ -243,6 +243,72 @@ fn postgres_versions_remain_monotonic_across_delete_and_recreate() {
 }
 
 #[test]
+fn postgres_store_normalizes_public_keys_and_rejects_invalid_workspace_ids() {
+    let Some(url) = require_postgres_url(
+        "postgres_store_normalizes_public_keys_and_rejects_invalid_workspace_ids",
+    ) else {
+        return;
+    };
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let dirty_path = format!("./docs//{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let now = now_ms();
+    let version = store
+        .insert_file_new(&ws, &dirty_path, "hello", now)
+        .expect("insert dirty path");
+    assert_eq!(version, 1);
+
+    let meta = store
+        .get_meta(&ws, &path)
+        .expect("get meta")
+        .expect("meta exists");
+    assert_eq!(meta.path, path);
+    assert_eq!(meta.version, 1);
+
+    let same_meta = store
+        .get_meta(&ws, &dirty_path)
+        .expect("get meta dirty path")
+        .expect("meta exists");
+    assert_eq!(same_meta.path, path);
+
+    let updated = store
+        .update_file_cas(&ws, &dirty_path, "hi", 1, now.saturating_add(1))
+        .expect("update dirty path");
+    assert_eq!(updated, 2);
+
+    let listed = store
+        .list_metas_by_prefix(&ws, "./docs", 16)
+        .expect("list dirty prefix");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, path);
+
+    let deleted = store
+        .delete_file(&ws, &dirty_path, Some(2))
+        .expect("delete dirty path");
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let err = store
+        .insert_file_new("bad ws", &path, "hello", now_ms())
+        .expect_err("invalid workspace id");
+    assert_eq!(err.code(), "invalid_path");
+}
+
+#[test]
 fn postgres_update_distinguishes_conflict_and_not_found() {
     let Some(url) = require_postgres_url("postgres_update_distinguishes_conflict_and_not_found")
     else {
