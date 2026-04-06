@@ -384,6 +384,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
+- vfs/api: add `DbVfs::new_with_supplied_matchers_validated` and
+  `DbVfs::try_new_with_supplied_matchers_validated` as the clearer strict validated constructors
+  for caller-supplied matchers, while keeping the older `*_with_matchers_validated` names as
+  deprecated compatibility aliases.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
@@ -513,10 +517,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
-- ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
-- ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
-- tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
-- tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 
 
 ---
@@ -1456,3 +1456,4 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
+
