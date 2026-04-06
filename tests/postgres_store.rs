@@ -399,3 +399,38 @@ fn postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
     assert_eq!(meta.version, 2);
     assert_eq!(meta.updated_at_ms, 100);
 }
+
+#[test]
+fn postgres_schema_rejects_invalid_workspace_ids() {
+    let Some(url) = require_postgres_url("postgres_schema_rejects_invalid_workspace_ids") else {
+        return;
+    };
+    ensure_postgres_schema(&url);
+
+    let mut client =
+        postgres::Client::connect(&url, postgres::NoTls).expect("connect postgres client");
+    let err = client
+        .execute(
+            "INSERT INTO files (workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &"team-*",
+                &"docs/invalid-workspace.txt",
+                &"hello",
+                &5_i64,
+                &1_i64,
+                &1_i64,
+                &1_i64,
+            ],
+        )
+        .expect_err("invalid workspace_id insert must fail");
+    let db_error = err
+        .as_db_error()
+        .expect("check violation should be a db error");
+    assert_eq!(db_error.code(), &postgres::error::SqlState::CHECK_VIOLATION);
+    assert_eq!(
+        db_error.constraint(),
+        Some("files_workspace_id_literal_check"),
+        "unexpected error: {db_error}"
+    );
+}
