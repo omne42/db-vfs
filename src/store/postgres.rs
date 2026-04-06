@@ -65,7 +65,7 @@ where
         Ok(match row {
             Some(row) => Some(
                 FileMeta {
-                    path: path.to_string(),
+                    path,
                     size_bytes: i64_to_u64(row.get::<_, i64>(0), "size_bytes")?,
                     version: i64_to_u64(row.get::<_, i64>(1), "version")?,
                     updated_at_ms: i64_to_u64(row.get::<_, i64>(2), "updated_at_ms")?,
