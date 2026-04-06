@@ -68,10 +68,8 @@ fn raw_request(body: impl Into<Body>) -> Request<Body> {
         .expect("request")
 }
 
-fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
-    let mut req = raw_request(Body::from(
-        serde_json::to_vec(body).expect("serialize request json"),
-    ));
+fn authorized_raw_request(body: impl Into<Body>) -> Request<Body> {
+    let mut req = raw_request(body);
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {DEV_TOKEN}")
@@ -79,6 +77,12 @@ fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
             .expect("authorization header"),
     );
     req
+}
+
+fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
+    authorized_raw_request(Body::from(
+        serde_json::to_vec(body).expect("serialize request json"),
+    ))
 }
 
 async fn setup(mut policy: ServicePolicy) -> TestServer {
@@ -105,27 +109,10 @@ async fn setup(mut policy: ServicePolicy) -> TestServer {
 async fn wait_for_audit_lines(path: &Path, min_lines: usize) -> Vec<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(raw) = std::fs::read_to_string(path) {
-            let mut lines = Vec::new();
-            for (idx, line) in raw.lines().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let parsed =
-                    serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|err| {
-                        panic!(
-                            "invalid audit json at line {} in {}: {} (content={})",
-                            idx + 1,
-                            path.display(),
-                            err,
-                            line
-                        )
-                    });
-                lines.push(parsed);
-            }
-            if lines.len() >= min_lines {
-                return lines;
-            }
+        if let Some(lines) = try_read_audit_lines(path)
+            && lines.len() >= min_lines
+        {
+            return lines;
         }
 
         if tokio::time::Instant::now() >= deadline {
@@ -138,6 +125,42 @@ async fn wait_for_audit_lines(path: &Path, min_lines: usize) -> Vec<serde_json::
 
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+fn try_read_audit_lines(path: &Path) -> Option<Vec<serde_json::Value>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut lines = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|err| {
+            panic!(
+                "invalid audit json at line {} in {}: {} (content={})",
+                idx + 1,
+                path.display(),
+                err,
+                line
+            )
+        });
+        lines.push(parsed);
+    }
+    Some(lines)
+}
+
+fn read_audit_lines_immediately(path: &Path) -> Vec<serde_json::Value> {
+    let lines = try_read_audit_lines(path).unwrap_or_else(|| {
+        panic!(
+            "required audit should have flushed before the response returned (path={})",
+            path.display()
+        )
+    });
+    assert!(
+        !lines.is_empty(),
+        "required audit should have flushed at least one event before the response returned (path={})",
+        path.display()
+    );
+    lines
 }
 
 fn find_event<'a>(
@@ -181,14 +204,7 @@ async fn audit_logs_unauthorized_requests() {
 async fn audit_logs_invalid_json_requests() {
     let server = setup(base_policy()).await;
 
-    let mut req = raw_request("{");
-    req.headers_mut().insert(
-        "authorization",
-        format!("Bearer {DEV_TOKEN}")
-            .parse()
-            .expect("authorization header"),
-    );
-    let resp = server.send(req).await;
+    let resp = server.send(authorized_raw_request("{")).await;
     assert_eq!(resp.status(), 400);
 
     let lines = wait_for_audit_lines(&server.audit_path, 1).await;
@@ -242,4 +258,38 @@ async fn audit_logs_rate_limited_requests() {
     let lines = wait_for_audit_lines(&server.audit_path, 2).await;
     let event = find_event(&lines, "write", 429, "rate_limited");
     assert_eq!(event["workspace_id"], "<unknown>");
+}
+
+#[tokio::test]
+async fn audit_logs_disallowed_workspace_rejects_before_response_returns() {
+    let server = setup(base_policy()).await;
+
+    let resp = server
+        .send(authorized_raw_request(
+            r#"{"workspace_id":"denied","path":"docs/a.txt","content":[],"expected_version":null}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), 403);
+
+    let lines = read_audit_lines_immediately(&server.audit_path);
+    let event = find_event(&lines, "write", 403, "not_permitted");
+    assert_eq!(event["workspace_id"], "denied");
+    assert_eq!(event["auth_subject"], DEV_TOKEN_SHA256);
+}
+
+#[tokio::test]
+async fn audit_logs_invalid_workspace_id_rejects_before_response_returns() {
+    let server = setup(base_policy()).await;
+
+    let resp = server
+        .send(authorized_raw_request(
+            r#"{"workspace_id":"bad*ws","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+        ))
+        .await;
+    assert_eq!(resp.status(), 400);
+
+    let lines = read_audit_lines_immediately(&server.audit_path);
+    let event = find_event(&lines, "write", 400, "invalid_path");
+    assert_eq!(event["workspace_id"], "bad*ws");
+    assert_eq!(event["auth_subject"], DEV_TOKEN_SHA256);
 }
