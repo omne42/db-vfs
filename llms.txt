@@ -444,6 +444,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
+- tests/vfs: add regression coverage for the deprecated validated-matcher constructor alias so policy/matcher mismatches stay fail-fast instead of silently rebuilding policy-derived matchers.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
@@ -551,7 +552,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
 - core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
-- core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
 
 
 ---
