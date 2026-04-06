@@ -178,6 +178,45 @@ fn map_json_slice_error(err: serde_json::Error) -> (StatusCode, Json<super::Erro
     }
 }
 
+fn json_decode_timeout_error() -> (StatusCode, Json<super::ErrorBody>) {
+    super::err(
+        StatusCode::REQUEST_TIMEOUT,
+        super::CODE_TIMEOUT,
+        "request timed out while buffering or decoding JSON body",
+    )
+}
+
+async fn run_json_decode_stage<T, F>(
+    budget: Option<Duration>,
+    f: F,
+) -> Result<(T, Option<Duration>), (StatusCode, Json<super::ErrorBody>)>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if budget.is_some_and(|limit| limit.is_zero()) {
+        return Err(json_decode_timeout_error());
+    }
+
+    let started = Instant::now();
+    let decode = tokio::task::spawn_blocking(f);
+    let output = if let Some(timeout) = budget {
+        match tokio::time::timeout(timeout, decode).await {
+            Ok(output) => output,
+            Err(_) => return Err(json_decode_timeout_error()),
+        }
+    } else {
+        decode.await
+    };
+    let remaining = budget.map(|limit| limit.saturating_sub(started.elapsed()));
+    let output = output.map_err(|err| {
+        super::map_err(db_vfs_core::Error::Db(format!(
+            "json decode worker failed: {err}"
+        )))
+    })?;
+    Ok((output, remaining))
+}
+
 fn preflight_workspace_authorization(
     patterns: &[super::auth::WorkspacePattern],
     body: &[u8],
@@ -313,29 +352,24 @@ where
     let started = Instant::now();
     let buffered = if let Some(timeout) = remaining {
         if timeout.is_zero() {
+            let (status, Json(body)) = json_decode_timeout_error();
             return Ok(PermitThenBufferJson::Rejected {
                 permit,
                 remaining: Some(Duration::ZERO),
-                status: StatusCode::REQUEST_TIMEOUT,
-                body: super::ErrorBody {
-                    code: super::CODE_TIMEOUT,
-                    message: "request timed out while buffering or decoding JSON body".to_string(),
-                },
+                status,
+                body,
             });
         }
 
         match tokio::time::timeout(timeout, buffer_json_payload::<S>(request, state)).await {
             Ok(buffered) => buffered,
             Err(_) => {
+                let (status, Json(body)) = json_decode_timeout_error();
                 return Ok(PermitThenBufferJson::Rejected {
                     permit,
                     remaining: Some(Duration::ZERO),
-                    status: StatusCode::REQUEST_TIMEOUT,
-                    body: super::ErrorBody {
-                        code: super::CODE_TIMEOUT,
-                        message: "request timed out while buffering or decoding JSON body"
-                            .to_string(),
-                    },
+                    status,
+                    body,
                 });
             }
         }
@@ -728,7 +762,7 @@ where
         auth_subject: auth.audit_subject.as_deref(),
     };
 
-    let (permit, remaining, body) =
+    let (permit, mut remaining, body) =
         match try_acquire_permit_then_buffer_json(semaphore, parse_budget, request, &state).await {
             Ok(PermitThenBufferJson::Buffered {
                 permit,
@@ -765,34 +799,49 @@ where
             }
             Err((status, Json(body))) => return Err((status, Json(body))),
         };
-    let req = match preflight_workspace_authorization(&auth.allowed_workspaces, &body) {
-        PreludeDecision::Continue => match serde_json::from_slice::<Req>(&body) {
-            Ok(req) => req,
-            Err(err) => {
-                let (status, Json(body)) = map_json_slice_error(err);
-                log_request_rejection_audit(
-                    RejectionAuditContext {
-                        state: &state,
-                        event_ctx: audit_event_ctx,
-                        audit_err: audit_err_noop,
-                    },
-                    AuditRequest {
-                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                        requested_path: None,
-                        path_prefix: None,
-                        glob_pattern: None,
-                        grep_regex: None,
-                        grep_query_len: None,
-                    },
-                    status,
-                    &body,
-                    Some(permit),
-                    remaining,
-                )
-                .await?;
-                return Err((status, Json(body)));
+    let (prelude, decode_remaining) = run_json_decode_stage(remaining, {
+        let patterns = auth.allowed_workspaces.clone();
+        let body = body.clone();
+        move || preflight_workspace_authorization(&patterns, body.as_ref())
+    })
+    .await?;
+    remaining = decode_remaining;
+    let req = match prelude {
+        PreludeDecision::Continue => {
+            let (decoded, decode_remaining) = run_json_decode_stage(remaining, {
+                let body = body.clone();
+                move || serde_json::from_slice::<Req>(&body)
+            })
+            .await?;
+            remaining = decode_remaining;
+            match decoded {
+                Ok(req) => req,
+                Err(err) => {
+                    let (status, Json(body)) = map_json_slice_error(err);
+                    log_request_rejection_audit(
+                        RejectionAuditContext {
+                            state: &state,
+                            event_ctx: audit_event_ctx,
+                            audit_err: audit_err_noop,
+                        },
+                        AuditRequest {
+                            workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                            requested_path: None,
+                            path_prefix: None,
+                            glob_pattern: None,
+                            grep_regex: None,
+                            grep_query_len: None,
+                        },
+                        status,
+                        &body,
+                        Some(permit),
+                        remaining,
+                    )
+                    .await?;
+                    return Err((status, Json(body)));
+                }
             }
-        },
+        }
         PreludeDecision::Reject {
             audit_req,
             status,
@@ -1050,7 +1099,8 @@ pub(super) async fn grep(
 mod tests {
     use super::{
         AuditEventContext, AuditRequest, PermitThenBufferJson, PreludeDecision, audit_preview,
-        preflight_workspace_authorization, try_acquire_permit, try_acquire_permit_then_buffer_json,
+        preflight_workspace_authorization, run_json_decode_stage, try_acquire_permit,
+        try_acquire_permit_then_buffer_json,
     };
     #[cfg(feature = "sqlite")]
     use super::{AuditHooks, VfsLimits, handle_vfs_request, io_limits, request_ctx};
@@ -1067,6 +1117,7 @@ mod tests {
     use db_vfs_core::redaction::{AUDIT_SECRET_PLACEHOLDER, SecretRedactor};
     #[cfg(feature = "sqlite")]
     use db_vfs_core::traversal::TraversalSkipper;
+    use serde::Deserialize;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1116,6 +1167,37 @@ mod tests {
             audit_subject: audit_subject.map(Arc::<str>::from),
         }
     }
+
+    #[derive(Debug, Deserialize)]
+    struct SlowRequestHelper {
+        workspace_id: String,
+    }
+
+    #[derive(Debug)]
+    struct SlowRequest {
+        workspace_id: String,
+    }
+
+    impl<'de> Deserialize<'de> for SlowRequest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let helper = SlowRequestHelper::deserialize(deserializer)?;
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(Self {
+                workspace_id: helper.workspace_id,
+            })
+        }
+    }
+
+    impl super::HasWorkspaceId for SlowRequest {
+        fn workspace_id(&self) -> &str {
+            &self.workspace_id
+        }
+    }
+
+    fn audit_ok_unit(_state: &super::super::AppState, _event: &mut super::AuditEvent, _resp: &()) {}
 
     #[cfg(feature = "sqlite")]
     #[test]
@@ -1238,6 +1320,18 @@ mod tests {
                 panic!("invalid JSON bytes should still buffer successfully")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn run_json_decode_stage_times_out_for_slow_decode() {
+        let err = run_json_decode_stage(Some(Duration::from_millis(10)), || {
+            std::thread::sleep(Duration::from_millis(50));
+        })
+        .await
+        .expect_err("slow decode should consume the remaining JSON budget");
+
+        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(err.1.0.code, "timeout");
     }
 
     #[test]
@@ -1497,6 +1591,63 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert_eq!(err.1.0.code, "not_permitted");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn handle_vfs_request_times_out_during_typed_json_decode() {
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
+                max_io_ms: 10,
+                ..ServiceLimits::default()
+            },
+            ..ServicePolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, None);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws"}"#))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state.clone(),
+                "req-slow-json-decode".to_string(),
+                allow_all_auth_ctx(),
+                "write",
+            ),
+            request,
+            io_limits(&state),
+            |req: &SlowRequest| super::AuditRequest {
+                workspace_id: req.workspace_id.to_string(),
+                requested_path: None,
+                path_prefix: None,
+                glob_pattern: None,
+                grep_regex: None,
+                grep_query_len: None,
+            },
+            |_vfs, _req| panic!("timed-out JSON decode should not reach the VFS runner"),
+            AuditHooks {
+                ok: audit_ok_unit,
+                err: super::audit_err_noop,
+            },
+        )
+        .await
+        .expect_err("slow typed decode should time out before execution");
+
+        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(err.1.0.code, "timeout");
+        let permit = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.inner.io_concurrency.clone().acquire_owned(),
+        )
+        .await
+        .expect("timed-out decode should release the semaphore slot")
+        .expect("acquire IO permit after decode timeout");
+        drop(permit);
     }
 
     #[cfg(feature = "sqlite")]
