@@ -25,3 +25,6 @@
 - `cargo fmt --all`
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- 触及 Postgres 路径、all-features 行为或 CI 矩阵时，再补跑
+  `DB_VFS_TEST_POSTGRES_URL=postgres://... cargo test --workspace --all-features --locked`
+ ；默认 CI 也会跑一条带真实 Postgres service 的 all-features 集成作业。

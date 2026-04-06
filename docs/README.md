@@ -12,3 +12,4 @@
 6. `docs/src/http-api.md`
 
 这里不重复 `README.md` 的 quickstart，也不把架构边界、源码布局和 `mdBook` 手册混成一篇长文。
+仓库入口级的验证矩阵事实也放在 `README.md`，这里继续只做文档导航。

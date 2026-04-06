@@ -53,6 +53,29 @@ curl -sS http://127.0.0.1:8080/v1/read \
   -d '{"workspace_id":"w1","path":"docs/a.txt","start_line":null,"end_line":null}'
 ```
 
+## Verification Matrix
+
+Local baseline gates:
+
+- `cargo fmt --all`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+
+CI extends that baseline in two directions:
+
+- platform matrix: Linux, macOS, Windows
+- backend matrix: a dedicated Linux Postgres Integration job runs
+  `cargo test --workspace --all-features --locked` with
+  `DB_VFS_TEST_POSTGRES_URL` pointed at a live Postgres service
+
+When you touch Postgres-specific code, feature gating, or the validation matrix itself, mirror that
+coverage locally with:
+
+```bash
+DB_VFS_TEST_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/db_vfs_ci \
+  cargo test --workspace --all-features --locked
+```
+
 ## API field reference (minimal)
 
 All endpoints are JSON `POST` and require:
