@@ -6,6 +6,8 @@
   - core `VfsPolicy` 及其验证规则；只保留 VFS 领域语义。
 - `core/src/path.rs`
   - 路径合法性与规范化规则。
+- `core/src/workspace_pattern.rs`
+  - auth `allowed_workspaces` 的 canonical 解析与匹配语义，供 policy validate/runtime 共享。
 - `core/src/traversal.rs` / `core/src/glob_utils.rs`
   - 扫描与匹配的低层规则。
 - `core/src/redaction.rs`
@@ -31,7 +33,7 @@
 - `service/src/policy_io.rs`
   - 从文件加载并验证 policy。
 - `service/src/server/auth.rs`
-  - bearer token 校验与 workspace 授权。
+  - bearer token 校验与 workspace 授权；`allowed_workspaces` 语义直接复用 core parser/matcher。
 - `service/src/server/rate_limiter.rs`
   - per-IP 限流。
 - `service/src/server/audit.rs`

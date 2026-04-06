@@ -111,7 +111,9 @@
     不把注释或非字符串字段当模板系统处理。
   - 当前这里没有接入 YAML。
 - `service/src/server/auth.rs`
-  - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验、摘要匹配和 workspace allowlist 约束。
+  - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验和摘要匹配；
+    `allowed_workspaces` 的 pattern 解析/匹配语义则复用 `core::workspace_pattern`，避免
+    policy validate/runtime 分叉。
 - `src/store/mod.rs`
   - 内置 SQLite/Postgres store 会在公开入口维持 `workspace_id` / `path` / `path_prefix`
     的 VFS 不变量，避免 direct store 调用写出 VFS 无法一致访问的脏 key。
