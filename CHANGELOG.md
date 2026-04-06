@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
 - ci/service/tests: add explicit `postgres`-only build/test gates for `db-vfs` and `db-vfs-service`, and gate SQLite-only test helpers so the Postgres-only feature profile stays warning-free and catches backend coupling regressions before merge.
 - service/runner tests: add deterministic coverage that timed-out blocking workers still record their eventual background completion metrics, so the timeout-with-late-completion model stays mechanically verified.
 - docs/vfs-api: point validated-matcher guidance at the canonical `*_with_supplied_matchers_validated` constructors and document the older `*_with_matchers_validated` names as deprecated fail-fast aliases instead of primary API names.

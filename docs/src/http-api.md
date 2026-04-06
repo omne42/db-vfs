@@ -123,7 +123,7 @@ Common codes:
 
 - `invalid_json_syntax`, `invalid_json_schema`, `invalid_json`, `unsupported_media_type`, `payload_too_large`
 - `unauthorized`, `not_permitted`, `secret_path_denied`
-- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`, `audit_unavailable`
+- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`, `audit_unavailable`, `db`
 
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
@@ -146,6 +146,11 @@ permit before buffering and decoding the body, so saturated servers fail fast in
 CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
 until any required audit append+flush completes.
 
+`timeout` is reserved for request-budget exhaustion while waiting or executing, such as body
+buffering/decode, healthy pool checkout wait, or DB lock/query runtime. If pooled checkout already
+contains a backend connect/health-check failure detail, the service surfaces that path as an
+internal `db` error instead of `timeout`.
+
 The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
 escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
 rejected purely because the client chose an escape-heavy JSON representation.
@@ -157,7 +162,8 @@ token attempts without persisting the raw credential.
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `503 audit_unavailable`: restore audit backend health first; for writes, check current file state before deciding whether to retry.
+- `500 db`: inspect service logs plus backend/pool health first; retry only after the server-side fault is understood or cleared.
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.

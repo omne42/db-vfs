@@ -164,7 +164,7 @@ Tune policy `limits` for your workload:
 
 Budget semantics:
 
-- `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
+- `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and healthy DB pool wait/connect time.
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
@@ -173,6 +173,9 @@ Budget semantics:
 - These budgets cap how long the service waits before returning. They do not forcibly stop every
   in-flight CPU path; non-cancelable work can still finish in the background after a `408 timeout`,
   so clients must treat timeout responses as "status unknown".
+- If pooled checkout already carries a backend connect/health-check failure detail, the service
+  surfaces that path as `500 {"code":"db","message":"internal error"}` instead of pretending it
+  was just a request timeout.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
@@ -231,6 +234,7 @@ Secrets semantics:
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
 | `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, pool/lock wait |
+| `500` | backend unavailable or pooled connection health/bootstrap failure | service logs, DB reachability/credentials, backend health |
 | `503` | concurrency saturation or required audit unavailable | `max_concurrency_*`, `max_db_connections`, audit worker / `audit.jsonl_path` health |
 
 ## More docs

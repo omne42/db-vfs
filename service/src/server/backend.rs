@@ -22,6 +22,7 @@ type PostgresPool =
 type PostgresConn = r2d2::PooledConnection<
     r2d2_postgres::PostgresConnectionManager<r2d2_postgres::postgres::NoTls>,
 >;
+const R2D2_TIMEOUT_MESSAGE: &str = "timed out waiting for connection";
 #[cfg(feature = "sqlite")]
 const SQLITE_UNBOUNDED_BUSY_TIMEOUT_MS: u64 = i32::MAX as u64;
 #[cfg(feature = "postgres")]
@@ -166,8 +167,31 @@ impl CancelHandle {
     }
 }
 
-fn map_pool_get_error(backend: &'static str, err: impl std::fmt::Display) -> db_vfs::Error {
-    db_vfs::Error::Timeout(format!("backend={backend} stage=pool_get detail={err}"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolGetFailureKind {
+    Timeout,
+    BackendError,
+}
+
+fn classify_pool_get_error(detail: &str) -> PoolGetFailureKind {
+    if detail
+        .strip_prefix(R2D2_TIMEOUT_MESSAGE)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .is_some()
+    {
+        PoolGetFailureKind::BackendError
+    } else {
+        PoolGetFailureKind::Timeout
+    }
+}
+
+fn map_pool_get_error(backend: &'static str, err: r2d2::Error) -> db_vfs::Error {
+    let detail = err.to_string();
+    let message = format!("backend={backend} stage=pool_get detail={detail}");
+    match classify_pool_get_error(&detail) {
+        PoolGetFailureKind::Timeout => db_vfs::Error::Timeout(message),
+        PoolGetFailureKind::BackendError => db_vfs::Error::Db(message),
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -572,6 +596,44 @@ mod tests {
             "pool timeout was not honored quickly"
         );
         assert_eq!(err.code(), "timeout");
+    }
+
+    #[test]
+    fn classify_pool_get_error_treats_timeout_without_backend_detail_as_timeout() {
+        assert_eq!(
+            classify_pool_get_error(R2D2_TIMEOUT_MESSAGE),
+            PoolGetFailureKind::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_pool_get_error_treats_timeout_with_backend_detail_as_db_error() {
+        assert_eq!(
+            classify_pool_get_error("timed out waiting for connection: connection refused"),
+            PoolGetFailureKind::BackendError
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_backend_open_maps_connect_failures_to_db_error() {
+        let dir = tempfile::tempdir().expect("temp sqlite dir");
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(dir.path());
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .min_idle(Some(0))
+            .connection_timeout(std::time::Duration::from_millis(50))
+            .build_unchecked(manager);
+
+        let err = match BackendStore::open(
+            Backend::Sqlite { pool },
+            Some(std::time::Duration::from_millis(20)),
+            None,
+        ) {
+            Ok(_) => panic!("open should fail when sqlite manager points at a directory"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), "db");
     }
 
     #[cfg(feature = "sqlite")]

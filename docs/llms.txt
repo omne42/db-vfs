@@ -199,7 +199,7 @@ Tune policy `limits` for your workload:
 
 Budget semantics:
 
-- `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
+- `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and healthy DB pool wait/connect time.
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
@@ -208,6 +208,9 @@ Budget semantics:
 - These budgets cap how long the service waits before returning. They do not forcibly stop every
   in-flight CPU path; non-cancelable work can still finish in the background after a `408 timeout`,
   so clients must treat timeout responses as "status unknown".
+- If pooled checkout already carries a backend connect/health-check failure detail, the service
+  surfaces that path as `500 {"code":"db","message":"internal error"}` instead of pretending it
+  was just a request timeout.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.
@@ -266,6 +269,7 @@ Secrets semantics:
 | `403` | workspace/policy denied | `allowed_workspaces`, `permissions.*`, `secrets.deny_globs` |
 | `409` | stale CAS version | re-read latest version before retry |
 | `408` | timeout budget exceeded (operation status may be unknown) | `limits.max_io_ms`, `limits.max_walk_ms`, DB latency, pool/lock wait |
+| `500` | backend unavailable or pooled connection health/bootstrap failure | service logs, DB reachability/credentials, backend health |
 | `503` | concurrency saturation or required audit unavailable | `max_concurrency_*`, `max_db_connections`, audit worker / `audit.jsonl_path` health |
 
 ## More docs
@@ -442,6 +446,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
 - ci/service/tests: add explicit `postgres`-only build/test gates for `db-vfs` and `db-vfs-service`, and gate SQLite-only test helpers so the Postgres-only feature profile stays warning-free and catches backend coupling regressions before merge.
 - service/runner tests: add deterministic coverage that timed-out blocking workers still record their eventual background completion metrics, so the timeout-with-late-completion model stays mechanically verified.
 - docs/vfs-api: point validated-matcher guidance at the canonical `*_with_supplied_matchers_validated` constructors and document the older `*_with_matchers_validated` names as deprecated fail-fast aliases instead of primary API names.
@@ -557,7 +562,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: when a shard is fully pruned to empty, shrink its bucket map even below the high-capacity threshold to reclaim long-lived memory after bursty traffic.
 - service/rate-limiter: treat missing `ConnectInfo` the same as the router contract by routing `None` through the shared unspecified-IP fallback bucket instead of silently bypassing per-IP limits inside `RateLimiter`.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
-- vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 
 
 ---
@@ -927,6 +931,7 @@ Critical bounded fields include:
 Budget semantics:
 
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
+- Healthy pool checkout waits map to `408 timeout`; checkout/setup failures that already carry backend connection detail remain internal `500 db` faults instead of being folded into the timeout bucket.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
 - Once the body is buffered, the service does a lightweight `workspace_id` auth preflight before
@@ -1122,7 +1127,7 @@ Common codes:
 
 - `invalid_json_syntax`, `invalid_json_schema`, `invalid_json`, `unsupported_media_type`, `payload_too_large`
 - `unauthorized`, `not_permitted`, `secret_path_denied`
-- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`, `audit_unavailable`
+- `not_found`, `conflict`, `timeout`, `busy`, `rate_limited`, `audit_unavailable`, `db`
 
 `patch` means “unified diff apply/parse failure” (not the endpoint name).
 
@@ -1145,6 +1150,11 @@ permit before buffering and decoding the body, so saturated servers fail fast in
 CPU on request bodies they cannot execute. Successful/erroring VFS requests keep that same permit
 until any required audit append+flush completes.
 
+`timeout` is reserved for request-budget exhaustion while waiting or executing, such as body
+buffering/decode, healthy pool checkout wait, or DB lock/query runtime. If pooled checkout already
+contains a backend connect/health-check failure detail, the service surfaces that path as an
+internal `db` error instead of `timeout`.
+
 The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
 escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
 rejected purely because the client chose an escape-heavy JSON representation.
@@ -1156,8 +1166,9 @@ token attempts without persisting the raw credential.
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; typically pool/lock wait or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `503 audit_unavailable`: restore audit backend health first; for writes, check current file state before deciding whether to retry.
+- `500 db`: inspect service logs plus backend/pool health first; retry only after the server-side fault is understood or cleared.
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
 - `400/401/403/415`: fix request/policy first; do not blind-retry.
 
@@ -1393,11 +1404,20 @@ Use this template for each failure:
 ## `408 timeout`
 
 - Symptom: `timeout` under load or large requests.
-- Likely cause: request budget too low for payload/scan scope, pool checkout wait, or DB lock contention.
+- Likely cause: request budget too low for payload/scan scope, healthy pool checkout wait, or DB lock contention.
 - Immediate checks: server logs with `request_id`, DB health, pool saturation, lock wait patterns.
 - Fix: tune limits and query scope; reduce request payload/scan scope.
 - Retry: yes, exponential backoff (3-5 attempts max).
 - Success criteria: sustained requests complete within budget.
+
+## `500 internal error` / `code=db`
+
+- Symptom: `500` with `code=db`.
+- Likely cause: backend connect/bootstrap/health-check failure while trying to obtain a pooled DB connection.
+- Immediate checks: service logs with `request_id`, backend reachability, credentials, broken/invalid pooled connections.
+- Fix: restore DB availability or connection health before retrying.
+- Retry: only after backend health is restored.
+- Success criteria: pool checkout succeeds and requests return their normal business result.
 
 ## `429 rate_limited`
 
