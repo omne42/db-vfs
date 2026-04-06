@@ -71,6 +71,8 @@
     拒绝，只要 `audit.required = true` 且服务还能判定对应 request class，就必须先拿到
     对应 `max_concurrency_*` permit，再等待 audit append+flush 成功后返回，不能在
     “已拒绝但未完成审计”时提前释放并发槽位。
+  - required audit 的等待语义不能再耦合 Tokio blocking pool 排队；只要 audit worker 线程
+    还能接单，blocking-pool 饥饿本身不应把请求误判成 `503 audit_unavailable`。
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。

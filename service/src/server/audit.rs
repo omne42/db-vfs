@@ -66,7 +66,25 @@ impl std::error::Error for AuditFailure {}
 
 struct QueuedAuditEvent {
     event: AuditEvent,
-    ack: Option<mpsc::SyncSender<Result<(), String>>>,
+    ack: Option<AuditAck>,
+}
+
+enum AuditAck {
+    Blocking(mpsc::SyncSender<Result<(), String>>),
+    Async(tokio::sync::oneshot::Sender<Result<(), String>>),
+}
+
+impl AuditAck {
+    fn send(self, result: Result<(), String>) {
+        match self {
+            Self::Blocking(sender) => {
+                drop(sender.send(result));
+            }
+            Self::Async(sender) => {
+                drop(sender.send(result));
+            }
+        }
+    }
 }
 
 struct OptionalAuditRecovery {
@@ -234,21 +252,7 @@ impl AuditLogger {
     ) -> Result<(), AuditFailure> {
         if self.required {
             let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-            let sender = self
-                .sender
-                .lock()
-                .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
-                .clone();
-            match sender.try_send(QueuedAuditEvent {
-                event,
-                ack: Some(ack_tx),
-            }) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => return Err(AuditFailure::queue_full()),
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err(AuditFailure::worker_stopped());
-                }
-            }
+            self.try_queue_required_event(event, AuditAck::Blocking(ack_tx))?;
             let ack_result = match budget {
                 Some(timeout) if timeout.is_zero() => {
                     return Err(AuditFailure::budget_exhausted(timeout));
@@ -314,8 +318,51 @@ impl AuditLogger {
         }
     }
 
+    pub(super) async fn try_log_required_async(
+        &self,
+        event: AuditEvent,
+        budget: Option<Duration>,
+    ) -> Result<(), AuditFailure> {
+        debug_assert!(self.required);
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.try_queue_required_event(event, AuditAck::Async(ack_tx))?;
+
+        let ack_result = match budget {
+            Some(timeout) if timeout.is_zero() => {
+                return Err(AuditFailure::budget_exhausted(timeout));
+            }
+            Some(timeout) => tokio::time::timeout(timeout, ack_rx)
+                .await
+                .map_err(|_| AuditFailure::budget_exhausted(timeout))?
+                .map_err(|_| AuditFailure::worker_stopped())?,
+            None => ack_rx.await.map_err(|_| AuditFailure::worker_stopped())?,
+        };
+
+        ack_result.map_err(AuditFailure::new)
+    }
+
     pub(super) fn is_required(&self) -> bool {
         self.required
+    }
+
+    fn try_queue_required_event(
+        &self,
+        event: AuditEvent,
+        ack: AuditAck,
+    ) -> Result<(), AuditFailure> {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
+            .clone();
+        match sender.try_send(QueuedAuditEvent {
+            event,
+            ack: Some(ack),
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::TrySendError::Full(_)) => Err(AuditFailure::queue_full()),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(AuditFailure::worker_stopped()),
+        }
     }
 
     #[cfg(test)]
@@ -357,7 +404,7 @@ impl AuditLogger {
                     return;
                 }
                 if let Some(ack) = queued.ack {
-                    ack.send(Ok(())).expect("ack audit success");
+                    ack.send(Ok(()));
                 }
             })
             .expect("spawn blocking audit test worker");
@@ -651,11 +698,11 @@ fn audit_worker_with_recovery<W, Recover>(
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
-                        drop(ack.send(Err(format_unrecoverable_write_failure(
+                        ack.send(Err(format_unrecoverable_write_failure(
                             path,
                             "serialize audit event",
                             &err,
-                        ))));
+                        )));
                     }
                     log_unrecoverable_write_failure(
                         required,
@@ -690,11 +737,11 @@ fn audit_worker_with_recovery<W, Recover>(
                     write_failures = write_failures.saturating_add(1);
                     writer_failed = true;
                     if let Some(ack) = ack {
-                        drop(ack.send(Err(format_unrecoverable_write_failure(
+                        ack.send(Err(format_unrecoverable_write_failure(
                             path,
                             "append audit newline",
                             &err,
-                        ))));
+                        )));
                     }
                     log_unrecoverable_write_failure(
                         required,
@@ -731,11 +778,11 @@ fn audit_worker_with_recovery<W, Recover>(
                         write_failures = write_failures.saturating_add(1);
                         writer_failed = true;
                         if let Some(ack) = ack {
-                            drop(ack.send(Err(format_unrecoverable_write_failure(
+                            ack.send(Err(format_unrecoverable_write_failure(
                                 path,
                                 "flush audit log",
                                 &err,
-                            ))));
+                            )));
                         }
                         log_unrecoverable_write_failure(
                             required,
@@ -764,7 +811,7 @@ fn audit_worker_with_recovery<W, Recover>(
                         continue;
                     }
                     if let Some(ack) = ack {
-                        drop(ack.send(Ok(())));
+                        ack.send(Ok(()));
                     }
                     last_flush = Instant::now();
                     continue;
@@ -1322,7 +1369,7 @@ mod tests {
         sender
             .send(super::QueuedAuditEvent {
                 event: super::minimal_event("req-1".to_string(), None, "read", 200, None),
-                ack: Some(ack_tx),
+                ack: Some(super::AuditAck::Blocking(ack_tx)),
             })
             .expect("send event");
         drop(sender);

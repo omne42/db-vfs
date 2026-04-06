@@ -109,14 +109,9 @@ async fn log_audit_event(
         return Ok(());
     }
 
-    let audit = audit.clone();
-    tokio::task::spawn_blocking(move || audit.try_log(event, None))
+    audit
+        .try_log_required_async(event, None)
         .await
-        .map_err(|err| {
-            audit_failure_response(audit::AuditFailure::new(format!(
-                "audit wait task failed: {err}"
-            )))
-        })?
         .map_err(audit_failure_response)
 }
 
@@ -126,19 +121,17 @@ async fn log_audit_event_with_permit(
     permit: tokio::sync::OwnedSemaphorePermit,
     budget: Option<Duration>,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
-    let audit = audit.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        audit.try_log(event, budget)
-    })
-    .await
-    .map_err(|err| {
-        audit_failure_response(audit::AuditFailure::new(format!(
-            "audit wait task failed: {err}"
-        )))
-    })?;
+    if !audit.is_required() {
+        drop(permit);
+        audit.try_log(event, None).map_err(audit_failure_response)?;
+        return Ok(());
+    }
 
-    result.map_err(audit_failure_response)
+    let _permit = permit;
+    audit
+        .try_log_required_async(event, budget)
+        .await
+        .map_err(audit_failure_response)
 }
 
 const CODE_NOT_PERMITTED: &str = "not_permitted";

@@ -241,6 +241,9 @@ Secrets semantics:
   finishes.
 - Unauthorized and rate-limited early rejects also follow the fail-closed path when `audit.required = true`; they acquire a frontdoor permit, spend the remaining `max_io_ms` budget on append+flush, and release that permit as soon as the request-level audit wait ends instead of waiting for any background worker lifetime.
 - Required-audit queue saturation also fails closed with `503 audit_unavailable` immediately instead of blocking indefinitely on the audit channel; the originating permit is released as soon as that bounded audit wait returns.
+- Required-audit waits do not depend on Tokio's blocking-pool scheduler; blocking-pool saturation
+  alone cannot cause a spurious `503 audit_unavailable` before the audit worker actually begins the
+  append+flush attempt.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
@@ -442,6 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
+- service/audit-runtime: move required-audit ack waits onto the async request path so blocking-pool saturation alone cannot trigger spurious `503 audit_unavailable` responses before append+flush actually starts.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
 - tests/vfs: add regression coverage for the deprecated validated-matcher constructor alias so policy/matcher mismatches stay fail-fast instead of silently rebuilding policy-derived matchers.
@@ -551,7 +555,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/grep: reuse prebuilt literal searcher state during line scans to cut repeated per-line matcher setup overhead.
 - vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
-- core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
 
 
 ---
@@ -1317,6 +1320,9 @@ Recommended `RUST_LOG`:
 - monitor disk usage;
 - understand both startup and runtime behavior difference between `audit.required=true/false`;
 - with `audit.required=true`, treat audit backpressure, per-request write/flush failures, or worker loss as availability-impacting by design.
+- with `audit.required=true`, Tokio blocking-pool saturation by itself is not an audit failure mode;
+  `503 audit_unavailable` now corresponds to real audit queue / worker / append+flush failure or
+  request-budget exhaustion.
 - with `audit.required=false`, monitor for rotated broken-audit files and dropped-event warnings:
   the service now respawns best-effort logging after sink failures, but the event that hit the
   failure can still be lost.
