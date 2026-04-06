@@ -113,8 +113,8 @@ where
         }
 
         let version = u64_to_i64(version, "version")?;
-        let start_char = u64_to_i64(start_char, "start_char")?;
-        let max_chars = usize_to_i64(max_chars, "max_chars")?;
+        let start_char = u64_to_i32(start_char, "start_char")?;
+        let max_chars = usize_to_i32(max_chars, "max_chars")?;
         let row = self
             .client
             .query_opt(
@@ -490,8 +490,12 @@ fn u64_to_i64(value: u64, field: &'static str) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 
-fn usize_to_i64(value: usize, field: &'static str) -> Result<i64> {
-    i64::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
+fn u64_to_i32(value: u64, field: &'static str) -> Result<i32> {
+    i32::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
+}
+
+fn usize_to_i32(value: usize, field: &'static str) -> Result<i32> {
+    i32::try_from(value).map_err(|_| Error::Db(format!("integer overflow converting {field}")))
 }
 
 fn i64_to_u64(value: i64, field: &'static str) -> Result<u64> {
