@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use crate::policy::AuthPolicy;
+pub(super) use db_vfs_core::workspace_pattern::AllowedWorkspacePattern as WorkspacePattern;
 
 static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[WorkspacePattern]>> = OnceLock::new();
 
@@ -39,30 +40,14 @@ pub(super) struct AuthContext {
     pub(super) audit_subject: Option<Arc<str>>,
 }
 
-#[derive(Clone)]
-pub(super) enum WorkspacePattern {
-    Any,
-    Prefix(String),
-    Exact(String),
-}
-
 fn compile_workspace_patterns(patterns: &[String]) -> anyhow::Result<Arc<[WorkspacePattern]>> {
     let mut compiled = Vec::with_capacity(patterns.len());
     for pattern in patterns {
-        if pattern == "*" {
-            compiled.push(WorkspacePattern::Any);
-            continue;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            if prefix.ends_with('-') && !prefix.is_empty() {
-                compiled.push(WorkspacePattern::Prefix(prefix.to_string()));
-                continue;
-            }
-            anyhow::bail!(
-                "invalid auth workspace pattern {pattern:?}: trailing wildcard must be \"-*\" or exactly \"*\""
-            );
-        }
-        compiled.push(WorkspacePattern::Exact(pattern.clone()));
+        compiled.push(
+            WorkspacePattern::parse(pattern).map_err(|err| {
+                anyhow::anyhow!("invalid auth workspace pattern {pattern:?}: {err}")
+            })?,
+        );
     }
     Ok(Arc::from(compiled))
 }
@@ -138,18 +123,8 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
     Some(token)
 }
 
-fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
-    workspace_id
-        .strip_prefix(prefix)
-        .is_some_and(|suffix| !suffix.is_empty())
-}
-
 pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &str) -> bool {
-    patterns.iter().any(|pattern| match pattern {
-        WorkspacePattern::Any => true,
-        WorkspacePattern::Prefix(prefix) => prefix_pattern_matches(prefix, workspace_id),
-        WorkspacePattern::Exact(exact) => exact == workspace_id,
-    })
+    patterns.iter().any(|pattern| pattern.matches(workspace_id))
 }
 
 fn hash_token_sha256(token: &str) -> [u8; 32] {
@@ -442,9 +417,18 @@ mod tests {
     #[test]
     fn compile_workspace_patterns_rejects_invalid_wildcards() {
         let err = compile_workspace_patterns(&[String::from("team*")])
-            .err()
-            .expect("invalid wildcard pattern should fail");
-        assert!(err.to_string().contains("trailing wildcard must be"));
+            .expect_err("invalid wildcard pattern should fail");
+        assert!(
+            err.to_string()
+                .contains("trailing wildcard patterns must end with '-*'")
+        );
+    }
+
+    #[test]
+    fn compile_workspace_patterns_rejects_whitespace_patterns() {
+        let err = compile_workspace_patterns(&[String::from("team a")])
+            .expect_err("whitespace-bearing pattern should fail");
+        assert!(err.to_string().contains("must not contain whitespace"));
     }
 
     #[test]

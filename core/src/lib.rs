@@ -15,5 +15,6 @@ pub mod path;
 pub mod policy;
 pub mod redaction;
 pub mod traversal;
+pub mod workspace_pattern;
 
 pub use error::{Error, Result};
