@@ -19,6 +19,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 
+use crate::TrustMode;
 use crate::policy::ServicePolicy;
 use db_vfs_core::policy::ValidatedVfsPolicy;
 use db_vfs_core::policy::VfsPolicy;
@@ -453,11 +454,18 @@ pub(in crate::server) fn test_state_with_policy_and_audit(
 }
 
 #[cfg(feature = "sqlite")]
+/// Builds the SQLite-backed service router.
+///
+/// Public builders re-apply `trust_mode` startup validation even when the caller provides an
+/// already-materialized [`ServicePolicy`], so `TrustMode::Untrusted` constraints cannot be
+/// bypassed by skipping [`crate::policy_io::load_policy`].
 pub fn build_app_sqlite(
     db_path: std::path::PathBuf,
     policy: ServicePolicy,
+    trust_mode: TrustMode,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
+    crate::policy_io::validate_policy_for_startup(&policy, trust_mode, unsafe_no_auth)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
     let manager = sqlite_connection_manager(&db_path, migration_timeout);
@@ -485,11 +493,18 @@ pub fn build_app_sqlite(
 }
 
 #[cfg(feature = "postgres")]
+/// Builds the Postgres-backed service router.
+///
+/// Public builders re-apply `trust_mode` startup validation even when the caller provides an
+/// already-materialized [`ServicePolicy`], so `TrustMode::Untrusted` constraints cannot be
+/// bypassed by skipping [`crate::policy_io::load_policy`].
 pub fn build_app_postgres(
     url: String,
     policy: ServicePolicy,
+    trust_mode: TrustMode,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
+    crate::policy_io::validate_policy_for_startup(&policy, trust_mode, unsafe_no_auth)?;
     let prepared = prepare_state(policy, unsafe_no_auth)?;
     let migration_timeout = startup_migration_timeout(prepared.policy.as_ref());
 
@@ -518,6 +533,7 @@ pub fn build_app_postgres(
 /// Convenience entrypoint using the SQLite backend.
 ///
 /// For PostgreSQL, call `build_app_postgres` when the `postgres` feature is enabled.
+/// This wrapper also re-applies `trust_mode` startup validation before any backend side effects.
 ///
 /// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When no peer
 /// address is installed by the outer server, request handling still succeeds; audit `peer_ip`
@@ -525,9 +541,10 @@ pub fn build_app_postgres(
 pub fn build_app(
     db_path: std::path::PathBuf,
     policy: ServicePolicy,
+    trust_mode: TrustMode,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<Router> {
-    build_app_sqlite(db_path, policy, unsafe_no_auth)
+    build_app_sqlite(db_path, policy, trust_mode, unsafe_no_auth)
 }
 
 #[cfg(test)]
@@ -551,7 +568,7 @@ mod tests {
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
         policy.audit.required = false;
 
-        assert!(build_app_sqlite(db_path, policy, true).is_ok());
+        assert!(build_app_sqlite(db_path, policy, TrustMode::Trusted, true).is_ok());
     }
 
     #[cfg(feature = "sqlite")]
@@ -565,7 +582,8 @@ mod tests {
         let mut policy = ServicePolicy::default();
         policy.audit.jsonl_path = Some(audit_path.to_string_lossy().into_owned());
 
-        let err = build_app_sqlite(db_path.clone(), policy, true).expect_err("should fail");
+        let err = build_app_sqlite(db_path.clone(), policy, TrustMode::Trusted, true)
+            .expect_err("should fail");
         assert!(
             err.to_string()
                 .contains("audit.jsonl_path must be a regular file")
@@ -582,12 +600,44 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("db.sqlite");
 
-        let err = build_app_sqlite(db_path.clone(), ServicePolicy::default(), false)
-            .expect_err("missing auth tokens should fail");
+        let err = build_app_sqlite(
+            db_path.clone(),
+            ServicePolicy::default(),
+            TrustMode::Trusted,
+            false,
+        )
+        .expect_err("missing auth tokens should fail");
         assert!(err.to_string().contains("no auth tokens configured"));
         assert!(
             !db_path.exists(),
             "invalid auth config should fail before touching sqlite"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn build_app_sqlite_reapplies_untrusted_constraints() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+        let mut policy = ServicePolicy::default();
+        policy.permissions.read = true;
+        policy.permissions.write = true;
+        policy.limits.max_walk_ms = Some(1_000);
+        policy.limits.max_requests_per_ip_per_sec = 1;
+        policy.limits.max_requests_burst_per_ip = 1;
+        policy.limits.max_rate_limit_ips = 16;
+        policy.auth.tokens = vec![crate::policy::AuthToken {
+            token: Some(format!("sha256:{}", "11".repeat(32))),
+            token_env_var: None,
+            allowed_workspaces: vec!["ws".to_string()],
+        }];
+
+        let err = build_app_sqlite(db_path.clone(), policy, TrustMode::Untrusted, false)
+            .expect_err("untrusted startup should reject write permissions");
+        assert!(err.to_string().contains("forbids write/patch/delete"));
+        assert!(
+            !db_path.exists(),
+            "trust_mode rejection should fail before touching sqlite"
         );
     }
 

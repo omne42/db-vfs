@@ -22,9 +22,18 @@ pub fn load_policy(
     let raw = read_policy_file(path)?;
     let format = policy_format(path)?;
     let policy = parse_policy_str(&raw, format, trust_mode, Some(path))?;
-    policy.validate().map_err(anyhow::Error::msg)?;
-    validate_trust_mode(&policy, trust_mode, unsafe_no_auth)?;
+    validate_policy_for_startup(&policy, trust_mode, unsafe_no_auth)?;
     Ok(policy)
+}
+
+pub fn validate_policy_for_startup(
+    policy: &ServicePolicy,
+    trust_mode: TrustMode,
+    unsafe_no_auth: bool,
+) -> anyhow::Result<()> {
+    policy.validate().map_err(anyhow::Error::msg)?;
+    validate_trust_mode(policy, trust_mode, unsafe_no_auth)?;
+    Ok(())
 }
 
 fn read_policy_file(path: &Path) -> anyhow::Result<String> {
