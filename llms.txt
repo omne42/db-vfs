@@ -404,6 +404,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
@@ -521,7 +522,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
-- ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
 
 
 ---
