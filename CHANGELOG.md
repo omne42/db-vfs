@@ -26,7 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
+- release: keep crate versions at `0.2.0` while the public API and service contract are still
+  evolving, so semver expectations remain aligned with the current pre-1.0 development model.
 - service/policy+core/policy: split service-only auth/audit/DB-pool/rate-limit configuration into `db_vfs_service::policy::ServicePolicy` so `db_vfs_core::policy::VfsPolicy` stays scoped to VFS-domain semantics while the service keeps the same on-disk policy shape.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
