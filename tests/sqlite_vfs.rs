@@ -847,7 +847,7 @@ fn new_with_matchers_rejects_mismatched_traversal_rules() {
 }
 
 #[test]
-fn new_with_matchers_validated_rejects_mismatched_matchers() {
+fn new_with_supplied_matchers_validated_rejects_mismatched_matchers() {
     let store = SqliteStore::open_in_memory().expect("open sqlite");
     let mut policy = policy_all_perms();
     policy.permissions.allow_full_scan = true;
@@ -866,7 +866,8 @@ fn new_with_matchers_validated_rejects_mismatched_matchers() {
         TraversalSkipper::from_rules(&TraversalRules::default()).expect("mismatched traversal"),
     );
 
-    let err = match DbVfs::new_with_matchers_validated(store, policy, redactor, traversal) {
+    let err = match DbVfs::new_with_supplied_matchers_validated(store, policy, redactor, traversal)
+    {
         Ok(_) => panic!("mismatched validated matchers should be rejected"),
         Err(err) => err,
     };

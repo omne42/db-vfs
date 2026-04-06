@@ -126,7 +126,7 @@ impl<S: Store> DbVfs<S> {
     ///
     /// This is the strict constructor: mismatched matchers are rejected
     /// instead of being silently rebuilt from policy state.
-    pub fn try_new_with_matchers_validated(
+    pub fn try_new_with_supplied_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
         redactor: impl Into<Arc<SecretRedactor>>,
@@ -144,19 +144,45 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
+    #[deprecated(
+        since = "1.0.0",
+        note = "use DbVfs::try_new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
+    )]
+    pub fn try_new_with_matchers_validated(
+        store: S,
+        policy: Arc<ValidatedVfsPolicy>,
+        redactor: impl Into<Arc<SecretRedactor>>,
+        traversal: impl Into<Arc<TraversalSkipper>>,
+    ) -> Result<Self> {
+        Self::try_new_with_supplied_matchers_validated(store, policy, redactor, traversal)
+    }
+
     /// Builds a VFS from a validated policy plus caller-supplied matchers.
     ///
     /// This constructor now rejects mismatched matchers instead of silently
     /// rebuilding them from policy state. Call [`DbVfs::new_validated`] when
     /// the caller wants policy-derived matchers and does not need to supply
     /// pre-built matcher instances.
+    pub fn new_with_supplied_matchers_validated(
+        store: S,
+        policy: Arc<ValidatedVfsPolicy>,
+        redactor: impl Into<Arc<SecretRedactor>>,
+        traversal: impl Into<Arc<TraversalSkipper>>,
+    ) -> Result<Self> {
+        Self::try_new_with_supplied_matchers_validated(store, policy, redactor, traversal)
+    }
+
+    #[deprecated(
+        since = "1.0.0",
+        note = "use DbVfs::new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
+    )]
     pub fn new_with_matchers_validated(
         store: S,
         policy: Arc<ValidatedVfsPolicy>,
         redactor: impl Into<Arc<SecretRedactor>>,
         traversal: impl Into<Arc<TraversalSkipper>>,
     ) -> Result<Self> {
-        Self::try_new_with_matchers_validated(store, policy, redactor, traversal)
+        Self::new_with_supplied_matchers_validated(store, policy, redactor, traversal)
     }
 
     pub fn policy(&self) -> &VfsPolicy {
@@ -469,8 +495,10 @@ mod tests {
         .expect("mismatched redactor");
         let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
 
-        let err = DbVfs::try_new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
-            .expect_err("mismatch should fail");
+        let err = DbVfs::try_new_with_supplied_matchers_validated(
+            DummyStore, policy, mismatched, traversal,
+        )
+        .expect_err("mismatch should fail");
         assert_eq!(err.code(), "invalid_policy");
     }
 
@@ -484,8 +512,9 @@ mod tests {
         .expect("mismatched redactor");
         let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
 
-        let err = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
-            .expect_err("mismatch should fail");
+        let err =
+            DbVfs::new_with_supplied_matchers_validated(DummyStore, policy, mismatched, traversal)
+                .expect_err("mismatch should fail");
         assert_eq!(err.code(), "invalid_policy");
     }
 
@@ -496,9 +525,28 @@ mod tests {
         let traversal =
             TraversalSkipper::from_rules(&policy.traversal).expect("matching traversal");
 
+        let vfs = DbVfs::new_with_supplied_matchers_validated(
+            DummyStore,
+            policy.clone(),
+            redactor,
+            traversal,
+        )
+        .expect("matching matchers should succeed");
+        assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
+        assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_validated_constructor_alias_still_accepts_aligned_matchers() {
+        let policy = validated_policy();
+        let redactor = SecretRedactor::from_rules(&policy.secrets).expect("matching redactor");
+        let traversal =
+            TraversalSkipper::from_rules(&policy.traversal).expect("matching traversal");
+
         let vfs =
             DbVfs::new_with_matchers_validated(DummyStore, policy.clone(), redactor, traversal)
-                .expect("matching matchers should succeed");
+                .expect("deprecated alias should stay compatible");
         assert!(vfs.redactor.is_compatible_with_rules(&policy.secrets));
         assert!(vfs.traversal.is_compatible_with_rules(&policy.traversal));
     }
