@@ -331,6 +331,18 @@ impl AuditLogger {
     }
 
     #[cfg(test)]
+    pub(super) fn broken_optional_logger_for_test() -> Self {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        Self {
+            sender: Arc::new(std::sync::Mutex::new(sender)),
+            disconnected_warned: Arc::new(AtomicBool::new(false)),
+            required: false,
+            optional_recovery: None,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn blocking_required_logger_for_test() -> (Self, BlockingRequiredAuditControl) {
         let (sender, receiver) = mpsc::sync_channel(1);
         let blocked = Arc::new(AtomicBool::new(false));
