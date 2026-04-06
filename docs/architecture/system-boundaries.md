@@ -41,6 +41,9 @@
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - JSON body buffering / decode 本身也必须吃掉 frontdoor `max_io_ms` 预算；scan 端点即使
     `max_walk_ms = None`，也不能把 body parse 变成无界等待。
+  - token 已通过但 workspace 不允许的请求，应在 body buffering 完成后、完整 endpoint
+    request schema 解析和业务执行之前尽早拒绝；当前 frontdoor 会先做 `workspace_id`
+    preflight，再决定是否进入完整反序列化。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `auth.tokens[*].token_env_var` 只承载明文 bearer token；预哈希输入只允许放在
@@ -69,9 +72,8 @@
   - scan 请求即使配置 `max_walk_ms = None`，backend DB pool wait/connect 和 frontdoor
     reject/audit wait 仍必须保持 `max_io_ms` 有界；只有 scan runtime 本身可以不设上限。
   - `ValidatedVfsPolicy` 必须包含“policy-derived matcher 可构建”这个不变量，这样
-    `DbVfs::new_validated` 以及严格的 caller-supplied validated 构造器
-    `DbVfs::new_with_supplied_matchers_validated` 都能在创建时直接暴露 policy/matcher
-    不一致，而不是把状态推迟到运行期或做静默“自动修复”。
+    `DbVfs::new_validated`、`DbVfs::new_with_matchers_validated` 这类 validated 构造器都能
+    在创建时直接暴露 policy/matcher 不一致，而不是把状态推迟到运行期或做静默“自动修复”。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
     glob/pattern 审计字段也必须按真实 deny-glob 语义保守遮蔽，不能靠一套会漂移的本地猜测规则。

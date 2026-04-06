@@ -10,6 +10,8 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
+- Once body bytes are buffered, the service preflights `workspace_id` and can reject a
+  token-authorized but disallowed workspace before the full endpoint request schema is decoded.
 - The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
   for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
   the transport representation is escape-heavy.
@@ -125,7 +127,8 @@ Required-audit queue saturation uses the same error instead of indefinitely bloc
 audit channel.
 Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
 or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
-finishes.
+finishes. Token-authorized but disallowed workspaces now fail in the frontdoor preflight path
+once `workspace_id` decodes, before full request-schema parsing or VFS execution begins.
 
 The same required-audit fail-closed rule applies to VFS-path `401 unauthorized` and
 `429 rate_limited` responses: once the service can classify the request as IO vs scan work, it

@@ -166,6 +166,7 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
+- Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
@@ -182,8 +183,7 @@ Secrets semantics:
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
-- `DbVfs::new_with_supplied_matchers_validated()` and `DbVfs::try_new_with_supplied_matchers_validated()` are the strict validated constructors for caller-supplied matchers; use `DbVfs::new_validated()` when callers want policy-derived matchers instead of supplying pre-built ones.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` remain as deprecated compatibility aliases for the stricter caller-supplied path.
+- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the strict validated constructors for caller-supplied matchers; use `DbVfs::new_validated()` when callers want policy-derived matchers instead of supplying pre-built ones.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
 - When redaction rules are active, `grep` evaluates literal/regex matches against that redacted line view instead of the hidden raw secret text, so masked content cannot still act as a match oracle.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
@@ -378,16 +378,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime+core/redaction: make early-reject paths keep their original concurrency permit through required audit append+flush, and match audited glob/pattern redaction against real secret deny semantics so values like `".[en]nv"` are masked instead of leaking to JSONL.
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
 - service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
+- service/frontdoor: preflight `workspace_id` from buffered JSON so token-authorized but disallowed workspaces fail before full endpoint-schema parsing and VFS execution, while keeping existing permit/audit budget semantics.
 - vfs/scan-pagination: move page-order and cursor monotonicity checks behind a shared helper so `glob` and `grep` keep the same broken-store diagnostics instead of maintaining duplicate validation logic.
 - vfs/patch+service/secrets: disable unified-diff patching while secret redaction rules are active so masked raw content cannot be re-exposed as a patch-context oracle.
 
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
-- vfs/api: add `DbVfs::new_with_supplied_matchers_validated` and
-  `DbVfs::try_new_with_supplied_matchers_validated` as the clearer strict validated constructors
-  for caller-supplied matchers, while keeping the older `*_with_matchers_validated` names as
-  deprecated compatibility aliases.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
@@ -517,6 +514,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+- ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
+- ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
+- tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 
 
 ---
@@ -867,6 +867,8 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
+- Once body bytes are buffered, the service preflights `workspace_id` so token-authorized but
+  disallowed workspaces fail before full request-schema parsing or VFS execution.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
@@ -883,11 +885,8 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
-- `DbVfs::new_with_supplied_matchers_validated()` and
-  `DbVfs::try_new_with_supplied_matchers_validated()` are the strict validated constructors for
-  caller-supplied matchers and fail fast on mismatch.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` remain as
-  deprecated compatibility aliases for the caller-supplied strict path.
+- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the
+  strict validated constructors for caller-supplied matchers and fail fast on mismatch.
 - `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
   against raw stored text would otherwise let callers probe masked content through context-match
   success or failure.
@@ -938,6 +937,8 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
+- Once body bytes are buffered, the service preflights `workspace_id` and can reject a
+  token-authorized but disallowed workspace before the full endpoint request schema is decoded.
 - The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
   for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
   the transport representation is escape-heavy.
@@ -1053,7 +1054,8 @@ Required-audit queue saturation uses the same error instead of indefinitely bloc
 audit channel.
 Early rejects that already acquired a concurrency permit, such as invalid JSON/schema/content-type
 or post-auth `workspace_id` rejection, also keep that permit until required audit append+flush
-finishes.
+finishes. Token-authorized but disallowed workspaces now fail in the frontdoor preflight path
+once `workspace_id` decodes, before full request-schema parsing or VFS execution begins.
 
 The same required-audit fail-closed rule applies to VFS-path `401 unauthorized` and
 `429 rate_limited` responses: once the service can classify the request as IO vs scan work, it
@@ -1163,7 +1165,9 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers若显式传入 `SecretRedactor` / `TraversalSkipper`，它们必须来自同一份已验证 policy；严格构造器会直接拒绝不一致，compatibility 构造器会回退成 policy 编译结果并发出一次显式告警。
+- **Matcher consistency**: library callers that explicitly pass `SecretRedactor` /
+  `TraversalSkipper` must source them from the same validated policy; the strict validated
+  constructors reject mismatches instead of silently rebuilding matchers from policy state.
 
 ## Untrusted mode checklist
 
