@@ -141,7 +141,9 @@ fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn prefix_pattern_matches(prefix: &str, workspace_id: &str) -> bool {
-    workspace_id.starts_with(prefix)
+    workspace_id
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| !suffix.is_empty())
 }
 
 pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &str) -> bool {
@@ -407,6 +409,11 @@ mod tests {
             &compile_workspace_patterns(&[String::from("team-*")])
                 .expect("compile workspace patterns"),
             "team-123"
+        ));
+        assert!(!workspace_allowed(
+            &compile_workspace_patterns(&[String::from("team-*")])
+                .expect("compile workspace patterns"),
+            "team-"
         ));
         assert!(!workspace_allowed(
             &compile_workspace_patterns(&[String::from("team-*")])
