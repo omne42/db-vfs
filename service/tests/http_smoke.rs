@@ -846,3 +846,46 @@ async fn write_then_read_postgres() {
     assert_eq!(read.content, "hello\n");
     assert_eq!(read.version, 1);
 }
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn write_then_read_line_range_postgres() {
+    let Some(server) = setup_postgres().await else {
+        return;
+    };
+
+    let suffix = unique_suffix();
+    let path = format!("docs/{suffix}.txt");
+    let workspace_id = "ws".to_string();
+
+    let write_resp = server
+        .send(bearer_request(
+            "/v1/write",
+            &WriteRequest {
+                workspace_id: workspace_id.clone(),
+                path: path.clone(),
+                content: "line-0001\nline-0002\nline-0003\nline-0004\n".to_string(),
+                expected_version: None,
+            },
+        ))
+        .await;
+    assert_eq!(write_resp.status(), StatusCode::OK);
+
+    let read = expect_json::<ReadBody>(
+        server
+            .send(bearer_request(
+                "/v1/read",
+                &ReadRequest {
+                    workspace_id,
+                    path,
+                    start_line: Some(2),
+                    end_line: Some(2),
+                },
+            ))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(read.content, "line-0002\n");
+    assert_eq!(read.version, 1);
+}
