@@ -702,8 +702,8 @@ mod tests {
             db_vfs::migrations::migrate_sqlite(&conn).expect("migrate sqlite");
             conn.execute(
                 "INSERT INTO files (
-                    workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms, metadata_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                    workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params!["ws", "docs/a.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
             )
             .expect("seed row");
