@@ -118,7 +118,7 @@ pub(super) fn glob<S: crate::store::Store>(
             }
             if vfs.redactor.is_path_denied(&path) {
                 skipped_secret_denied = skipped_secret_denied.saturating_add(1);
-                return Ok(ScanControl::Continue);
+                return Ok(ScanControl::ContinueWithoutBudget);
             }
             scanned_entries = scanned_entries.saturating_add(1);
             if scanned_files >= max_scan_files_u64 {
@@ -384,6 +384,119 @@ mod tests {
         .expect("serialize glob response");
 
         assert!(value.get("skipped_secret_denied").is_none());
+    }
+
+    struct SecretDeniedBudgetStore;
+
+    impl Store for SecretDeniedBudgetStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            let rows = match after {
+                None => vec![
+                    FileMeta {
+                        path: "docs/secret/hidden.txt".to_string(),
+                        size_bytes: 1,
+                        version: 1,
+                        updated_at_ms: 0,
+                    },
+                    FileMeta {
+                        path: "docs/visible.txt".to_string(),
+                        size_bytes: 1,
+                        version: 1,
+                        updated_at_ms: 0,
+                    },
+                ],
+                Some("docs/secret/hidden.txt") => vec![FileMeta {
+                    path: "docs/visible.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                }],
+                _ => Vec::new(),
+            };
+            Ok(rows)
+        }
+    }
+
+    #[test]
+    fn glob_entry_budget_ignores_secret_denied_rows() {
+        let store = SecretDeniedBudgetStore;
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+        policy.limits.max_walk_entries = 1;
+        policy.secrets.deny_globs = vec!["docs/secret/**".to_string()];
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let response = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "docs/*.txt".to_string(),
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect("glob");
+
+        assert_eq!(response.matches, vec!["docs/visible.txt"]);
+        assert!(!response.truncated);
+        assert_eq!(response.scan_limit_reason, None);
+        assert_eq!(response.scanned_entries, 1);
+        assert_eq!(response.skipped_secret_denied, 1);
     }
 
     struct NonMonotonicWithinPageStore {

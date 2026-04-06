@@ -431,6 +431,15 @@ pub trait Store {
     /// performance or scan-budget predictability. When this slow path is used,
     /// `db-vfs` emits a one-time warning naming the store type so degraded scan
     /// behavior is visible instead of silent.
+    ///
+    /// Native implementations must preserve the cursor contract that `glob` /
+    /// `grep` rely on:
+    ///
+    /// - rows within a page must be in strictly increasing lexical `path` order
+    /// - when `after` is present, every returned row must satisfy `path > after`
+    /// - callers may persist the last returned `path` as the next cursor, and
+    ///   the following page must continue strictly after that path instead of
+    ///   repeating or rewinding rows
     fn list_metas_by_prefix_page(
         &mut self,
         workspace_id: &str,

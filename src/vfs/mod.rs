@@ -246,6 +246,7 @@ pub(super) enum ScanTarget<'a> {
 
 pub(super) enum ScanControl {
     Continue,
+    ContinueWithoutBudget,
     Stop(ScanLimitReason),
 }
 
@@ -343,18 +344,23 @@ where
         }
 
         for meta in metas.drain(..) {
-            budgeted_entries = budgeted_entries.saturating_add(1);
             if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                 return Ok(ScanOutcome {
                     limit_reason: Some(ScanLimitReason::Time),
                     started,
                 });
             }
-            if let ScanControl::Stop(reason) = visit(store, meta)? {
-                return Ok(ScanOutcome {
-                    limit_reason: Some(reason),
-                    started,
-                });
+            match visit(store, meta)? {
+                ScanControl::Continue => {
+                    budgeted_entries = budgeted_entries.saturating_add(1);
+                }
+                ScanControl::ContinueWithoutBudget => {}
+                ScanControl::Stop(reason) => {
+                    return Ok(ScanOutcome {
+                        limit_reason: Some(reason),
+                        started,
+                    });
+                }
             }
         }
 
@@ -632,5 +638,112 @@ mod tests {
         advance_scan_after_cursor(&mut after, &[meta("docs/c.txt")], "glob")
             .expect("cursor should advance");
         assert_eq!(after.as_deref(), Some("docs/c.txt"));
+    }
+
+    struct ScanPageStore {
+        rows: Vec<FileMeta>,
+    }
+
+    impl Store for ScanPageStore {
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            prefix: &str,
+            after: Option<&str>,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self
+                .rows
+                .iter()
+                .filter(|meta| meta.path.starts_with(prefix))
+                .filter(|meta| after.is_none_or(|cursor| meta.path.as_str() > cursor))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[test]
+    fn scan_metas_keeps_hidden_rows_out_of_entry_budget() {
+        let mut store = ScanPageStore {
+            rows: vec![
+                meta("docs/hidden-1"),
+                meta("docs/visible"),
+                meta("docs/visible-2"),
+            ],
+        };
+        let mut visible = Vec::new();
+
+        let outcome = scan_metas(
+            &mut store,
+            "ws",
+            ScanTarget::Prefix("docs/"),
+            1,
+            None,
+            "glob",
+            |_store, meta| {
+                if meta.path.contains("hidden") {
+                    return Ok(ScanControl::ContinueWithoutBudget);
+                }
+                visible.push(meta.path);
+                Ok(ScanControl::Continue)
+            },
+        )
+        .expect("scan should succeed");
+
+        assert_eq!(visible, vec!["docs/visible"]);
+        assert_eq!(outcome.limit_reason, Some(ScanLimitReason::Entries));
     }
 }
