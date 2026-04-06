@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- service/auth: make `Authorization: Bearer <token>` parsing require a literal single-space separator so tab-delimited or double-space bearer headers no longer bypass the documented token68 contract.
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
 - service/auth: make trailing `allowed_workspaces = ["team-*"]` prefixes require at least one non-empty suffix character, so descendant-scoped tokens no longer also authorize the literal `team-` workspace.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
