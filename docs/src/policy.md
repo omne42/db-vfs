@@ -22,6 +22,16 @@ values. Comments and non-string fields are not treated as template input. When
 `trust_mode=untrusted`, those same string-value placeholders are rejected instead of being
 expanded.
 
+`trust_mode=untrusted` also re-applies service-side resource ceilings after policy parse. Current
+limits are:
+
+- `max_concurrency_io <= 16`
+- `max_concurrency_scan <= 8`
+- `max_db_connections <= 16`
+- estimated scan in-flight memory must stay `<= 512 MiB`, using
+  `max_concurrency_scan * max_read_bytes` without redaction and `2 * max_concurrency_scan *
+  max_read_bytes` when `secrets.redact_regexes` is enabled
+
 ## Default highlights
 
 | Section | Key | Default |
@@ -91,6 +101,9 @@ Budget semantics:
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
+- These timeout fields bound request-visible waiting plus bounded backend wait paths; they are not a
+  general CPU preemption mechanism for already-running blocking work. A timed-out blocking task may
+  still finish in the background after the request returns `408`.
 - When `audit.required = true`, the same request runtime budget also caps the remaining append+flush wait after VFS execution begins.
 - Required audit append+flush keeps the originating `max_concurrency_io` / `max_concurrency_scan` permit until the request can actually return.
 - The same permit retention applies to early rejects that already acquired a request slot, including invalid content type / JSON / schema, invalid `workspace_id`, and token-authorized requests whose workspace is still denied by `allowed_workspaces`.
