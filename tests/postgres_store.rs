@@ -141,6 +141,47 @@ fn postgres_store_roundtrip() {
 }
 
 #[test]
+fn postgres_line_range_reads_use_chunk_query_path() {
+    let Some(url) = require_postgres_url("postgres_line_range_reads_use_chunk_query_path") else {
+        return;
+    };
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url,
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let version = store
+        .insert_file_new(
+            &ws,
+            &path,
+            "line-0001\nline-0002\nline-0003\nline-0004\n",
+            now_ms(),
+        )
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(version, 1);
+
+    let range = store
+        .get_line_range(&ws, &path, version, 2, 2, 1_024)
+        .unwrap_or_else(|err| panic!("get_line_range failed for ws={ws}, path={path}: {err}"))
+        .unwrap_or_else(|| panic!("line range missing for ws={ws}, path={path}"));
+    assert_eq!(range.content.as_deref(), Some("line-0002\n"));
+    assert_eq!(range.bytes_read, 10);
+    assert_eq!(range.total_lines, 4);
+}
+
+#[test]
 fn postgres_delete_with_expected_version_distinguishes_conflict_and_not_found() {
     let Some(url) = require_postgres_url(
         "postgres_delete_with_expected_version_distinguishes_conflict_and_not_found",
