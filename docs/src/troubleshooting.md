@@ -34,11 +34,20 @@ Use this template for each failure:
 ## `408 timeout`
 
 - Symptom: `timeout` under load or large requests.
-- Likely cause: request budget too low for payload/scan scope, pool checkout wait, or DB lock contention.
+- Likely cause: request budget too low for payload/scan scope, healthy pool checkout wait, or DB lock contention.
 - Immediate checks: server logs with `request_id`, DB health, pool saturation, lock wait patterns.
 - Fix: tune limits and query scope; reduce request payload/scan scope.
 - Retry: yes, exponential backoff (3-5 attempts max).
 - Success criteria: sustained requests complete within budget.
+
+## `500 internal error` / `code=db`
+
+- Symptom: `500` with `code=db`.
+- Likely cause: backend connect/bootstrap/health-check failure while trying to obtain a pooled DB connection.
+- Immediate checks: service logs with `request_id`, backend reachability, credentials, broken/invalid pooled connections.
+- Fix: restore DB availability or connection health before retrying.
+- Retry: only after backend health is restored.
+- Success criteria: pool checkout succeeds and requests return their normal business result.
 
 ## `429 rate_limited`
 

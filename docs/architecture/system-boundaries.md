@@ -54,6 +54,9 @@
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - JSON body buffering / decode 本身也必须吃掉 frontdoor `max_io_ms` 预算；scan 端点即使
     `max_walk_ms = None`，也不能把 body parse 变成无界等待。
+  - `408 timeout` 只表示请求预算内的等待/执行超时，例如 frontdoor body parse、healthy pool
+    checkout wait、DB lock/query runtime；如果 pool checkout 失败里已经带有后端连接工厂或健康检查
+    错误细节，service 必须把它映射成内部 `db` 故障而不是伪装成 timeout。
   - body 缓冲完成后，service 应先对 top-level `workspace_id` 做字面校验和 allowlist 预检，
     再进入完整 request schema 反序列化；合法 token 打到未授权 workspace 的大请求不应继续
     materialize `content` / `patch` 这类大字段。
