@@ -3,12 +3,15 @@
 use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(feature = "sqlite")]
 use std::sync::OnceLock;
+#[cfg(feature = "sqlite")]
 use std::time::Duration;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
-use axum::body::{Body, Bytes, to_bytes};
+#[cfg(feature = "sqlite")]
+use axum::body::Bytes;
+use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
@@ -17,7 +20,9 @@ use db_vfs_core::policy::{Permissions, SecretRules, TraversalRules};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
+#[cfg(feature = "sqlite")]
 use tokio::sync::mpsc;
+#[cfg(feature = "sqlite")]
 use tokio_stream::wrappers::ReceiverStream;
 use tower::ServiceExt;
 
@@ -46,6 +51,7 @@ struct ReadBody {
     version: u64,
 }
 
+#[cfg(feature = "sqlite")]
 #[derive(serde::Deserialize)]
 struct GrepMatchBody {
     path: String,
@@ -54,16 +60,19 @@ struct GrepMatchBody {
     line_truncated: bool,
 }
 
+#[cfg(feature = "sqlite")]
 #[derive(serde::Deserialize)]
 struct GrepBody {
     matches: Vec<GrepMatchBody>,
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(serde::Deserialize)]
 struct ErrorBody {
     code: String,
 }
 
+#[cfg(feature = "sqlite")]
 #[derive(serde::Deserialize)]
 struct DeleteBody {
     deleted: bool,
@@ -108,6 +117,7 @@ impl TestServer {
             .expect("response")
     }
 
+    #[cfg(feature = "sqlite")]
     async fn send_without_connect_info(&self, req: Request<Body>) -> Response {
         self.app
             .as_ref()
@@ -217,6 +227,7 @@ fn json_request<T: Serialize>(uri: &str, body: &T) -> Request<Body> {
         .expect("request")
 }
 
+#[cfg(feature = "sqlite")]
 fn raw_request(uri: &str, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -237,6 +248,7 @@ fn bearer_request<T: Serialize>(uri: &str, body: &T) -> Request<Body> {
     req
 }
 
+#[cfg(feature = "sqlite")]
 fn bearer_raw_request(uri: &str, body: impl Into<Body>) -> Request<Body> {
     let mut req = raw_request(uri, body);
     req.headers_mut().insert(
