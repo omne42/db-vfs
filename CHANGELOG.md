@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- docs/vfs-api: point validated-matcher guidance at the canonical `*_with_supplied_matchers_validated` constructors and document the older `*_with_matchers_validated` names as deprecated fail-fast aliases instead of primary API names.
 - service/rate-limiter: make missing peer IPs hit the same shared fallback bucket even when `RateLimiter` is exercised directly, so its internal contract matches the HTTP middleware behavior.
 - vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.

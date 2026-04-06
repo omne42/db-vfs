@@ -103,8 +103,12 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the
-  strict validated constructors for caller-supplied matchers and fail fast on mismatch.
+- `DbVfs::new_with_supplied_matchers_validated()` and
+  `DbVfs::try_new_with_supplied_matchers_validated()` are the canonical strict validated
+  constructors for caller-supplied matchers and fail fast on mismatch.
+- Deprecated compatibility aliases `DbVfs::new_with_matchers_validated()` and
+  `DbVfs::try_new_with_matchers_validated()` preserve that same fail-fast behavior; they no longer
+  imply or permit silent matcher rebuild fallback.
 - `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
   against raw stored text would otherwise let callers probe masked content through context-match
   success or failure.
