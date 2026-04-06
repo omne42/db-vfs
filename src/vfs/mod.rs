@@ -145,7 +145,7 @@ impl<S: Store> DbVfs<S> {
     }
 
     #[deprecated(
-        since = "1.0.0",
+        since = "0.2.0",
         note = "use DbVfs::try_new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
     )]
     pub fn try_new_with_matchers_validated(
@@ -173,7 +173,7 @@ impl<S: Store> DbVfs<S> {
     }
 
     #[deprecated(
-        since = "1.0.0",
+        since = "0.2.0",
         note = "use DbVfs::new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
     )]
     pub fn new_with_matchers_validated(

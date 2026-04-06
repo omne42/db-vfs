@@ -426,7 +426,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
+- release: keep crate versions at `0.2.0` while the public API and service contract are still
+  evolving, so the published compatibility signal stays aligned with the current pre-1.0
+  development model.
 - service/policy+core/policy: split service-only auth/audit/DB-pool/rate-limit configuration into `db_vfs_service::policy::ServicePolicy` so `db_vfs_core::policy::VfsPolicy` stays scoped to VFS-domain semantics while the service keeps the same on-disk policy shape.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
@@ -556,8 +558,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: treat missing `ConnectInfo` the same as the router contract by routing `None` through the shared unspecified-IP fallback bucket instead of silently bypassing per-IP limits inside `RateLimiter`.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
-- store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
-- store/pagination: sort legacy fallback first-page results too, so `glob`/`grep` stay compatible with unsorted prefix-only stores from the initial page instead of failing with non-monotonic page errors.
 
 
 ---
