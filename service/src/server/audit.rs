@@ -357,7 +357,9 @@ impl AuditLogger {
                     return;
                 }
                 if let Some(ack) = queued.ack {
-                    ack.send(Ok(())).expect("ack audit success");
+                    // Timeout-path tests may drop the ack receiver before the
+                    // helper thread is released; treat that as a normal teardown.
+                    let _ = ack.send(Ok(()));
                 }
             })
             .expect("spawn blocking audit test worker");
