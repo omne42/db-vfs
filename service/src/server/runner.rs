@@ -14,6 +14,10 @@ static TIMEOUT_COMPLETED_TOTAL_MS: AtomicU64 = AtomicU64::new(0);
 static TIMEOUT_COMPLETED_LONG_COUNT: AtomicU64 = AtomicU64::new(0);
 const TIMEOUT_COMPLETED_LONG_MS: u64 = 30_000;
 
+#[cfg(test)]
+static TIMEOUT_METRICS_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 pub(super) fn io_timeout(policy: &VfsPolicy) -> Duration {
     Duration::from_millis(policy.limits.max_io_ms)
 }
@@ -172,6 +176,29 @@ fn record_timed_out_worker_completion(elapsed: Duration) {
     }
 }
 
+#[cfg(test)]
+fn timeout_metrics_test_lock() -> &'static tokio::sync::Mutex<()> {
+    TIMEOUT_METRICS_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+fn reset_timeout_metrics_for_test() {
+    TIMEOUT_COUNT.store(0, Ordering::Release);
+    TIMEOUT_COMPLETED_COUNT.store(0, Ordering::Release);
+    TIMEOUT_COMPLETED_TOTAL_MS.store(0, Ordering::Release);
+    TIMEOUT_COMPLETED_LONG_COUNT.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+fn timeout_metrics_for_test() -> (u64, u64, u64, u64) {
+    (
+        TIMEOUT_COUNT.load(Ordering::Acquire),
+        TIMEOUT_COMPLETED_COUNT.load(Ordering::Acquire),
+        TIMEOUT_COMPLETED_TOTAL_MS.load(Ordering::Acquire),
+        TIMEOUT_COMPLETED_LONG_COUNT.load(Ordering::Acquire),
+    )
+}
+
 pub(super) async fn run_vfs<T>(
     state: super::AppState,
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -260,6 +287,8 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_releases_permit_when_request_wait_ends() {
+        let _guard = timeout_metrics_test_lock().lock().await;
+        reset_timeout_metrics_for_test();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = semaphore
             .clone()
@@ -304,5 +333,68 @@ mod tests {
         drop(permit.expect("acquire result").expect("acquire permit"));
 
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_records_background_worker_completion_metrics() {
+        let _guard = timeout_metrics_test_lock().lock().await;
+        reset_timeout_metrics_for_test();
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let run = tokio::spawn(async move {
+            run_blocking(
+                Some(Duration::from_millis(50)),
+                permit,
+                None,
+                move || -> db_vfs::Result<()> {
+                    let _ = started_tx.send(());
+                    std::thread::sleep(Duration::from_millis(150));
+                    Ok(())
+                },
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("worker started")
+            .expect("start signal");
+
+        let result = run.await.expect("run task join");
+        let (permit, status, body) = result.expect_err("request should time out");
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body.0.code, "timeout");
+        drop(permit);
+
+        assert_eq!(timeout_metrics_for_test().0, 1);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let metrics = timeout_metrics_for_test();
+                if metrics.1 == 1 {
+                    return metrics;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background completion should be recorded");
+
+        let (timeout_count, completed_count, completed_total_ms, completed_long_count) =
+            timeout_metrics_for_test();
+        assert_eq!(timeout_count, 1);
+        assert_eq!(completed_count, 1);
+        assert_eq!(completed_long_count, 0);
+        assert!(
+            completed_total_ms >= 150,
+            "expected timed-out worker completion metric to record elapsed runtime, got {completed_total_ms}ms"
+        );
     }
 }
