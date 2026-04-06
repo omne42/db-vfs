@@ -1049,17 +1049,23 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEventContext, AuditHooks, AuditRequest, PermitThenBufferJson, PreludeDecision,
-        VfsLimits, audit_preview, handle_vfs_request, io_limits, preflight_workspace_authorization,
-        request_ctx, try_acquire_permit, try_acquire_permit_then_buffer_json,
+        AuditEventContext, AuditRequest, PermitThenBufferJson, PreludeDecision, audit_preview,
+        preflight_workspace_authorization, try_acquire_permit, try_acquire_permit_then_buffer_json,
     };
+    #[cfg(feature = "sqlite")]
+    use super::{AuditHooks, VfsLimits, handle_vfs_request, io_limits, request_ctx};
+    #[cfg(feature = "sqlite")]
     use crate::policy::{AuditPolicy, ServiceLimits, ServicePolicy};
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
+    #[cfg(feature = "sqlite")]
     use db_vfs::vfs::{DbVfs, WriteRequest};
+    #[cfg(feature = "sqlite")]
     use db_vfs_core::policy::ValidatedVfsPolicy;
+    #[cfg(feature = "sqlite")]
     use db_vfs_core::redaction::{AUDIT_SECRET_PLACEHOLDER, SecretRedactor};
+    #[cfg(feature = "sqlite")]
     use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1098,10 +1104,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     fn allow_all_auth_ctx() -> super::super::auth::AuthContext {
         auth_ctx_with_subject(None)
     }
 
+    #[cfg(feature = "sqlite")]
     fn auth_ctx_with_subject(audit_subject: Option<&str>) -> super::super::auth::AuthContext {
         super::super::auth::AuthContext {
             allowed_workspaces: Arc::from(vec![super::super::auth::WorkspacePattern::Any]),
@@ -1114,7 +1122,7 @@ mod tests {
     fn audit_redact_scan_fields_uses_secret_matcher_semantics_for_globs() {
         let state = test_state_with_audit(None);
 
-        for pattern in ["docs/.[en]nv", "docs/.netr?"] {
+        for pattern in ["docs/.[en]nv", "docs/.netr?", "docs/{.env,.netrc}"] {
             let mut event = AuditRequest {
                 workspace_id: "ws".to_string(),
                 requested_path: None,

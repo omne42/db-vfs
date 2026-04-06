@@ -130,12 +130,18 @@ fn generate_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
     use axum::Router;
+    #[cfg(feature = "sqlite")]
     use axum::body::Body;
+    #[cfg(feature = "sqlite")]
     use axum::routing::post;
+    #[cfg(feature = "sqlite")]
     use std::time::Duration;
+    #[cfg(feature = "sqlite")]
     use tower::ServiceExt;
 
+    #[cfg(feature = "sqlite")]
     use crate::policy::{AuditPolicy, ServiceLimits, ServicePolicy};
 
     #[test]

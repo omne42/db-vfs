@@ -311,15 +311,22 @@ pub(super) async fn auth_middleware(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "sqlite")]
     use axum::Router;
     use axum::http::HeaderValue;
+    #[cfg(feature = "sqlite")]
     use axum::routing::post;
     use std::collections::HashMap;
+    #[cfg(feature = "sqlite")]
     use std::net::{IpAddr, Ipv4Addr};
+    #[cfg(feature = "sqlite")]
     use std::time::Duration;
+    #[cfg(feature = "sqlite")]
     use tower::ServiceExt;
 
-    use crate::policy::{AuditPolicy, AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
+    #[cfg(feature = "sqlite")]
+    use crate::policy::{AuditPolicy, ServiceLimits, ServicePolicy};
+    use crate::policy::{AuthPolicy, AuthToken};
 
     #[test]
     fn bearer_token_parsing_is_case_insensitive_and_strict() {
@@ -735,6 +742,7 @@ mod tests {
         control.release_success();
     }
 
+    #[cfg(feature = "sqlite")]
     fn dev_token_sha256_for_test() -> String {
         format!("sha256:{}", hex::encode(hash_token_sha256("dev-token")))
     }
