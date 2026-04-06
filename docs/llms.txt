@@ -932,6 +932,8 @@ Budget semantics:
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
+- `max_walk_entries` counts publicly visible scan-entry work. Hidden `secret-denied` paths stay out
+  of that budget so `Entries` truncation cannot reveal denied-path density.
 - These budgets cap request wait time, not every CPU path's lifetime. A timed-out request can
   still finish background work after the service returns `408 timeout`, so callers must treat
   timeout responses as "status unknown".
