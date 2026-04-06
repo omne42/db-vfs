@@ -35,10 +35,6 @@ pub(super) async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let peer_ip = peer_ip(&req);
-    let limiter_ip = match peer_ip {
-        Some(ip) => Some(ip),
-        None => Some(FALLBACK_RATE_LIMIT_IP),
-    };
     if peer_ip.is_none() {
         let missing = MISSING_IP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         if missing == 1 || missing.is_multiple_of(1000) {
@@ -50,7 +46,7 @@ pub(super) async fn rate_limit_middleware(
         }
     }
 
-    if !state.inner.rate_limiter.allow(limiter_ip).await {
+    if !state.inner.rate_limiter.allow(peer_ip).await {
         if let Some(audit) = state.inner.audit.as_ref()
             && let Some(op) = super::audit::op_from_path(req.uri().path())
         {

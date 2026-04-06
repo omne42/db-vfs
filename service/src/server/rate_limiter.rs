@@ -37,6 +37,7 @@ const MAX_BUCKETS_BEFORE_PRUNE: usize = 4096;
 const BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
 const PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_SHARDS: usize = 32;
+const FALLBACK_RATE_LIMIT_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 
 impl RateLimiter {
     pub(super) fn new(policy: &VfsPolicy) -> Self {
@@ -85,9 +86,7 @@ impl RateLimiter {
         if !self.cfg.enabled {
             return true;
         }
-        let Some(ip) = ip else {
-            return true;
-        };
+        let ip = ip.unwrap_or(FALLBACK_RATE_LIMIT_IP);
         let idx = self.shard_index(&ip);
         let mut state = self.shards[idx].lock().await;
 
@@ -405,11 +404,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limiter_allows_requests_without_ip_and_keeps_buckets_empty() {
+    async fn rate_limiter_uses_shared_fallback_bucket_for_missing_ip() {
         let policy = VfsPolicy {
             limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 5,
-                max_requests_burst_per_ip: 5,
+                max_requests_per_ip_per_sec: 1,
+                max_requests_burst_per_ip: 1,
                 max_rate_limit_ips: 16,
                 ..db_vfs_core::policy::Limits::default()
             },
@@ -418,10 +417,11 @@ mod tests {
         let limiter = RateLimiter::new(&policy);
 
         assert!(limiter.allow(None).await);
-        assert!(limiter.allow(None).await);
+        assert!(!limiter.allow(None).await);
+        assert!(!limiter.allow(Some(FALLBACK_RATE_LIMIT_IP)).await);
 
-        assert_eq!(limiter.total_bucket_count().await, 0);
-        assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 0);
+        assert_eq!(limiter.total_bucket_count().await, 1);
+        assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

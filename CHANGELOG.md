@@ -143,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reclaim empty/low-utilization shard `HashMap` capacity at the configured prune threshold to reduce long-lived memory retention after bursty traffic.
 - service/rate-limiter: re-check per-IP buckets after prune/retry capacity paths before denying, avoiding false rejections under concurrent bucket churn at max tracked-IP limits.
 - service/rate-limiter: when a shard is fully pruned to empty, shrink its bucket map even below the high-capacity threshold to reclaim long-lived memory after bursty traffic.
+- service/rate-limiter: treat missing `ConnectInfo` the same as the router contract by routing `None` through the shared unspecified-IP fallback bucket instead of silently bypassing per-IP limits inside `RateLimiter`.
 - vfs/scan pagination: fail fast on non-monotonic store cursors in `glob`/`grep` to prevent retry loops on broken page implementations.
 - vfs/scan sorting: switch final result ordering to `sort_unstable*` in `glob`/`grep` to reduce sort overhead without changing output semantics.
 - store/prefix-bounds: reduce pagination bound-calculation allocations by removing intermediate `Vec<char>` creation in prefix successor derivation.
