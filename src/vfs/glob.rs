@@ -237,6 +237,72 @@ mod tests {
         }
     }
 
+    struct PrefixEscapingStore {
+        rows: Vec<FileMeta>,
+    }
+
+    impl Store for PrefixEscapingStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            Ok(self.rows.iter().find(|meta| meta.path == path).cloned())
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(self.rows.iter().take(limit).cloned().collect())
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
+    }
+
     #[test]
     fn glob_allows_root_exact_file_patterns_without_full_scan() {
         let store = PrefixFilteringStore {
@@ -277,6 +343,42 @@ mod tests {
         assert_eq!(resp.matches, vec!["README.md".to_string()]);
         assert_eq!(resp.scanned_entries, 1);
         assert_eq!(resp.scanned_files, 1);
+    }
+
+    #[test]
+    fn glob_fails_closed_when_store_page_escapes_requested_prefix() {
+        let store = PrefixEscapingStore {
+            rows: vec![
+                FileMeta {
+                    path: "docs/a.txt".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+                FileMeta {
+                    path: "secret/.env".to_string(),
+                    size_bytes: 1,
+                    version: 1,
+                    updated_at_ms: 0,
+                },
+            ],
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.glob = true;
+        policy.permissions.allow_full_scan = true;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .glob(GlobRequest {
+                workspace_id: "ws".to_string(),
+                pattern: "**/*".to_string(),
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("out-of-prefix store row should fail closed");
+
+        assert_eq!(err.code(), "db");
+        assert!(err.to_string().contains("outside requested prefix"));
     }
 
     struct NonMonotonicPageStore {
