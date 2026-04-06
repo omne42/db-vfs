@@ -435,6 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-handlers+core/redaction: keep the original concurrency permit held through required-audit waits for JSON/workspace early rejects too, and drive audit glob redaction from real deny-glob matching so secret patterns like `.[en]nv` no longer leak into JSONL.
 - core/policy+vfs: make `ValidatedVfsPolicy::new()` prove policy-derived matcher construction up front, so validated-policy constructor families no longer carry a reachable matcher fallback panic path.
 - service/audit-redaction: conservatively mask malformed secret-ish request paths in audit fields, so inputs like `.env/../visible.txt` or control-character variants do not leak denied roots into JSONL.
+- core/audit-redaction: fail closed when audit glob sampling hits brace or cross-product limits, so secret-ish patterns no longer leak into JSONL after truncated sampling.
 - core/audit-redaction: remove the fixed malformed-path probe cap from audit secret detection so deep secret-ish path/glob segments still redact instead of leaking after many benign prefixes.
 - store/vfs/read: finish the chunked no-redaction ranged-read path across the `Store` trait plus SQLite/Postgres backends, so narrow line-range reads no longer require whole-file materialization.
 - store/sqlite+postgres: make versioned delete distinguish `conflict` from `not_found` without a post-delete race window, and add regression coverage for the three-way outcome.
@@ -525,7 +526,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/grep: defer escaped-path JSON-size accounting until a file produces a match, avoiding unnecessary per-file escape work for non-matching content.
 - vfs/grep+patch: replace remaining lossy `usize -> u64` casts in input-size error accounting with checked/saturating conversions to avoid theoretical truncation on wide-pointer targets.
 - vfs/store/docs: keep validated-matcher and ranged-read compatibility paths backward-compatible but no longer silent by emitting one-time warnings when policy/matcher rebuild fallback or whole-file ranged-read fallback is used.
-
 
 
 ---
