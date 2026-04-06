@@ -3,12 +3,12 @@ use std::fmt;
 use db_vfs_core::policy::{
     Limits as VfsLimits, Permissions, SecretRules, TraversalRules, ValidatedVfsPolicy, VfsPolicy,
 };
+use db_vfs_core::workspace_pattern::AllowedWorkspacePattern;
 use db_vfs_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
 const MAX_AUDIT_FLUSH_EVERY_EVENTS: usize = 65_536;
-const MAX_ALLOWED_WORKSPACE_PATTERN_BYTES: usize = 1024;
 const MAX_AUDIT_FLUSH_MAX_INTERVAL_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,43 +323,9 @@ fn validate_auth(auth: &AuthPolicy) -> Result<()> {
             )));
         }
         for (j, pattern) in rule.allowed_workspaces.iter().enumerate() {
-            if pattern.trim().is_empty() {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].allowed_workspaces[{j}] must be non-empty"
-                )));
-            }
-            if pattern.chars().any(char::is_whitespace) {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].allowed_workspaces[{j}] must not contain whitespace"
-                )));
-            }
-            if pattern.len() > MAX_ALLOWED_WORKSPACE_PATTERN_BYTES {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].allowed_workspaces[{j}] is too large ({} bytes; max {})",
-                    pattern.len(),
-                    MAX_ALLOWED_WORKSPACE_PATTERN_BYTES
-                )));
-            }
-            if pattern != "*" {
-                let star_count = pattern.chars().filter(|ch| *ch == '*').count();
-                if star_count > 1 || (star_count == 1 && !pattern.ends_with('*')) {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
-                    )));
-                }
-                if star_count == 1 {
-                    let prefix = pattern.strip_suffix('*').ok_or_else(|| {
-                        Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].allowed_workspaces[{j}] has invalid trailing wildcard syntax"
-                        ))
-                    })?;
-                    if prefix.is_empty() || !prefix.ends_with('-') {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].allowed_workspaces[{j}] trailing wildcard patterns must end with '-*'"
-                        )));
-                    }
-                }
-            }
+            AllowedWorkspacePattern::parse(pattern).map_err(|err| {
+                Error::InvalidPolicy(format!("auth.tokens[{idx}].allowed_workspaces[{j}] {err}"))
+            })?;
         }
     }
 
@@ -487,6 +453,23 @@ mod tests {
 
         let err = policy.validate().expect_err("policy should fail");
         assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_auth_pattern_whitespace_via_core_parser() {
+        let mut policy = ServicePolicy::default();
+        policy.auth.tokens = vec![AuthToken {
+            token: Some(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            ),
+            token_env_var: None,
+            allowed_workspaces: vec!["team a".to_string()],
+        }];
+
+        let err = policy.validate().expect_err("policy should fail");
+        assert_eq!(err.code(), "invalid_policy");
+        assert!(err.to_string().contains("must not contain whitespace"));
     }
 
     #[test]
