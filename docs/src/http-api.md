@@ -10,8 +10,9 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
-- Once body bytes are buffered, the service preflights `workspace_id` and can reject a
-  token-authorized but disallowed workspace before the full endpoint request schema is decoded.
+- After buffering JSON, the service does a lightweight `workspace_id` auth preflight before it
+  constructs the full typed request body, so token-valid but disallowed workspaces can fail before
+  large `write` / `patch` payloads are materialized into their final request structs.
 - The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
   for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
   the transport representation is escape-heavy.

@@ -41,9 +41,9 @@
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - JSON body buffering / decode 本身也必须吃掉 frontdoor `max_io_ms` 预算；scan 端点即使
     `max_walk_ms = None`，也不能把 body parse 变成无界等待。
-  - token 已通过但 workspace 不允许的请求，应在 body buffering 完成后、完整 endpoint
-    request schema 解析和业务执行之前尽早拒绝；当前 frontdoor 会先做 `workspace_id`
-    preflight，再决定是否进入完整反序列化。
+  - body 缓冲完成后，service 应先对 top-level `workspace_id` 做字面校验和 allowlist 预检，
+    再进入完整 request schema 反序列化；合法 token 打到未授权 workspace 的大请求不应继续
+    materialize `content` / `patch` 这类大字段。
   - auth 明文 token 与 HTTP `Authorization: Bearer <token>` 走同一套 token68 语义；
     不可能通过 Bearer header 发送的 env token 必须在启动时直接拒绝。
   - `auth.tokens[*].token_env_var` 只承载明文 bearer token；预哈希输入只允许放在
@@ -51,6 +51,11 @@
     不能被当成预哈希 token 接受。
   - `workspace_id` 是字面命名空间，不是 glob；`*` 保留给 auth `allowed_workspaces`
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
+  - `allowed_workspaces = ["team-*"]` 这类 trailing `-*` 前缀只匹配带非空后缀的 workspace；
+    它不能顺带放行字面 `team-`，避免授权边界比策略作者肉眼看到的更宽。
+  - token 已通过但 workspace 未授权的请求，service 必须在 buffered JSON 的轻量
+    preflight 阶段尽早拒绝，而不是先构造完整 `write` / `patch` 大请求再发现
+    workspace scope 不匹配。
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
     append+flush 成功才返回；对应的 `max_concurrency_*` permit 会一直持有到 audit wait
     结束，避免请求在“已执行但未完成审计”时提前把并发槽位还回去。

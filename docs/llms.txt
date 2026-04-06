@@ -150,6 +150,8 @@ lifetime by accident.
   valid Bearer token value.
 - If you use plaintext env-backed tokens, keep them valid HTTP Bearer tokens (`token68` syntax; no whitespace or disallowed punctuation).
 - Scope tokens with `allowed_workspaces` (avoid broad `*` in production).
+- Trailing wildcard rules like `team-a-*` require at least one additional character after the
+  prefix, so they do not also authorize the bare `team-a-` namespace by accident.
 - Use TLS/HTTPS end-to-end for bearer token transport.
 - Enable audit log with `audit.required = true`.
 
@@ -168,6 +170,7 @@ Budget semantics:
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
+- Once the JSON body is buffered, the service preflights the top-level `workspace_id` before full request-schema deserialization, so token-valid requests aimed at a disallowed workspace can fail with `403 not_permitted` without materializing large `content` / `patch` fields.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
@@ -327,7 +330,7 @@ Actual timelines depend on exploitability and patch validation.
 | Version line | Status | Security fixes |
 | --- | --- | --- |
 | `Unreleased` / `main` | active | yes |
-| latest stable (`0.1.x`) | active | yes |
+| latest stable (`1.0.x`) | active | yes |
 | older than latest stable | EOL | no guarantee |
 
 ## Security baseline requirements
@@ -336,6 +339,8 @@ Actual timelines depend on exploitability and patch validation.
 - Keep auth enabled in production; avoid `--unsafe-no-auth`.
 - Use high-entropy tokens (random, >= 32 bytes recommended) and rotate regularly.
 - Scope tokens by `allowed_workspaces` (avoid global wildcard in production).
+- Trailing wildcard rules like `team-a-*` require at least one additional character after the
+  prefix, so they do not also authorize the bare `team-a-` namespace.
 - Enable per-IP rate limiting and audit logging.
 
 ## Threat model notes
@@ -369,6 +374,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
+- service/auth: make trailing `allowed_workspaces = ["team-*"]` prefixes require at least one non-empty suffix character, so descendant-scoped tokens no longer also authorize the literal `team-` workspace.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
 - core/policy: make omitted `limits.max_walk_ms` deserialize to the default `Some(2000)` scan budget.
@@ -398,6 +404,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
@@ -515,8 +522,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Internal
 
 - ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
-- ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
-- tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
 
 
 ---
@@ -827,6 +832,8 @@ Supported patterns:
 - `*`: allow all workspaces.
 - exact match, e.g. `ws-prod`.
 - trailing wildcard prefix, e.g. `team-a-*`.
+  This requires at least one additional character after the prefix, so `team-a-*` matches
+  `team-a-123` but not the bare `team-a-`.
 
 `workspace_id` values themselves are always literal identifiers. They cannot contain `*`, so the
 wildcard syntax stays reserved for auth policy matching and never collides with a real namespace.
@@ -867,8 +874,9 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
-- Once body bytes are buffered, the service preflights `workspace_id` so token-authorized but
-  disallowed workspaces fail before full request-schema parsing or VFS execution.
+- Once the body is buffered, the service does a lightweight `workspace_id` auth preflight before
+  it constructs the final typed request body, so token-valid but workspace-disallowed `write` /
+  `patch` requests fail before allocating their full request strings.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
@@ -937,8 +945,9 @@ All endpoints are `POST` JSON.
 - The service acquires the relevant concurrency permit before buffering/decoding JSON, and that body
   parse work is budgeted under `max_io_ms` even for scan endpoints. Slow request bodies can
   therefore fail with `408 timeout` before VFS execution starts.
-- Once body bytes are buffered, the service preflights `workspace_id` and can reject a
-  token-authorized but disallowed workspace before the full endpoint request schema is decoded.
+- After buffering JSON, the service does a lightweight `workspace_id` auth preflight before it
+  constructs the full typed request body, so token-valid but disallowed workspaces can fail before
+  large `write` / `patch` payloads are materialized into their final request structs.
 - The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
   for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
   the transport representation is escape-heavy.
@@ -1165,9 +1174,9 @@ Use this checklist for production:
 - **Direct access deny**: `secrets.deny_globs` blocks path operations.
 - **Redaction**: `secrets.redact_regexes` rewrites output text.
 - **Directory-probe semantics**: `dir/*` also applies to `dir/**` descendants.
-- **Matcher consistency**: library callers that explicitly pass `SecretRedactor` /
-  `TraversalSkipper` must source them from the same validated policy; the strict validated
-  constructors reject mismatches instead of silently rebuilding matchers from policy state.
+- **Matcher consistency**: if library callers explicitly pass `SecretRedactor` /
+  `TraversalSkipper`, those matchers must come from the same validated policy; the strict
+  validated constructors reject mismatches instead of silently rebuilding policy-derived matchers.
 
 ## Untrusted mode checklist
 

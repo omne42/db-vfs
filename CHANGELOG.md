@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - service/auth: enable bearer auth by default, tighten workspace allowlist matching, and compare token hashes in constant time.
+- service/auth: make trailing `allowed_workspaces = ["team-*"]` prefixes require at least one non-empty suffix character, so descendant-scoped tokens no longer also authorize the literal `team-` workspace.
 - service/headers: cap oversized `Authorization` headers and strictly validate/sanitize incoming `x-request-id`.
 - service/policy: harden untrusted policy loading by rejecting env-token interpolation and non-regular policy files.
 - core/policy: make omitted `limits.max_walk_ms` deserialize to the default `Some(2000)` scan budget.
@@ -39,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.

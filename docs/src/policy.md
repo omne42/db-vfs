@@ -39,6 +39,8 @@ Supported patterns:
 - `*`: allow all workspaces.
 - exact match, e.g. `ws-prod`.
 - trailing wildcard prefix, e.g. `team-a-*`.
+  This requires at least one additional character after the prefix, so `team-a-*` matches
+  `team-a-123` but not the bare `team-a-`.
 
 `workspace_id` values themselves are always literal identifiers. They cannot contain `*`, so the
 wildcard syntax stays reserved for auth policy matching and never collides with a real namespace.
@@ -79,8 +81,9 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
-- Once body bytes are buffered, the service preflights `workspace_id` so token-authorized but
-  disallowed workspaces fail before full request-schema parsing or VFS execution.
+- Once the body is buffered, the service does a lightweight `workspace_id` auth preflight before
+  it constructs the final typed request body, so token-valid but workspace-disallowed `write` /
+  `patch` requests fail before allocating their full request strings.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
