@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use db_vfs_core::policy::VfsPolicy;
+use crate::policy::ServiceLimits;
 
 #[derive(Clone)]
 pub(super) struct RateLimiter {
@@ -40,15 +40,15 @@ const MAX_SHARDS: usize = 32;
 const FALLBACK_RATE_LIMIT_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 
 impl RateLimiter {
-    pub(super) fn new(policy: &VfsPolicy) -> Self {
-        let enabled = policy.limits.max_requests_per_ip_per_sec > 0
-            && policy.limits.max_requests_burst_per_ip > 0
-            && policy.limits.max_rate_limit_ips > 0;
+    pub(super) fn new(limits: &ServiceLimits) -> Self {
+        let enabled = limits.max_requests_per_ip_per_sec > 0
+            && limits.max_requests_burst_per_ip > 0
+            && limits.max_rate_limit_ips > 0;
         let cfg = RateLimitConfig {
             enabled,
-            refill_per_sec: policy.limits.max_requests_per_ip_per_sec as f64,
-            capacity: policy.limits.max_requests_burst_per_ip as f64,
-            max_ips: policy.limits.max_rate_limit_ips as usize,
+            refill_per_sec: limits.max_requests_per_ip_per_sec as f64,
+            capacity: limits.max_requests_burst_per_ip as f64,
+            max_ips: limits.max_rate_limit_ips as usize,
         };
         let now = Instant::now();
 
@@ -279,8 +279,18 @@ fn prune_stale_buckets(state: &mut RateLimitState, now: Instant) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use db_vfs_core::policy::VfsPolicy;
     use std::collections::HashMap;
+
+    use crate::policy::ServiceLimits;
+
+    fn limits_with_rate_limit(per_sec: u32, burst: u32, max_ips: u32) -> ServiceLimits {
+        ServiceLimits {
+            max_requests_per_ip_per_sec: per_sec,
+            max_requests_burst_per_ip: burst,
+            max_rate_limit_ips: max_ips,
+            ..ServiceLimits::default()
+        }
+    }
 
     fn stale_bucket_times() -> (Instant, Instant) {
         let stale = Instant::now();
@@ -380,16 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_caps_tracked_ips() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 10,
-                max_requests_burst_per_ip: 10,
-                max_rate_limit_ips: 4,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(10, 10, 4));
 
         for idx in 1u8..=4 {
             let ip = IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, idx));
@@ -405,16 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_uses_shared_fallback_bucket_for_missing_ip() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 1,
-                max_requests_burst_per_ip: 1,
-                max_rate_limit_ips: 16,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(1, 1, 16));
 
         assert!(limiter.allow(None).await);
         assert!(!limiter.allow(None).await);
@@ -426,16 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_rate_limiter_keeps_single_minimal_shard() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 0,
-                max_requests_burst_per_ip: 0,
-                max_rate_limit_ips: 1_000_000,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(0, 0, 1_000_000));
 
         assert_eq!(limiter.shards.len(), 1);
         assert!(
@@ -449,16 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_prunes_stale_buckets_on_interval() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 5,
-                max_requests_burst_per_ip: 5,
-                max_rate_limit_ips: 10_000,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(5, 5, 10_000));
 
         let (stale, now) = stale_bucket_times();
         let target_shard = 0usize;
@@ -491,16 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_prunes_stale_buckets_when_not_full() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 5,
-                max_requests_burst_per_ip: 5,
-                max_rate_limit_ips: 10_000,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(5, 5, 10_000));
         let (stale, now) = stale_bucket_times();
         let target_shard = 0usize;
         let ips = ips_for_shard(&limiter, target_shard, 5);
@@ -530,16 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limiter_reclaims_stale_entries_before_denying_new_ip() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 10,
-                max_requests_burst_per_ip: 10,
-                max_rate_limit_ips: 4,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(10, 10, 4));
         let (stale, now) = stale_bucket_times();
 
         let target_shard = 0usize;
@@ -569,16 +525,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rate_limiter_rechecks_bucket_before_deny_when_capacity_is_full() {
-        let policy = VfsPolicy {
-            limits: db_vfs_core::policy::Limits {
-                max_requests_per_ip_per_sec: 10,
-                max_requests_burst_per_ip: 10,
-                max_rate_limit_ips: 1,
-                ..db_vfs_core::policy::Limits::default()
-            },
-            ..VfsPolicy::default()
-        };
-        let limiter = RateLimiter::new(&policy);
+        let limiter = RateLimiter::new(&limits_with_rate_limit(10, 10, 1));
         let target_ip = ip_for_shard(&limiter, 0);
         let filler_ip = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 10));
         let now = Instant::now();

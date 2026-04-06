@@ -9,18 +9,18 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use db_vfs::vfs::WriteRequest;
-use db_vfs_core::policy::{
-    AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
-};
+use db_vfs_core::policy::{Permissions, SecretRules, TraversalRules};
 use serde::Serialize;
 use tower::ServiceExt;
+
+use db_vfs_service::policy::{AuditPolicy, AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
 
 const DEV_TOKEN: &str = "dev-token";
 const DEV_TOKEN_SHA256: &str =
     "sha256:c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712";
 
-fn base_policy() -> VfsPolicy {
-    VfsPolicy {
+fn base_policy() -> ServicePolicy {
+    ServicePolicy {
         permissions: Permissions {
             read: true,
             glob: true,
@@ -30,7 +30,7 @@ fn base_policy() -> VfsPolicy {
             delete: true,
             allow_full_scan: false,
         },
-        limits: Limits::default(),
+        limits: ServiceLimits::default(),
         secrets: SecretRules::default(),
         traversal: TraversalRules::default(),
         audit: AuditPolicy::default(),
@@ -81,7 +81,7 @@ fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
     req
 }
 
-async fn setup(mut policy: VfsPolicy) -> TestServer {
+async fn setup(mut policy: ServicePolicy) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("db.sqlite");
     let audit_path = dir.path().join("audit.jsonl");
@@ -204,11 +204,11 @@ async fn audit_logs_invalid_json_requests() {
 #[tokio::test]
 async fn audit_logs_rate_limited_requests() {
     let mut policy = base_policy();
-    policy.limits = Limits {
+    policy.limits = ServiceLimits {
         max_requests_per_ip_per_sec: 1,
         max_requests_burst_per_ip: 1,
         max_rate_limit_ips: 1024,
-        ..Limits::default()
+        ..ServiceLimits::default()
     };
     let server = setup(policy).await;
 

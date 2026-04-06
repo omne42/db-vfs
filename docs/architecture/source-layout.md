@@ -3,7 +3,7 @@
 ## Workspace Core
 
 - `core/src/policy.rs`
-  - `VfsPolicy` 及其验证规则。
+  - core `VfsPolicy` 及其验证规则；只保留 VFS 领域语义。
 - `core/src/path.rs`
   - 路径合法性与规范化规则。
 - `core/src/traversal.rs` / `core/src/glob_utils.rs`
@@ -26,6 +26,8 @@
 
 - `service/src/main.rs`
   - 服务入口与 CLI。
+- `service/src/policy.rs`
+  - service `ServicePolicy`、auth/audit/runtime limits 以及对 core `VfsPolicy` 的投影。
 - `service/src/policy_io.rs`
   - 从文件加载并验证 policy。
 - `service/src/server/auth.rs`

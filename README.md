@@ -2,6 +2,9 @@
 
 DB-backed virtual filesystem (DB-VFS) for service workloads.
 
+The service-facing config file maps to `db_vfs_service::policy::ServicePolicy`; its core VFS
+subset projects to `db_vfs_core::policy::VfsPolicy`.
+
 ## What it provides
 
 - Safety-first policy model: **Permissions + Limits + Secrets + Traversal + Auth**.

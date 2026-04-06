@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 use crate::Error;
 use crate::Result;
@@ -10,8 +9,6 @@ const MAX_GLOB_PATTERN_BYTES: usize = 4096;
 const MAX_SECRET_DENY_GLOBS: usize = 4096;
 const MAX_TRAVERSAL_SKIP_GLOBS: usize = 4096;
 const MAX_SECRET_REPLACEMENT_BYTES: usize = 4096;
-const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
-const MAX_AUDIT_FLUSH_EVERY_EVENTS: usize = 65_536;
 const MAX_LIMIT_MAX_RESULTS: usize = 100_000;
 const MAX_LIMIT_MAX_WALK_FILES: usize = 500_000;
 const MAX_LIMIT_MAX_WALK_ENTRIES: usize = 1_000_000;
@@ -22,9 +19,6 @@ pub const MAX_SCAN_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NORMALIZED_PATH_BYTES: usize = 4096;
 const MAX_REDACT_REGEXES: usize = 128;
 const MAX_REDACT_REGEX_PATTERN_BYTES: usize = 4096;
-const MAX_ALLOWED_WORKSPACE_PATTERN_BYTES: usize = 1024;
-// Cap flush interval so policies can't defer audit flushes for arbitrarily long periods.
-const MAX_AUDIT_FLUSH_MAX_INTERVAL_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -74,25 +68,6 @@ pub struct Limits {
     /// Max in-flight scan requests (glob/grep).
     #[serde(default = "default_max_concurrency_scan")]
     pub max_concurrency_scan: usize,
-    /// Max DB connections in the service pool.
-    #[serde(default = "default_max_db_connections")]
-    pub max_db_connections: u32,
-    /// Optional per-IP request rate limit (requests/second).
-    ///
-    /// - `0` disables rate limiting.
-    #[serde(default = "default_max_requests_per_ip_per_sec")]
-    pub max_requests_per_ip_per_sec: u32,
-    /// Optional per-IP request burst capacity (requests).
-    ///
-    /// - Must be > 0 when `max_requests_per_ip_per_sec > 0`.
-    /// - `0` disables rate limiting (must match `max_requests_per_ip_per_sec = 0`).
-    #[serde(default = "default_max_requests_burst_per_ip")]
-    pub max_requests_burst_per_ip: u32,
-    /// Max number of distinct IPs tracked by the per-IP rate limiter.
-    ///
-    /// When `max_requests_per_ip_per_sec > 0`, this must be > 0.
-    #[serde(default = "default_max_rate_limit_ips")]
-    pub max_rate_limit_ips: u32,
 }
 
 const fn default_max_read_bytes() -> u64 {
@@ -135,22 +110,6 @@ const fn default_max_concurrency_scan() -> usize {
     8
 }
 
-const fn default_max_db_connections() -> u32 {
-    16
-}
-
-const fn default_max_requests_per_ip_per_sec() -> u32 {
-    100
-}
-
-const fn default_max_requests_burst_per_ip() -> u32 {
-    200
-}
-
-const fn default_max_rate_limit_ips() -> u32 {
-    65_536
-}
-
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -165,10 +124,6 @@ impl Default for Limits {
             max_io_ms: default_max_io_ms(),
             max_concurrency_io: default_max_concurrency_io(),
             max_concurrency_scan: default_max_concurrency_scan(),
-            max_db_connections: default_max_db_connections(),
-            max_requests_per_ip_per_sec: default_max_requests_per_ip_per_sec(),
-            max_requests_burst_per_ip: default_max_requests_burst_per_ip(),
-            max_rate_limit_ips: default_max_rate_limit_ips(),
         }
     }
 }
@@ -243,37 +198,6 @@ impl Default for SecretRules {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct AuthPolicy {
-    #[serde(default)]
-    pub tokens: Vec<AuthToken>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthToken {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_env_var: Option<String>,
-    #[serde(default)]
-    pub allowed_workspaces: Vec<String>,
-}
-
-impl fmt::Debug for AuthToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AuthToken")
-            .field(
-                "token",
-                &self.token.as_ref().map_or("<none>", |_| "<redacted>"),
-            )
-            .field("token_env_var", &self.token_env_var)
-            .field("allowed_workspaces", &self.allowed_workspaces)
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct VfsPolicy {
     #[serde(default)]
     pub permissions: Permissions,
@@ -283,18 +207,14 @@ pub struct VfsPolicy {
     pub secrets: SecretRules,
     #[serde(default)]
     pub traversal: TraversalRules,
-    #[serde(default)]
-    pub audit: AuditPolicy,
-    #[serde(default)]
-    pub auth: AuthPolicy,
 }
 
 /// A [`VfsPolicy`] that has passed [`VfsPolicy::validate`].
 ///
-/// This guarantees the structural validation enforced by `VfsPolicy::validate()` (limits, basic
-/// sizes, and auth token shapes) *and* that policy-derived secret/traversal matchers can be
-/// built. That keeps constructor families such as `DbVfs::new_validated()` and
-/// `DbVfs::new_with_supplied_matchers_validated()` aligned on the same invariant.
+/// This guarantees the structural validation enforced by `VfsPolicy::validate()` (permissions,
+/// core VFS limits, and secret/traversal rules) *and* that policy-derived secret/traversal
+/// matchers can be built. That keeps constructor families such as `DbVfs::new_validated()` and
+/// `DbVfs::new_with_matchers_validated()` aligned on the same invariant.
 #[derive(Debug, Clone)]
 pub struct ValidatedVfsPolicy(VfsPolicy);
 
@@ -309,10 +229,6 @@ impl ValidatedVfsPolicy {
     pub fn into_inner(self) -> VfsPolicy {
         self.0
     }
-
-    pub fn clear_auth_tokens(&mut self) {
-        self.0.auth.tokens.clear();
-    }
 }
 
 impl std::ops::Deref for ValidatedVfsPolicy {
@@ -326,47 +242,6 @@ impl std::ops::Deref for ValidatedVfsPolicy {
 impl AsRef<VfsPolicy> for ValidatedVfsPolicy {
     fn as_ref(&self) -> &VfsPolicy {
         &self.0
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuditPolicy {
-    /// Optional JSONL audit log path (service-only).
-    ///
-    /// When set, `db-vfs-service` appends one JSON object per request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jsonl_path: Option<String>,
-
-    /// Whether audit initialization failures should fail the service startup.
-    #[serde(default = "default_audit_required")]
-    pub required: bool,
-
-    /// Flush audit output after this many events (service-only).
-    ///
-    /// When unset, the service uses a default value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flush_every_events: Option<usize>,
-
-    /// Flush audit output at least every N milliseconds (service-only).
-    ///
-    /// When unset, the service uses a default value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flush_max_interval_ms: Option<u64>,
-}
-
-const fn default_audit_required() -> bool {
-    true
-}
-
-impl Default for AuditPolicy {
-    fn default() -> Self {
-        Self {
-            jsonl_path: None,
-            required: default_audit_required(),
-            flush_every_events: None,
-            flush_max_interval_ms: None,
-        }
     }
 }
 
@@ -524,169 +399,6 @@ impl VfsPolicy {
                 "limits.max_concurrency_scan must be > 0".to_string(),
             ));
         }
-        if self.limits.max_db_connections == 0 {
-            return Err(Error::InvalidPolicy(
-                "limits.max_db_connections must be > 0".to_string(),
-            ));
-        }
-        if self.limits.max_db_connections > 1024 {
-            return Err(Error::InvalidPolicy(
-                "limits.max_db_connections is too large (max 1024)".to_string(),
-            ));
-        }
-
-        if self.auth.tokens.len() > 256 {
-            return Err(Error::InvalidPolicy(
-                "auth.tokens has too many entries (max 256)".to_string(),
-            ));
-        }
-        for (idx, rule) in self.auth.tokens.iter().enumerate() {
-            match (&rule.token, &rule.token_env_var) {
-                (Some(_), Some(_)) => {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}] must set exactly one of token or token_env_var"
-                    )));
-                }
-                (None, None) => {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}] must set token or token_env_var"
-                    )));
-                }
-                (Some(token), None) => {
-                    if token.trim().is_empty() {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token must be non-empty"
-                        )));
-                    }
-                    if token.len() > 4096 {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token is too large (max 4096 bytes)"
-                        )));
-                    }
-                    let Some(hex) = token.strip_prefix("sha256:") else {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token must be sha256:<64 hex chars> (use token_env_var for plaintext tokens)"
-                        )));
-                    };
-                    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token must be sha256:<64 hex chars>"
-                        )));
-                    }
-                }
-                (None, Some(env)) => {
-                    if env.trim().is_empty() {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token_env_var must be non-empty"
-                        )));
-                    }
-                    if env.len() > 128 {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token_env_var is too large (max 128 bytes)"
-                        )));
-                    }
-                    let mut chars = env.chars();
-                    let Some(first) = chars.next() else {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token_env_var must be non-empty"
-                        )));
-                    };
-                    if !(first.is_ascii_alphabetic() || first == '_') {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token_env_var must start with [A-Za-z_]"
-                        )));
-                    }
-                    if chars.any(|ch| !(ch.is_ascii_alphanumeric() || ch == '_')) {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].token_env_var must contain only [A-Za-z0-9_]"
-                        )));
-                    }
-                }
-            }
-            if rule.allowed_workspaces.is_empty() {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].allowed_workspaces must be non-empty (use \"*\" to allow all)"
-                )));
-            }
-            if rule.allowed_workspaces.len() > 1024 {
-                return Err(Error::InvalidPolicy(format!(
-                    "auth.tokens[{idx}].allowed_workspaces has too many entries (max 1024)"
-                )));
-            }
-            for (j, pattern) in rule.allowed_workspaces.iter().enumerate() {
-                if pattern.trim().is_empty() {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}].allowed_workspaces[{j}] must be non-empty"
-                    )));
-                }
-                if pattern.chars().any(char::is_whitespace) {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}].allowed_workspaces[{j}] must not contain whitespace"
-                    )));
-                }
-                if pattern.len() > MAX_ALLOWED_WORKSPACE_PATTERN_BYTES {
-                    return Err(Error::InvalidPolicy(format!(
-                        "auth.tokens[{idx}].allowed_workspaces[{j}] is too large ({} bytes; max {})",
-                        pattern.len(),
-                        MAX_ALLOWED_WORKSPACE_PATTERN_BYTES
-                    )));
-                }
-                if pattern != "*" {
-                    let star_count = pattern.chars().filter(|ch| *ch == '*').count();
-                    if star_count > 1 || (star_count == 1 && !pattern.ends_with('*')) {
-                        return Err(Error::InvalidPolicy(format!(
-                            "auth.tokens[{idx}].allowed_workspaces[{j}] only supports '*' as a full wildcard or a trailing '*' prefix"
-                        )));
-                    }
-                    if star_count == 1 {
-                        let prefix = pattern.strip_suffix('*').ok_or_else(|| {
-                            Error::InvalidPolicy(format!(
-                                "auth.tokens[{idx}].allowed_workspaces[{j}] has invalid trailing wildcard syntax"
-                            ))
-                        })?;
-                        if prefix.is_empty() || !prefix.ends_with('-') {
-                            return Err(Error::InvalidPolicy(format!(
-                                "auth.tokens[{idx}].allowed_workspaces[{j}] trailing wildcard patterns must end with '-*'"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.limits.max_requests_per_ip_per_sec == 0 {
-            if self.limits.max_requests_burst_per_ip != 0 {
-                return Err(Error::InvalidPolicy(
-                    "limits.max_requests_burst_per_ip must be 0 when max_requests_per_ip_per_sec is 0"
-                        .to_string(),
-                ));
-            }
-        } else {
-            if self.limits.max_requests_burst_per_ip == 0 {
-                return Err(Error::InvalidPolicy(
-                    "limits.max_requests_burst_per_ip must be > 0 when max_requests_per_ip_per_sec is enabled"
-                        .to_string(),
-                ));
-            }
-            if self.limits.max_requests_burst_per_ip < self.limits.max_requests_per_ip_per_sec {
-                return Err(Error::InvalidPolicy(
-                    "limits.max_requests_burst_per_ip must be >= max_requests_per_ip_per_sec"
-                        .to_string(),
-                ));
-            }
-            if self.limits.max_rate_limit_ips == 0 {
-                return Err(Error::InvalidPolicy(
-                    "limits.max_rate_limit_ips must be > 0 when max_requests_per_ip_per_sec is enabled"
-                        .to_string(),
-                ));
-            }
-            if self.limits.max_rate_limit_ips > 1_000_000 {
-                return Err(Error::InvalidPolicy(
-                    "limits.max_rate_limit_ips is too large (max 1000000)".to_string(),
-                ));
-            }
-        }
-
         if self.secrets.replacement.len() > MAX_SECRET_REPLACEMENT_BYTES {
             return Err(Error::InvalidPolicy(format!(
                 "secrets.replacement is too large ({} bytes; max {} bytes)",
@@ -747,80 +459,6 @@ impl VfsPolicy {
                     "traversal.skip_globs[{idx}] is too large ({} bytes; max {} bytes)",
                     pattern.len(),
                     MAX_GLOB_PATTERN_BYTES
-                )));
-            }
-        }
-
-        if let Some(path) = self.audit.jsonl_path.as_deref() {
-            if path.trim().is_empty() {
-                return Err(Error::InvalidPolicy(
-                    "audit.jsonl_path must be non-empty when set".to_string(),
-                ));
-            }
-            if path != path.trim() {
-                return Err(Error::InvalidPolicy(
-                    "audit.jsonl_path must not have leading or trailing whitespace".to_string(),
-                ));
-            }
-            if path.len() > MAX_AUDIT_JSONL_PATH_BYTES {
-                return Err(Error::InvalidPolicy(format!(
-                    "audit.jsonl_path is too large ({} bytes; max {} bytes)",
-                    path.len(),
-                    MAX_AUDIT_JSONL_PATH_BYTES
-                )));
-            }
-            if path.contains('\0') {
-                return Err(Error::InvalidPolicy(
-                    "audit.jsonl_path must not contain NUL bytes".to_string(),
-                ));
-            }
-            if path.chars().any(char::is_control) {
-                return Err(Error::InvalidPolicy(
-                    "audit.jsonl_path must not contain control characters".to_string(),
-                ));
-            }
-        }
-
-        if self.audit.jsonl_path.is_none() {
-            let mut fields = Vec::new();
-            if self.audit.flush_every_events.is_some() {
-                fields.push("audit.flush_every_events");
-            }
-            if self.audit.flush_max_interval_ms.is_some() {
-                fields.push("audit.flush_max_interval_ms");
-            }
-            if !fields.is_empty() {
-                return Err(Error::InvalidPolicy(format!(
-                    "{} requires audit.jsonl_path to be set",
-                    fields.join(" and ")
-                )));
-            }
-        }
-
-        if let Some(flush_every_events) = self.audit.flush_every_events {
-            if flush_every_events == 0 {
-                return Err(Error::InvalidPolicy(
-                    "audit.flush_every_events must be > 0 when set".to_string(),
-                ));
-            }
-            if flush_every_events > MAX_AUDIT_FLUSH_EVERY_EVENTS {
-                return Err(Error::InvalidPolicy(format!(
-                    "audit.flush_every_events is too large (max {})",
-                    MAX_AUDIT_FLUSH_EVERY_EVENTS
-                )));
-            }
-        }
-
-        if let Some(flush_max_interval_ms) = self.audit.flush_max_interval_ms {
-            if flush_max_interval_ms == 0 {
-                return Err(Error::InvalidPolicy(
-                    "audit.flush_max_interval_ms must be > 0 when set".to_string(),
-                ));
-            }
-            if flush_max_interval_ms > MAX_AUDIT_FLUSH_MAX_INTERVAL_MS {
-                return Err(Error::InvalidPolicy(format!(
-                    "audit.flush_max_interval_ms is too large (max {} ms)",
-                    MAX_AUDIT_FLUSH_MAX_INTERVAL_MS
                 )));
             }
         }
@@ -967,117 +605,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_invalid_allowed_workspace_wildcards() {
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: Some(format!("sha256:{}", "a".repeat(64))),
-            token_env_var: None,
-            allowed_workspaces: vec!["foo*bar*".to_string()],
-        }];
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_trailing_wildcard_without_dash_prefix() {
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: Some(format!("sha256:{}", "a".repeat(64))),
-            token_env_var: None,
-            allowed_workspaces: vec!["team*".to_string()],
-        }];
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_overly_long_allowed_workspace_pattern() {
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: Some(format!("sha256:{}", "a".repeat(64))),
-            token_env_var: None,
-            allowed_workspaces: vec!["a".repeat(MAX_ALLOWED_WORKSPACE_PATTERN_BYTES + 1)],
-        }];
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
     fn validate_rejects_too_many_traversal_skip_globs() {
         let mut policy = VfsPolicy::default();
         policy.traversal.skip_globs = vec!["a".to_string(); MAX_TRAVERSAL_SKIP_GLOBS + 1];
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_large_audit_path() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.jsonl_path = Some("x".repeat(MAX_AUDIT_JSONL_PATH_BYTES + 1));
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_path_with_whitespace() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.jsonl_path = Some(" ./audit.jsonl".to_string());
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_path_with_control_characters() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.jsonl_path = Some("audit\nlog.jsonl".to_string());
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_every_events_zero() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_every_events = Some(0);
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_every_events_without_jsonl_path() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_every_events = Some(32);
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_every_events_too_large() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_every_events = Some(MAX_AUDIT_FLUSH_EVERY_EVENTS + 1);
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_max_interval_ms_zero() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_max_interval_ms = Some(0);
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_max_interval_ms_without_jsonl_path() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_max_interval_ms = Some(250);
-        let err = policy.validate().expect_err("should fail");
-        assert_eq!(err.code(), "invalid_policy");
-    }
-
-    #[test]
-    fn validate_rejects_audit_flush_max_interval_ms_too_large() {
-        let mut policy = VfsPolicy::default();
-        policy.audit.flush_max_interval_ms = Some(MAX_AUDIT_FLUSH_MAX_INTERVAL_MS + 1);
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }
@@ -1088,9 +618,7 @@ mod tests {
             "permissions": {},
             "limits": {},
             "secrets": {},
-            "traversal": {},
-            "audit": {},
-            "auth": {}
+            "traversal": {}
         }))
         .expect("deserialize policy");
 

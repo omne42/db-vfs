@@ -1053,11 +1053,12 @@ mod tests {
         VfsLimits, audit_preview, handle_vfs_request, io_limits, preflight_workspace_authorization,
         request_ctx, try_acquire_permit, try_acquire_permit_then_buffer_json,
     };
+    use crate::policy::{AuditPolicy, ServiceLimits, ServicePolicy};
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
     use db_vfs::vfs::{DbVfs, WriteRequest};
-    use db_vfs_core::policy::{AuditPolicy, Limits, ValidatedVfsPolicy, VfsPolicy};
+    use db_vfs_core::policy::ValidatedVfsPolicy;
     use db_vfs_core::redaction::{AUDIT_SECRET_PLACEHOLDER, SecretRedactor};
     use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
@@ -1067,7 +1068,9 @@ mod tests {
     fn test_state_with_audit(
         audit: Option<super::super::audit::AuditLogger>,
     ) -> super::super::AppState {
-        let policy = Arc::new(ValidatedVfsPolicy::new(VfsPolicy::default()).expect("policy"));
+        let service_policy = ServicePolicy::default();
+        let policy =
+            Arc::new(ValidatedVfsPolicy::new(service_policy.vfs_policy()).expect("policy"));
         let redactor = Arc::new(SecretRedactor::from_rules(&policy.secrets).expect("redactor"));
         let traversal =
             Arc::new(TraversalSkipper::from_rules(&policy.traversal).expect("traversal"));
@@ -1088,7 +1091,7 @@ mod tests {
                 traversal,
                 audit,
                 auth: super::super::auth::AuthMode::Disabled,
-                rate_limiter: super::super::rate_limiter::RateLimiter::new(policy.as_ref()),
+                rate_limiter: super::super::rate_limiter::RateLimiter::new(&service_policy.limits),
                 io_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
                 scan_concurrency: Arc::new(tokio::sync::Semaphore::new(1)),
             }),
@@ -1322,16 +1325,16 @@ mod tests {
     async fn handle_vfs_request_times_out_required_audit_for_json_rejects() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
-        let policy = VfsPolicy {
-            limits: Limits {
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
                 max_io_ms: 10,
-                ..Limits::default()
+                ..ServiceLimits::default()
             },
             audit: AuditPolicy {
                 required: true,
                 ..AuditPolicy::default()
             },
-            ..VfsPolicy::default()
+            ..ServicePolicy::default()
         };
         let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
         let request = Request::builder()

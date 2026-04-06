@@ -13,15 +13,15 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
-use db_vfs_core::policy::{
-    AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
-};
+use db_vfs_core::policy::{Permissions, SecretRules, TraversalRules};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tower::ServiceExt;
+
+use db_vfs_service::policy::{AuditPolicy, AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
 
 const DEV_TOKEN: &str = "dev-token";
 
@@ -135,8 +135,8 @@ fn dev_token_sha256() -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-fn policy_allow_all() -> VfsPolicy {
-    VfsPolicy {
+fn policy_allow_all() -> ServicePolicy {
+    ServicePolicy {
         permissions: Permissions {
             read: true,
             glob: true,
@@ -146,7 +146,7 @@ fn policy_allow_all() -> VfsPolicy {
             delete: true,
             allow_full_scan: false,
         },
-        limits: Limits::default(),
+        limits: ServiceLimits::default(),
         secrets: SecretRules::default(),
         traversal: TraversalRules::default(),
         audit: AuditPolicy::default(),
@@ -276,7 +276,7 @@ async fn setup() -> TestServer {
 }
 
 #[cfg(feature = "sqlite")]
-async fn setup_with_policy(policy: VfsPolicy) -> TestServer {
+async fn setup_with_policy(policy: ServicePolicy) -> TestServer {
     let db = tempfile::NamedTempFile::new().expect("temp db");
     let app = db_vfs_service::server::build_app(db.path().to_path_buf(), policy, false)
         .expect("build app");

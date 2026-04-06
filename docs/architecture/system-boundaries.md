@@ -8,6 +8,8 @@
 
 - `read`、`write`、`patch`、`delete`、`glob`、`grep` 的 VFS 语义
 - `db-vfs-core::policy::VfsPolicy` 及其校验
+  - 这里只保留 VFS 领域语义：permissions、core limits、secrets、traversal。
+  - service-only 的 auth、audit、DB pool / rate-limit 运行期配置归到 `db_vfs_service::policy::ServicePolicy`。
 - 路径合法性、traversal、secrets redaction、scan budgets
   - `max_io_ms` 约束非 scan 请求、DB pool wait/connect，以及 service 启动 migration 的 connect/lock 预算。
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
@@ -33,6 +35,9 @@
     不能只按单 buffer 估算。
 - SQLite / Postgres 存储适配和 migrations
 - HTTP service 的 auth、rate limit、audit、request-id、trust mode
+  - service 启动和 policy 文件解析的 canonical 类型是 `db_vfs_service::policy::ServicePolicy`；
+    service 会把其中的 core 子集投影成 `db_vfs_core::policy::VfsPolicy` 再交给
+    `ValidatedVfsPolicy` 和 VFS 构造链路。
   - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响 `peer_ip`
     与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
@@ -104,7 +109,7 @@
     静默 materialize whole-file content；fallback 命中时会显式告警，提示 store 实现方补齐
     chunked line-range 边界。
 
-这些能力已经表现出复用性，但当前仍然直接服务于 `VfsPolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
+这些能力已经表现出复用性，但当前仍然直接服务于 `ServicePolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 
 ## 候选复用点
 
@@ -121,4 +126,4 @@
 ## 迁移原则
 
 - 只抽离真正跨仓复用且不携带 VFS 语义的能力。
-- `VfsPolicy` 字段、workspace 授权约束和具体文件操作语义继续留在本仓。
+- core `VfsPolicy` 字段、workspace 授权约束和具体文件操作语义继续留在本仓。

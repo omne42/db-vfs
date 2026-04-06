@@ -8,7 +8,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
-use db_vfs_core::policy::VfsPolicy;
+use crate::policy::AuthPolicy;
 
 static ALLOW_ALL_WORKSPACES: OnceLock<Arc<[WorkspacePattern]>> = OnceLock::new();
 
@@ -68,7 +68,7 @@ fn compile_workspace_patterns(patterns: &[String]) -> anyhow::Result<Arc<[Worksp
 }
 
 pub(super) fn build_auth_mode(
-    policy: &VfsPolicy,
+    policy: &AuthPolicy,
     unsafe_no_auth: bool,
 ) -> anyhow::Result<AuthMode> {
     build_auth_mode_with_env_lookup(policy, unsafe_no_auth, |env| {
@@ -79,22 +79,22 @@ pub(super) fn build_auth_mode(
 }
 
 fn build_auth_mode_with_env_lookup(
-    policy: &VfsPolicy,
+    policy: &AuthPolicy,
     unsafe_no_auth: bool,
     mut env_lookup: impl FnMut(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<AuthMode> {
     if unsafe_no_auth {
         return Ok(AuthMode::Disabled);
     }
-    if policy.auth.tokens.is_empty() {
+    if policy.tokens.is_empty() {
         anyhow::bail!(
             "no auth tokens configured; set [auth.tokens] in the policy file or pass --unsafe-no-auth"
         );
     }
 
-    let mut rules = Vec::with_capacity(policy.auth.tokens.len());
-    let mut seen = HashSet::<[u8; 32]>::with_capacity(policy.auth.tokens.len());
-    for (idx, rule) in policy.auth.tokens.iter().enumerate() {
+    let mut rules = Vec::with_capacity(policy.tokens.len());
+    let mut seen = HashSet::<[u8; 32]>::with_capacity(policy.tokens.len());
+    for (idx, rule) in policy.tokens.iter().enumerate() {
         let token_sha256 = if let Some(token) = rule.token.as_deref() {
             parse_token_sha256(token)?
         } else if let Some(env) = rule.token_env_var.as_deref() {
@@ -341,11 +341,12 @@ mod tests {
     use axum::Router;
     use axum::http::HeaderValue;
     use axum::routing::post;
-    use db_vfs_core::policy::{AuditPolicy, AuthToken, Limits};
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
     use tower::ServiceExt;
+
+    use crate::policy::{AuditPolicy, AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
 
     #[test]
     fn bearer_token_parsing_is_case_insensitive_and_strict() {
@@ -462,7 +463,7 @@ mod tests {
 
     #[test]
     fn build_auth_mode_allows_unsafe_no_auth_with_no_tokens() {
-        let policy = VfsPolicy::default();
+        let policy = AuthPolicy::default();
         let mode = build_auth_mode(&policy, true).unwrap();
         assert!(matches!(mode, AuthMode::Disabled));
 
@@ -472,9 +473,9 @@ mod tests {
 
     #[test]
     fn build_auth_mode_rejects_duplicate_token_hashes() {
-        let mut policy = VfsPolicy::default();
+        let mut policy = AuthPolicy::default();
         let token = format!("sha256:{}", "a".repeat(64));
-        policy.auth.tokens = vec![
+        policy.tokens = vec![
             AuthToken {
                 token: Some(token.clone()),
                 token_env_var: None,
@@ -498,12 +499,13 @@ mod tests {
         let var = format!("DB_VFS_TEST_TOKEN_{}", std::process::id());
         let token = " dev-token-with-spaces \n";
 
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: None,
-            token_env_var: Some(var.clone()),
-            allowed_workspaces: vec!["ws".to_string()],
-        }];
+        let policy = AuthPolicy {
+            tokens: vec![AuthToken {
+                token: None,
+                token_env_var: Some(var.clone()),
+                allowed_workspaces: vec!["ws".to_string()],
+            }],
+        };
 
         let err = build_auth_mode_for_test(&policy, [(&var, token)], false)
             .err()
@@ -517,12 +519,13 @@ mod tests {
         let token = "dev-token";
         let digest = format!("sha256:{}", hex::encode(hash_token_sha256(token)));
 
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: None,
-            token_env_var: Some(var.clone()),
-            allowed_workspaces: vec!["ws".to_string()],
-        }];
+        let policy = AuthPolicy {
+            tokens: vec![AuthToken {
+                token: None,
+                token_env_var: Some(var.clone()),
+                allowed_workspaces: vec!["ws".to_string()],
+            }],
+        };
 
         let mode =
             build_auth_mode_for_test(&policy, [(&var, token)], false).expect("build auth mode");
@@ -543,12 +546,13 @@ mod tests {
         let var = format!("DB_VFS_TEST_TOKEN_SHA256_{}", std::process::id());
         let token = format!("sha256:{}", "a".repeat(64));
 
-        let mut policy = VfsPolicy::default();
-        policy.auth.tokens = vec![AuthToken {
-            token: None,
-            token_env_var: Some(var.clone()),
-            allowed_workspaces: vec!["ws".to_string()],
-        }];
+        let policy = AuthPolicy {
+            tokens: vec![AuthToken {
+                token: None,
+                token_env_var: Some(var.clone()),
+                allowed_workspaces: vec!["ws".to_string()],
+            }],
+        };
 
         let err = build_auth_mode_for_test(&policy, [(&var, token.as_str())], false)
             .err()
@@ -558,7 +562,7 @@ mod tests {
     }
 
     fn build_auth_mode_for_test<'a>(
-        policy: &VfsPolicy,
+        policy: &AuthPolicy,
         env: impl IntoIterator<Item = (&'a String, &'a str)>,
         unsafe_no_auth: bool,
     ) -> anyhow::Result<AuthMode> {
@@ -619,7 +623,7 @@ mod tests {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
 
-        let mut policy = VfsPolicy::default();
+        let mut policy = ServicePolicy::default();
         policy.auth.tokens = vec![AuthToken {
             token: Some(dev_token_sha256_for_test()),
             token_env_var: None,
@@ -679,16 +683,16 @@ mod tests {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
 
-        let mut policy = VfsPolicy {
-            limits: Limits {
+        let mut policy = ServicePolicy {
+            limits: ServiceLimits {
                 max_io_ms: 10,
-                ..Limits::default()
+                ..ServiceLimits::default()
             },
             audit: AuditPolicy {
                 required: true,
                 ..AuditPolicy::default()
             },
-            ..VfsPolicy::default()
+            ..ServicePolicy::default()
         };
         policy.auth.tokens = vec![AuthToken {
             token: Some(dev_token_sha256_for_test()),
