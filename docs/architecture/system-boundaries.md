@@ -15,6 +15,7 @@
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
   - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` / `lock_timeout` 跟随当前请求预算。启动 migration 也必须复用有界预算，不能无限挂死在锁竞争上。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
+  - `max_io_ms` / `max_walk_ms` 是 request wait budget，不是通用 CPU kill-switch；对已开始执行、且底层无法 cooperatively cancel 的 blocking 计算路径，超时后仍可能在后台自行收尾，文档不能把它描述成“到点立即强停一切工作”。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
   - 这个 chunked ranged-read 路径的进度推导必须按字节预算保守前进，不能把
@@ -58,6 +59,11 @@
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
   - `allowed_workspaces = ["team-*"]` 这类 trailing `-*` 前缀只匹配带非空后缀的 workspace；
     它不能顺带放行字面 `team-`，避免授权边界比策略作者肉眼看到的更宽。
+  - `trust_mode=untrusted` 除了禁用 env interpolation、env-backed token、写能力、full scan、
+    audit path 和 `--unsafe-no-auth` 之外，还必须拒绝放大 service-side 资源旋钮：当前要求
+    `max_concurrency_io <= 16`、`max_concurrency_scan <= 8`、`max_db_connections <= 16`，且按
+    `max_concurrency_scan * max_read_bytes`（启用 redaction 时按双 buffer）估算的 scan
+    in-flight memory 不能超过 `512 MiB`。
   - token 已通过但 workspace 未授权的请求，service 必须在 buffered JSON 的轻量
     preflight 阶段尽早拒绝，而不是先构造完整 `write` / `patch` 大请求再发现
     workspace scope 不匹配。

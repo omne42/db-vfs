@@ -159,6 +159,15 @@ Tune policy `limits` for your workload:
 - concurrency: `max_concurrency_io`, `max_concurrency_scan`, `max_db_connections`
 - timeout/rate: `max_io_ms`, `max_requests_per_ip_per_sec`, `max_requests_burst_per_ip`
 
+When the service loads policy with `--trust-mode untrusted`, those resource knobs are no longer
+fully caller-controlled. Current untrusted ceilings are:
+
+- `max_concurrency_io <= 16`
+- `max_concurrency_scan <= 8`
+- `max_db_connections <= 16`
+- estimated in-flight scan memory (`max_concurrency_scan * max_read_bytes`, or `2x` that when
+  `secrets.redact_regexes` is enabled) must stay `<= 512 MiB`
+
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and DB pool wait/connect time.
@@ -167,6 +176,7 @@ Budget semantics:
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - Once the JSON body is buffered, the service preflights the top-level `workspace_id` before full request-schema deserialization, so token-valid requests aimed at a disallowed workspace can fail with `403 not_permitted` without materializing large `content` / `patch` fields.
 - `max_walk_ms` bounds scan execution (`glob`/`grep`); `max_walk_ms = None` keeps scan runtime unbounded while DB pool wait/connect plus backend lock / statement waits remain bounded by `max_io_ms`.
+- These timeout budgets cap how long the request waits and how long service-side permits / DB waits stay tied up; they are not a hard CPU preemption mechanism. If a non-cancelable blocking task is already running when the request times out, it may still unwind in the background after the client-visible timeout response.
 - `max_concurrency_io` / `max_concurrency_scan` are acquired before request body buffering and JSON schema decode, so malformed or oversized bodies cannot bypass service saturation gates.
 - When `audit.required = true`, the originating request keeps its concurrency permit until append+flush completes.
 - The same request runtime budget also caps any remaining required-audit append+flush wait after VFS execution begins.

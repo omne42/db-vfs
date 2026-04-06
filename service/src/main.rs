@@ -35,7 +35,9 @@ struct Args {
     /// Trust mode for loading policy/configuration.
     ///
     /// - `trusted`: normal operation (default).
-    /// - `untrusted`: refuse risky policy features (env interpolation, env-backed tokens, writes, full scans, audit path, and unsafe-no-auth).
+    /// - `untrusted`: refuse risky policy features and elevated service-side resource caps
+    ///   (env interpolation, env-backed tokens, writes, full scans, audit path, unsafe-no-auth,
+    ///   higher concurrency/DB-connection ceilings, and oversized scan memory budgets).
     #[arg(long, value_enum, default_value_t = TrustMode::Trusted)]
     trust_mode: TrustMode,
 
