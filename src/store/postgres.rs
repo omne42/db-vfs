@@ -118,7 +118,7 @@ where
         let row = self
             .client
             .query_opt(
-                "SELECT substring(content FROM $4 FOR $5)
+                "SELECT substring(content FROM $4::integer FOR $5::integer)
                  FROM files
                  WHERE workspace_id = $1 AND path = $2 AND version = $3",
                 &[&workspace_id, &path, &version, &start_char, &max_chars],
