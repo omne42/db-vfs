@@ -64,6 +64,10 @@ Not supported:
 - middle wildcard (`a*b`)
 - malformed patterns rejected by policy validation.
 
+The same `db_vfs_core::workspace_pattern` parser/matcher is used for both service policy
+validation and runtime auth matching, so `allowed_workspaces` syntax cannot drift between startup
+checks and request-time authorization.
+
 ## Token hash generation
 
 Input is raw token bytes exactly as sent by client; no extra trimming beyond your shell quoting.
