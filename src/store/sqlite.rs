@@ -87,7 +87,7 @@ where
 
         row.map(|(size_bytes, version, updated_at_ms)| {
             FileMeta {
-                path: path.to_string(),
+                path,
                 size_bytes,
                 version,
                 updated_at_ms,

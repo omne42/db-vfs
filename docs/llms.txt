@@ -1171,6 +1171,14 @@ Version storage keeps a per-path generation row so CAS versions remain monotonic
 delete/recreate. This prevents stale `expected_version` values from accidentally matching a new
 file lifetime after the same path is recreated.
 
+The built-in SQLite/Postgres stores normalize their public `(workspace_id, path, path_prefix)`
+inputs with the same workspace/path rules as the VFS boundary, so direct store callers cannot
+persist keys that the VFS would later fail to address consistently.
+
+If an external `Store` implementation relies on the trait's compatibility fallbacks for
+`get_content_chunk` or `list_metas_by_prefix_page`, `db-vfs` now emits one-time warnings instead
+of silently degrading ranged-read or large-prefix scan semantics.
+
 ## Quick verification
 
 SQLite:
