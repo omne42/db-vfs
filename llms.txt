@@ -443,6 +443,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
+- store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
 - vfs/scan: share the glob/grep page-walk state machine in one helper and fast-path exact-file glob targets through `get_meta`, so root exact-file scans stop paying prefix over-scan costs while scan limit behavior stays aligned.
 - vfs/api: make `DbVfs::new_with_matchers_validated` fail on policy/matcher mismatches instead of silently rebuilding policy-derived matchers, so validated constructors no longer hide integration errors.
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
@@ -1178,6 +1179,9 @@ persist keys that the VFS would later fail to address consistently.
 If an external `Store` implementation relies on the trait's compatibility fallbacks for
 `get_content_chunk` or `list_metas_by_prefix_page`, `db-vfs` now emits one-time warnings instead
 of silently degrading ranged-read or large-prefix scan semantics.
+`Store::prefix_pagination_mode()` also makes that pagination contract explicit: built-in SQLite and
+Postgres stores report native cursor pagination, while the trait's default fallback stays marked as
+legacy compatibility only.
 
 ## Quick verification
 
