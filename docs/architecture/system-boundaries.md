@@ -118,6 +118,12 @@
   - 仍保留 legacy `list_metas_by_prefix_page` / `get_content_chunk` compatibility fallback，
     但它们只保证正确性，不保证大前缀 scan budget 或 ranged-read 性能语义；fallback
     命中时会显式告警，提示 store 实现方补齐 cursor pagination / chunked line-range 边界。
+  - 每个 `Store` 实现都必须显式声明自己是在提供原生 cursor pagination / chunked
+    ranged-read，还是仅接受 legacy compatibility fallback；新 backend 不能再靠默认实现静默
+    编译通过。
+  - 如果某个 store 声称自己提供原生 cursor pagination 或 chunked ranged-read，却仍落到
+    默认 compatibility fallback，运行期必须 fail-closed 成明确 `db` 错误，而不是把
+    “声明是原生、行为却是 fallback” 的契约漂移静默吃掉。
   - 原生 `list_metas_by_prefix_page` 实现必须返回按 `path` 严格递增、且严格位于 `after`
     cursor 之后的页面；`glob` / `grep` 会把最后一条路径直接当下一页 cursor 使用。
 
