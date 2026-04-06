@@ -3,9 +3,10 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use crate::TrustMode;
-use crate::policy::ServicePolicy;
+use crate::policy::{ServiceLimits, ServicePolicy};
 
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_UNTRUSTED_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum PolicyFormat {
@@ -331,6 +332,31 @@ fn validate_trust_mode(
         anyhow::bail!("trust_mode=untrusted requires limits.max_walk_ms");
     }
 
+    let defaults = ServiceLimits::default();
+    enforce_untrusted_usize_limit(
+        "limits.max_concurrency_io",
+        policy.limits.max_concurrency_io,
+        defaults.max_concurrency_io,
+    )?;
+    enforce_untrusted_usize_limit(
+        "limits.max_concurrency_scan",
+        policy.limits.max_concurrency_scan,
+        defaults.max_concurrency_scan,
+    )?;
+    enforce_untrusted_u32_limit(
+        "limits.max_db_connections",
+        policy.limits.max_db_connections,
+        defaults.max_db_connections,
+    )?;
+    let estimated_scan_inflight_bytes = estimate_scan_inflight_bytes(policy);
+    if estimated_scan_inflight_bytes > MAX_UNTRUSTED_SCAN_INFLIGHT_BYTES {
+        anyhow::bail!(
+            "trust_mode=untrusted requires estimated scan in-flight bytes <= {} (got {})",
+            MAX_UNTRUSTED_SCAN_INFLIGHT_BYTES,
+            estimated_scan_inflight_bytes
+        );
+    }
+
     if policy.limits.max_requests_per_ip_per_sec == 0 {
         anyhow::bail!(
             "trust_mode=untrusted requires per-IP rate limiting (limits.max_requests_per_ip_per_sec > 0)"
@@ -350,6 +376,33 @@ fn validate_trust_mode(
     Ok(())
 }
 
+fn enforce_untrusted_usize_limit(
+    field: &str,
+    actual: usize,
+    max_allowed: usize,
+) -> anyhow::Result<()> {
+    if actual > max_allowed {
+        anyhow::bail!("trust_mode=untrusted requires {field} <= {max_allowed} (got {actual})");
+    }
+    Ok(())
+}
+
+fn enforce_untrusted_u32_limit(field: &str, actual: u32, max_allowed: u32) -> anyhow::Result<()> {
+    if actual > max_allowed {
+        anyhow::bail!("trust_mode=untrusted requires {field} <= {max_allowed} (got {actual})");
+    }
+    Ok(())
+}
+
+fn estimate_scan_inflight_bytes(policy: &ServicePolicy) -> u64 {
+    let per_request_bytes = if policy.secrets.redact_regexes.is_empty() {
+        policy.limits.max_read_bytes
+    } else {
+        policy.limits.max_read_bytes.saturating_mul(2)
+    };
+    per_request_bytes.saturating_mul(policy.limits.max_concurrency_scan as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +414,25 @@ mod tests {
 
     use crate::policy::{AuthPolicy, AuthToken, ServiceLimits, ServicePolicy};
     use tempfile::tempdir;
+
+    fn baseline_untrusted_policy() -> ServicePolicy {
+        ServicePolicy {
+            permissions: Permissions {
+                read: true,
+                glob: true,
+                grep: true,
+                ..Permissions::default()
+            },
+            limits: ServiceLimits {
+                max_walk_ms: Some(1000),
+                max_requests_per_ip_per_sec: 10,
+                max_requests_burst_per_ip: 10,
+                max_rate_limit_ips: 4,
+                ..ServiceLimits::default()
+            },
+            ..ServicePolicy::default()
+        }
+    }
 
     #[test]
     fn interpolate_env_replaces_vars() {
@@ -505,20 +577,8 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
     fn untrusted_rejects_env_tokens_and_writes() {
         let policy = ServicePolicy {
             permissions: Permissions {
-                read: true,
-                glob: true,
-                grep: true,
                 write: true,
-                patch: false,
-                delete: false,
-                allow_full_scan: false,
-            },
-            limits: ServiceLimits {
-                max_walk_ms: Some(1000),
-                max_requests_per_ip_per_sec: 10,
-                max_requests_burst_per_ip: 10,
-                max_rate_limit_ips: 4,
-                ..ServiceLimits::default()
+                ..baseline_untrusted_policy().permissions
             },
             auth: AuthPolicy {
                 tokens: vec![AuthToken {
@@ -527,7 +587,7 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
                     allowed_workspaces: vec!["ws".to_string()],
                 }],
             },
-            ..ServicePolicy::default()
+            ..baseline_untrusted_policy()
         };
 
         let err = validate_trust_mode(&policy, TrustMode::Untrusted, false).unwrap_err();
@@ -536,6 +596,52 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
             msg.contains("forbids write/patch/delete")
                 || msg.contains("forbids auth.tokens[0].token_env_var"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn untrusted_rejects_elevated_resource_limits() {
+        let defaults = ServiceLimits::default();
+        let mut io_policy = baseline_untrusted_policy();
+        io_policy.limits.max_concurrency_io = defaults.max_concurrency_io.saturating_add(1);
+        let io_err = validate_trust_mode(&io_policy, TrustMode::Untrusted, false)
+            .expect_err("untrusted policy should reject elevated IO concurrency");
+        assert!(
+            io_err.to_string().contains("limits.max_concurrency_io"),
+            "unexpected error: {io_err}"
+        );
+
+        let mut scan_policy = baseline_untrusted_policy();
+        scan_policy.limits.max_concurrency_scan = defaults.max_concurrency_scan.saturating_add(1);
+        let scan_err = validate_trust_mode(&scan_policy, TrustMode::Untrusted, false)
+            .expect_err("untrusted policy should reject elevated scan concurrency");
+        assert!(
+            scan_err.to_string().contains("limits.max_concurrency_scan"),
+            "unexpected error: {scan_err}"
+        );
+
+        let mut db_policy = baseline_untrusted_policy();
+        db_policy.limits.max_db_connections = defaults.max_db_connections.saturating_add(1);
+        let db_err = validate_trust_mode(&db_policy, TrustMode::Untrusted, false)
+            .expect_err("untrusted policy should reject elevated DB connections");
+        assert!(
+            db_err.to_string().contains("limits.max_db_connections"),
+            "unexpected error: {db_err}"
+        );
+    }
+
+    #[test]
+    fn untrusted_rejects_scan_memory_budget_amplification() {
+        let mut policy = baseline_untrusted_policy();
+        policy.limits.max_concurrency_scan = 8;
+        policy.limits.max_read_bytes = (MAX_UNTRUSTED_SCAN_INFLIGHT_BYTES / 8).saturating_add(1);
+        policy.secrets.redact_regexes = vec!["secret".to_string()];
+
+        let err = validate_trust_mode(&policy, TrustMode::Untrusted, false)
+            .expect_err("untrusted policy should reject oversized scan memory budget");
+        assert!(
+            err.to_string().contains("estimated scan in-flight bytes"),
+            "unexpected error: {err}"
         );
     }
 

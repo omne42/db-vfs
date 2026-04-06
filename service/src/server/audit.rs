@@ -66,7 +66,7 @@ impl std::error::Error for AuditFailure {}
 
 struct QueuedAuditEvent {
     event: AuditEvent,
-    ack: Option<mpsc::SyncSender<Result<(), String>>>,
+    ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 struct OptionalAuditRecovery {
@@ -227,45 +227,33 @@ impl AuditLogger {
         })
     }
 
-    pub(super) fn try_log(
+    pub(super) async fn log_required(
         &self,
         event: AuditEvent,
         budget: Option<Duration>,
     ) -> Result<(), AuditFailure> {
-        if self.required {
-            let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-            let sender = self
-                .sender
-                .lock()
-                .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
-                .clone();
-            match sender.try_send(QueuedAuditEvent {
-                event,
-                ack: Some(ack_tx),
-            }) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => return Err(AuditFailure::queue_full()),
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err(AuditFailure::worker_stopped());
-                }
+        debug_assert!(
+            self.required,
+            "required audit path should only be used for required loggers"
+        );
+        let ack_rx = self.enqueue_required(event)?;
+        let ack_result = match budget {
+            Some(timeout) if timeout.is_zero() => {
+                return Err(AuditFailure::budget_exhausted(timeout));
             }
-            let ack_result = match budget {
-                Some(timeout) if timeout.is_zero() => {
-                    return Err(AuditFailure::budget_exhausted(timeout));
-                }
-                Some(timeout) => ack_rx.recv_timeout(timeout).map_err(|err| match err {
-                    mpsc::RecvTimeoutError::Timeout => AuditFailure::budget_exhausted(timeout),
-                    mpsc::RecvTimeoutError::Disconnected => AuditFailure::worker_stopped(),
-                })?,
-                None => ack_rx.recv().map_err(|_| AuditFailure::worker_stopped())?,
-            };
-            match ack_result {
-                Ok(()) => {}
-                Err(err) => return Err(AuditFailure::new(err)),
-            }
-            return Ok(());
+            Some(timeout) => tokio::time::timeout(timeout, ack_rx)
+                .await
+                .map_err(|_| AuditFailure::budget_exhausted(timeout))?
+                .map_err(|_| AuditFailure::worker_stopped())?,
+            None => ack_rx.await.map_err(|_| AuditFailure::worker_stopped())?,
+        };
+        match ack_result {
+            Ok(()) => Ok(()),
+            Err(err) => Err(AuditFailure::new(err)),
         }
+    }
 
+    pub(super) fn try_log(&self, event: AuditEvent) -> Result<(), AuditFailure> {
         let mut queued = QueuedAuditEvent { event, ack: None };
         loop {
             let sender = self
@@ -311,6 +299,26 @@ impl AuditLogger {
                     }
                 }
             }
+        }
+    }
+
+    fn enqueue_required(
+        &self,
+        event: AuditEvent,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, AuditFailure> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| AuditFailure::new("audit sender lock poisoned"))?
+            .clone();
+        match sender.try_send(QueuedAuditEvent {
+            event,
+            ack: Some(ack_tx),
+        }) {
+            Ok(()) => Ok(ack_rx),
+            Err(mpsc::TrySendError::Full(_)) => Err(AuditFailure::queue_full()),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(AuditFailure::worker_stopped()),
         }
     }
 
@@ -1147,8 +1155,8 @@ mod tests {
         let _ = err;
     }
 
-    #[test]
-    fn required_audit_logger_returns_error_when_worker_is_gone() {
+    #[tokio::test]
+    async fn required_audit_logger_returns_error_when_worker_is_gone() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         drop(receiver);
         let logger = super::AuditLogger {
@@ -1159,22 +1167,24 @@ mod tests {
         };
 
         let err = logger
-            .try_log(
+            .log_required(
                 super::minimal_event("req-1".to_string(), None, "read", 200, None),
                 Some(Duration::from_millis(10)),
             )
+            .await
             .expect_err("required audit should surface worker failure");
         assert_eq!(err.to_string(), "the audit worker stopped");
     }
 
-    #[test]
-    fn required_audit_logger_fails_when_queue_is_full() {
+    #[tokio::test]
+    async fn required_audit_logger_fails_when_queue_is_full() {
         let (logger, _control) = super::AuditLogger::full_required_logger_for_test();
         let err = logger
-            .try_log(
+            .log_required(
                 super::minimal_event("req-1".to_string(), None, "read", 200, None),
                 Some(Duration::from_secs(1)),
             )
+            .await
             .expect_err("required audit should fail immediately when queue is full");
         assert!(
             err.to_string().contains("required audit queue is full"),
@@ -1182,14 +1192,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn required_audit_logger_times_out_waiting_for_ack() {
+    #[tokio::test]
+    async fn required_audit_logger_times_out_waiting_for_ack() {
         let (logger, _control) = super::AuditLogger::blocking_required_logger_for_test();
         let err = logger
-            .try_log(
+            .log_required(
                 super::minimal_event("req-1".to_string(), None, "read", 200, None),
                 Some(Duration::from_millis(10)),
             )
+            .await
             .expect_err("required audit should fail when ack wait exhausts budget");
         assert!(
             err.to_string()
@@ -1320,7 +1331,7 @@ mod tests {
     #[test]
     fn required_audit_worker_reports_write_failure_to_caller() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         sender
             .send(super::QueuedAuditEvent {
                 event: super::minimal_event("req-1".to_string(), None, "read", 200, None),
@@ -1340,7 +1351,7 @@ mod tests {
         );
 
         let err = ack_rx
-            .recv()
+            .blocking_recv()
             .expect("required audit ack")
             .expect_err("required audit should surface write failure");
         assert!(err.contains("serialize audit event") || err.contains("append audit newline"));
@@ -1367,10 +1378,13 @@ mod tests {
         };
 
         logger
-            .try_log(
-                super::minimal_event("req-recovered".to_string(), None, "read", 200, None),
+            .try_log(super::minimal_event(
+                "req-recovered".to_string(),
                 None,
-            )
+                "read",
+                200,
+                None,
+            ))
             .expect("optional audit logger should recover");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);

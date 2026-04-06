@@ -15,6 +15,9 @@
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
   - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` / `lock_timeout` 跟随当前请求预算。启动 migration 也必须复用有界预算，不能无限挂死在锁竞争上。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
+  - 这些 timeout/budget 是“请求等待预算”，不是对所有纯 CPU 路径都能强制抢占的硬 kill；
+    一旦返回 `408 timeout`，非取消感知的后台工作仍可能继续收尾，所以 timeout 语义必须始终
+    维持“状态未知，可能已完成”。
   - 公开 scan diagnostics 不暴露 secret-denied 路径计数；这类细节只留在内部审计语义里。
   - 无 redaction 规则的 ranged `read` 必须优先走 store chunk 读取，避免为了几行内容整文件 materialize。
   - 这个 chunked ranged-read 路径的进度推导必须按字节预算保守前进，不能把
@@ -42,6 +45,10 @@
     与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
+  - `trust_mode=untrusted` 不只是关闭高风险 capability；它还必须拒绝把 service 资源旋钮放大到
+    高于默认安全上限的配置，包括 `max_concurrency_io`、`max_concurrency_scan`、
+    `max_db_connections`，以及按 `max_read_bytes` 与 redaction 放大系数估算后超过 `512 MiB`
+    的 scan in-flight 内存预算。
   - `max_concurrency_io` / `max_concurrency_scan` 的 permit 必须在 JSON body buffering / decode
     之前获取；慢或恶意的请求体不应绕过 service 的并发边界。
   - JSON body buffering / decode 本身也必须吃掉 frontdoor `max_io_ms` 预算；scan 端点即使
