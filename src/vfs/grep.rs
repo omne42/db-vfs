@@ -12,6 +12,8 @@ use super::util::{
     json_escaped_str_len, u64_decimal_len,
 };
 use super::{DbVfs, ScanControl, ScanLimitReason, ScanTarget, scan_metas};
+#[cfg(test)]
+const META_PAGE_SIZE: usize = crate::vfs::SCAN_META_PAGE_SIZE;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +66,6 @@ pub struct GrepResponse {
 const MAX_GREP_REGEX_COMPILED_SIZE_BYTES: usize = 1_000_000;
 const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
-pub(super) const META_PAGE_SIZE: usize = 2048;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
 const MAX_GREP_CONTENT_LOAD_ATTEMPTS: usize = 8;
 

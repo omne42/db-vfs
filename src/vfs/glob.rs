@@ -9,9 +9,9 @@ use super::util::{
     json_escaped_str_len,
 };
 use super::{DbVfs, ScanControl, ScanLimitReason, ScanTarget, scan_metas};
-
-pub(super) const META_PAGE_SIZE: usize = 2048;
 const GLOB_RESPONSE_JSON_FIXED_OVERHEAD: usize = 2048;
+#[cfg(test)]
+const META_PAGE_SIZE: usize = crate::vfs::SCAN_META_PAGE_SIZE;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -250,6 +250,12 @@ pub(super) enum ScanControl {
     Stop(ScanLimitReason),
 }
 
+pub(super) const SCAN_META_PAGE_SIZE: usize = 2048;
+
+pub(super) fn scan_page_budget(remaining_entries: usize) -> usize {
+    remaining_entries.min(SCAN_META_PAGE_SIZE)
+}
+
 pub(super) struct ScanOutcome {
     pub limit_reason: Option<ScanLimitReason>,
     started: Instant,
@@ -299,7 +305,7 @@ where
             });
         }
 
-        let page_budget = remaining_entries.min(glob::META_PAGE_SIZE.max(grep::META_PAGE_SIZE));
+        let page_budget = scan_page_budget(remaining_entries);
         let (mut metas, has_more) = match target {
             ScanTarget::Prefix(prefix) => {
                 let fetch_limit = page_budget.saturating_add(1);
@@ -646,6 +652,19 @@ mod tests {
         advance_scan_after_cursor(&mut after, &[meta("docs/c.txt")], "glob")
             .expect("cursor should advance");
         assert_eq!(after.as_deref(), Some("docs/c.txt"));
+    }
+
+    #[test]
+    fn scan_page_budget_caps_large_remaining_budgets() {
+        assert_eq!(
+            scan_page_budget(SCAN_META_PAGE_SIZE.saturating_add(17)),
+            SCAN_META_PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn scan_page_budget_preserves_smaller_remaining_budgets() {
+        assert_eq!(scan_page_budget(7), 7);
     }
 
     struct ScanPageStore {
