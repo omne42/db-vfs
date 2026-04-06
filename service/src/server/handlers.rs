@@ -1058,7 +1058,7 @@ mod tests {
     use axum::http::StatusCode;
     use db_vfs::vfs::{DbVfs, WriteRequest};
     use db_vfs_core::policy::{AuditPolicy, Limits, ValidatedVfsPolicy, VfsPolicy};
-    use db_vfs_core::redaction::SecretRedactor;
+    use db_vfs_core::redaction::{AUDIT_SECRET_PLACEHOLDER, SecretRedactor};
     use db_vfs_core::traversal::TraversalSkipper;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1103,6 +1103,39 @@ mod tests {
         super::super::auth::AuthContext {
             allowed_workspaces: Arc::from(vec![super::super::auth::WorkspacePattern::Any]),
             audit_subject: audit_subject.map(Arc::<str>::from),
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn audit_redact_scan_fields_uses_secret_matcher_semantics_for_globs() {
+        let state = test_state_with_audit(None);
+
+        for pattern in ["docs/.[en]nv", "docs/.netr?"] {
+            let mut event = AuditRequest {
+                workspace_id: "ws".to_string(),
+                requested_path: None,
+                path_prefix: Some("docs/question?[v1]/".to_string()),
+                glob_pattern: Some(pattern.to_string()),
+                grep_regex: None,
+                grep_query_len: None,
+            }
+            .into_event(
+                "req-1".to_string(),
+                None,
+                "glob",
+                None,
+                StatusCode::OK,
+                None,
+            );
+
+            super::audit_redact_scan_fields(&state, &mut event);
+
+            assert_eq!(event.path_prefix.as_deref(), Some("docs/question?[v1]/"));
+            assert_eq!(
+                event.glob_pattern.as_deref(),
+                Some(AUDIT_SECRET_PLACEHOLDER)
+            );
         }
     }
 
