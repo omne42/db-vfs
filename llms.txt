@@ -488,6 +488,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - core/redaction+vfs/grep: add borrowed bounded-redaction path and use it in grep so matched lines avoid eager string allocation before response-byte budgeting when redaction rules are enabled.
 - service/postgres-cancel: reuse cancel tokens from queue fallback errors and move fallback in-flight guards into spawned task captures so slot accounting is released even if execution is canceled before task start.
 - service/audit-handlers: de-duplicate secret-path redaction when `requested_path` and `path` are identical, reducing redundant matcher checks and transient allocations on read/write/patch/delete audit paths.
+- service/audit tests: stop the blocking required-audit test helper from panicking when timeout-path tests drop the ack receiver during teardown, so green test runs stay free of detached thread panic noise.
 - service/runtime: keep the validated policy in service state intact after auth setup instead of mutating it into a token-cleared shadow copy, so the in-memory policy remains the single config source seen by later runtime stages and tests.
 - vfs/grep: short-circuit newline-containing literal queries before file-size gating so impossible line matches no longer inflate `skipped_too_large_files`, while also skipping unnecessary hot-path checks.
 - vfs/read: simplify newline-scan index arithmetic in line-range extraction (bounds-proven `+` instead of saturating math) to trim per-line CPU overhead.
@@ -551,7 +552,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - store/pagination: sort legacy fallback first-page results too, so `glob`/`grep` stay compatible with unsorted prefix-only stores from the initial page instead of failing with non-monotonic page errors.
 - vfs/read+grep+patch: enforce actual loaded content size against `limits.max_read_bytes` even when persisted metadata is stale/inconsistent, preventing oversized processing and tightening policy correctness.
 - vfs/grep: reuse prebuilt literal searcher state during line scans to cut repeated per-line matcher setup overhead.
-- vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 
 
 ---
