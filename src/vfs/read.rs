@@ -383,7 +383,7 @@ fn extract_line_range(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
     use db_vfs_core::policy::VfsPolicy;
 
     struct MissingContentStore {
@@ -391,6 +391,10 @@ mod tests {
     }
 
     impl Store for MissingContentStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             Ok(Some(self.meta.clone()))
         }
@@ -442,6 +446,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -474,6 +482,10 @@ mod tests {
     }
 
     impl Store for FlappingMetaStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             let v = self.version;
             self.version = self.version.saturating_add(1);
@@ -532,6 +544,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -557,6 +573,10 @@ mod tests {
     }
 
     impl Store for StaleLargeMetaStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             self.meta_calls = self.meta_calls.saturating_add(1);
             if self.meta_calls == 1 {
@@ -627,6 +647,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -655,6 +679,10 @@ mod tests {
     }
 
     impl Store for StaticContentStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.meta.path {
                 Ok(Some(self.meta.clone()))
@@ -714,6 +742,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     struct ChunkOnlyStore {
@@ -724,6 +756,10 @@ mod tests {
     }
 
     impl Store for ChunkOnlyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::NativeChunkedReads
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.meta.path {
                 Ok(Some(self.meta.clone()))
@@ -799,6 +835,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -1117,6 +1157,10 @@ mod tests {
     }
 
     impl Store for OversizedRedactionInputStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             Ok(Some(self.meta.clone()))
         }
@@ -1167,6 +1211,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 

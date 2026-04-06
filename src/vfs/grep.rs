@@ -512,12 +512,16 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
     use db_vfs_core::policy::VfsPolicy;
 
     struct DummyStore;
 
     impl Store for DummyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -568,6 +572,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -662,6 +670,10 @@ mod tests {
     }
 
     impl Store for SecretDeniedBudgetStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             Ok(self.rows.iter().find(|meta| meta.path == path).cloned())
         }
@@ -716,6 +728,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -785,6 +801,10 @@ mod tests {
     }
 
     impl Store for SingleFileStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.meta.path {
                 Ok(Some(self.meta.clone()))
@@ -848,6 +868,10 @@ mod tests {
                 Ok(Vec::new())
             }
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     struct ExactGlobStore {
@@ -856,6 +880,10 @@ mod tests {
     }
 
     impl Store for ExactGlobStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             Ok((path == self.meta.path).then(|| self.meta.clone()))
         }
@@ -907,6 +935,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             panic!("exact-path grep should not fall back to prefix scanning")
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -1190,6 +1222,10 @@ mod tests {
     }
 
     impl Store for NewlineLiteralNoContentStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.meta.path {
                 Ok(Some(self.meta.clone()))
@@ -1249,6 +1285,10 @@ mod tests {
             } else {
                 Ok(Vec::new())
             }
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -1522,6 +1562,10 @@ mod tests {
     }
 
     impl Store for NonMonotonicPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -1572,6 +1616,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -1621,6 +1669,10 @@ mod tests {
     }
 
     impl Store for NonMonotonicWithinPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -1671,6 +1723,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -1733,6 +1789,10 @@ mod tests {
     struct NonMonotonicAcrossPagesStore;
 
     impl Store for NonMonotonicAcrossPagesStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             Ok(Some(FileMeta {
                 path: path.to_string(),
@@ -1788,6 +1848,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -1854,6 +1918,10 @@ mod tests {
     struct SlowEmptyPageStore;
 
     impl Store for SlowEmptyPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -1906,6 +1974,10 @@ mod tests {
             unimplemented!()
         }
 
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
+        }
+
         fn list_metas_by_prefix_page(
             &mut self,
             _workspace_id: &str,
@@ -1948,6 +2020,10 @@ mod tests {
     }
 
     impl Store for RefreshAfterOversizedMetaStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.current_meta.path {
                 Ok(Some(self.current_meta.clone()))
@@ -2006,6 +2082,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(
@@ -2067,6 +2147,10 @@ mod tests {
     }
 
     impl Store for RefreshAfterMissingContentStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
             if path == self.current_meta.path {
                 Ok(Some(self.current_meta.clone()))
@@ -2125,6 +2209,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(

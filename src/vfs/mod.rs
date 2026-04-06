@@ -428,12 +428,16 @@ pub(super) fn validate_scan_page_order(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, Store};
+    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
 
     #[derive(Debug)]
     struct DummyStore;
 
     impl Store for DummyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -484,6 +488,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -645,6 +653,10 @@ mod tests {
     }
 
     impl Store for ScanPageStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -695,6 +707,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
         }
 
         fn list_metas_by_prefix_page(

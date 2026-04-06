@@ -7,9 +7,9 @@ use rusqlite::OptionalExtension;
 use db_vfs_core::{Error, Result};
 
 use super::{
-    DeleteOutcome, FileMeta, PrefixPaginationMode, Store, db_err, make_prefix_bounds,
-    monotonic_updated_at_ms, normalize_store_after_cursor, normalize_store_path,
-    normalize_store_path_prefix, normalize_store_workspace_id,
+    DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store, db_err,
+    make_prefix_bounds, monotonic_updated_at_ms, normalize_store_after_cursor,
+    normalize_store_path, normalize_store_path_prefix, normalize_store_workspace_id,
 };
 
 pub struct SqliteStoreWithConn<C> {
@@ -62,6 +62,10 @@ impl<C> Store for SqliteStoreWithConn<C>
 where
     C: DerefMut<Target = rusqlite::Connection>,
 {
+    fn range_read_mode(&self) -> RangeReadMode {
+        RangeReadMode::NativeChunkedReads
+    }
+
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
         let workspace_id = normalize_store_workspace_id(workspace_id)?;
         let path = normalize_store_path(path)?;

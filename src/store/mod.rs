@@ -133,6 +133,12 @@ pub enum PrefixPaginationMode {
     LegacyCompatibilityFallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeReadMode {
+    NativeChunkedReads,
+    LegacyCompatibilityFallback,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LineSegment<'a> {
     pub text: &'a str,
@@ -242,6 +248,13 @@ pub trait Store {
     /// - `None` indicates the `(workspace_id, path, version)` row no longer exists.
     /// - `Some("")` indicates end-of-file once the row exists but `start_char` is past the end.
     ///
+    /// Every `Store` impl must explicitly declare whether ranged reads are backed by native
+    /// chunked reads or by the legacy compatibility fallback. New backends should not silently
+    /// compile through this default path without choosing a contract.
+    fn range_read_mode(&self) -> RangeReadMode;
+
+    /// Reads a character-bounded chunk of file content for ranged-read traversal.
+    ///
     /// Production stores should override this to avoid materializing whole-file content for
     /// line-range reads. The default implementation preserves compatibility for legacy stores by
     /// falling back to [`Store::get_content`], and emits a one-time warning so this degraded
@@ -256,6 +269,15 @@ pub trait Store {
     ) -> Result<Option<String>> {
         if max_chars == 0 {
             return Ok(Some(String::new()));
+        }
+        if !matches!(
+            self.range_read_mode(),
+            RangeReadMode::LegacyCompatibilityFallback
+        ) {
+            return Err(Error::Db(format!(
+                "Store::get_content_chunk is using the legacy compatibility fallback for {}; declare RangeReadMode::LegacyCompatibilityFallback or implement native chunked reads",
+                std::any::type_name::<Self>()
+            )));
         }
 
         warn_legacy_range_read_fallback::<Self>();
@@ -418,9 +440,7 @@ pub trait Store {
     /// Native cursor pagination preserves the scan-budget and performance semantics expected by
     /// `glob` / `grep`. The legacy mode still preserves correctness, but it may re-scan a large
     /// prefix repeatedly and therefore should not be treated as operationally equivalent.
-    fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
-        PrefixPaginationMode::LegacyCompatibilityFallback
-    }
+    fn prefix_pagination_mode(&self) -> PrefixPaginationMode;
 
     /// Cursor-based variant of [`Store::list_metas_by_prefix`].
     ///
@@ -449,6 +469,15 @@ pub trait Store {
     ) -> Result<Vec<FileMeta>> {
         if limit == 0 {
             return Ok(Vec::new());
+        }
+        if !matches!(
+            self.prefix_pagination_mode(),
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        ) {
+            return Err(Error::Db(format!(
+                "Store::list_metas_by_prefix_page is using the legacy compatibility fallback for {}; declare PrefixPaginationMode::LegacyCompatibilityFallback or implement native cursor pagination",
+                std::any::type_name::<Self>()
+            )));
         }
 
         // Compatibility slow-path for legacy stores that only implement
@@ -815,6 +844,10 @@ mod tests {
     }
 
     impl Store for PrefixOnlyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -877,6 +910,10 @@ mod tests {
                 })
                 .collect())
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[derive(Default)]
@@ -885,6 +922,10 @@ mod tests {
     }
 
     impl Store for UnsortedPrefixStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -948,6 +989,10 @@ mod tests {
                 .collect::<Vec<_>>();
             rows.reverse();
             Ok(rows)
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
@@ -1073,11 +1118,94 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct MisdeclaredNativePrefixStore;
+
+    impl Store for MisdeclaredNativePrefixStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
+        }
+    }
+
+    #[test]
+    fn default_page_impl_rejects_native_mode_without_override() {
+        let mut store = MisdeclaredNativePrefixStore;
+        let err = store
+            .list_metas_by_prefix_page("ws", "docs/", None, 1)
+            .expect_err("misdeclared native pagination should fail closed");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string()
+                .contains("declare PrefixPaginationMode::LegacyCompatibilityFallback"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[derive(Default)]
     struct ContentOnlyStore {
         content: String,
     }
 
     impl Store for ContentOnlyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -1129,6 +1257,10 @@ mod tests {
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
         }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
     }
 
     #[test]
@@ -1176,6 +1308,89 @@ mod tests {
         assert_eq!(legacy_range_read_fallback_warn_count_for_test(), 1);
     }
 
+    #[derive(Default)]
+    struct MisdeclaredNativeRangeStore {
+        content: String,
+    }
+
+    impl Store for MisdeclaredNativeRangeStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::NativeChunkedReads
+        }
+
+        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(Some(self.content.clone()))
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        }
+    }
+
+    #[test]
+    fn default_range_read_impl_rejects_native_mode_without_override() {
+        let mut store = MisdeclaredNativeRangeStore {
+            content: "line1\nline2\n".to_string(),
+        };
+        let err = store
+            .get_line_range("ws", "docs/a.txt", 1, 2, 2, 128)
+            .expect_err("misdeclared native range reads should fail closed");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string()
+                .contains("declare RangeReadMode::LegacyCompatibilityFallback"),
+            "unexpected error: {err}"
+        );
+    }
+
     struct ChunkOnlyStore {
         content: String,
         chunk_chars: usize,
@@ -1183,6 +1398,10 @@ mod tests {
     }
 
     impl Store for ChunkOnlyStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::NativeChunkedReads
+        }
+
         fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
             unimplemented!()
         }
@@ -1250,6 +1469,10 @@ mod tests {
             _limit: usize,
         ) -> Result<Vec<FileMeta>> {
             unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::LegacyCompatibilityFallback
         }
     }
 
