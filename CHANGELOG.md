@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - release: bump crate versions (`db-vfs`, `db-vfs-core`, `db-vfs-service`) to `1.0.0`.
+- vfs/api: add `DbVfs::new_with_supplied_matchers_validated` and
+  `DbVfs::try_new_with_supplied_matchers_validated` as the clearer strict validated constructors
+  for caller-supplied matchers, while keeping the older `*_with_matchers_validated` names as
+  deprecated compatibility aliases.
 - service/runtime: move to per-request stores with pooled SQLite/Postgres connections and bounded concurrency.
 - service/runtime: store validated policy/redaction/traversal matchers behind `Arc` so per-request runner setup uses pointer clones instead of implicit matcher deep copies.
 - service/frontdoor: size the router body cap for worst-case JSON string escaping on `write` / `patch` while preserving the existing hard limit.
