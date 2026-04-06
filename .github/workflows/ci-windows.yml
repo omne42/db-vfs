@@ -16,12 +16,7 @@ jobs:
   test:
     name: Test (windows-latest)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on:
-      group: windows-local
-      labels: omne42-local
-    concurrency:
-      group: persistent-worktree-${{ github.repository }}
-      cancel-in-progress: false
+    runs-on: windows-latest
     timeout-minutes: 30
     env:
       CARGO_HOME: C:\actions-cache\cargo
@@ -31,7 +26,7 @@ jobs:
       DB_VFS_PERSISTENT_MIRROR_DIR: C:\actions-cache\mirrors\omne42\db-vfs.git
 
     steps:
-      - name: Sync persistent workspace
+      - name: Sync workspace
         id: sync
         shell: pwsh
         run: |
@@ -131,7 +126,7 @@ jobs:
           cargo test --workspace --all-features --locked
           cargo tree -d --workspace --locked
 
-      - name: Summarize persistent cache state
+      - name: Summarize workspace state
         if: always()
         shell: pwsh
         run: |
@@ -142,7 +137,7 @@ jobs:
           $warmCargoRegistry = $report.before.cargo_registry_exists
 
           $lines = @(
-            "### Windows persistent workspace cache"
+            "### Windows workspace state"
             "- repo dir: $($report.after_sync.repo_dir)"
             "- synced sha: $($report.after_sync.head)"
             "- mirror existed before run: $($report.before.mirror_exists)"
