@@ -57,7 +57,7 @@ struct DeleteBody {
 }
 
 struct TestServer {
-    app: Router,
+    app: Option<Router>,
     peer_addr: SocketAddr,
     #[cfg(feature = "sqlite")]
     _db: Option<tempfile::NamedTempFile>,
@@ -67,7 +67,7 @@ impl TestServer {
     #[cfg(feature = "sqlite")]
     fn sqlite(app: Router, db: tempfile::NamedTempFile) -> Self {
         Self {
-            app,
+            app: Some(app),
             peer_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 31337)),
             _db: Some(db),
         }
@@ -76,7 +76,7 @@ impl TestServer {
     #[cfg(feature = "postgres")]
     fn postgres(app: Router) -> Self {
         Self {
-            app,
+            app: Some(app),
             peer_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, 31337)),
             #[cfg(feature = "sqlite")]
             _db: None,
@@ -86,11 +86,34 @@ impl TestServer {
     async fn send(&self, mut req: Request<Body>) -> Response {
         req.extensions_mut()
             .insert(ConnectInfo::<SocketAddr>(self.peer_addr));
-        self.app.clone().oneshot(req).await.expect("response")
+        self.app
+            .as_ref()
+            .expect("router")
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("response")
     }
 
     async fn send_without_connect_info(&self, req: Request<Body>) -> Response {
-        self.app.clone().oneshot(req).await.expect("response")
+        self.app
+            .as_ref()
+            .expect("router")
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("response")
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        let Some(app) = self.app.take() else {
+            return;
+        };
+        std::thread::spawn(move || drop(app))
+            .join()
+            .expect("drop test router on helper thread");
     }
 }
 
