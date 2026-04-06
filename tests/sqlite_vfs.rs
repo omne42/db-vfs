@@ -976,3 +976,47 @@ fn new_with_supplied_matchers_validated_rejects_mismatched_matchers() {
     };
     assert_eq!(err.code(), "invalid_policy");
 }
+
+#[test]
+fn deprecated_validated_matcher_aliases_also_reject_mismatched_matchers() {
+    let mut policy = policy_all_perms();
+    policy.permissions.allow_full_scan = true;
+    policy.secrets.deny_globs = vec![".env".to_string()];
+    policy.traversal.skip_globs = vec!["node_modules/**".to_string()];
+    let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
+
+    let redactor = Arc::new(
+        SecretRedactor::from_rules(&SecretRules {
+            deny_globs: Vec::new(),
+            ..SecretRules::default()
+        })
+        .expect("mismatched redactor"),
+    );
+    let traversal = Arc::new(
+        TraversalSkipper::from_rules(&TraversalRules::default()).expect("mismatched traversal"),
+    );
+
+    #[allow(deprecated)]
+    let err = match DbVfs::try_new_with_matchers_validated(
+        SqliteStore::open_in_memory().expect("open sqlite"),
+        Arc::clone(&policy),
+        Arc::clone(&redactor),
+        Arc::clone(&traversal),
+    ) {
+        Ok(_) => panic!("deprecated try_* alias should reject mismatched matchers"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code(), "invalid_policy");
+
+    #[allow(deprecated)]
+    let err = match DbVfs::new_with_matchers_validated(
+        SqliteStore::open_in_memory().expect("open sqlite"),
+        policy,
+        redactor,
+        traversal,
+    ) {
+        Ok(_) => panic!("deprecated constructor alias should reject mismatched matchers"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code(), "invalid_policy");
+}
