@@ -216,7 +216,7 @@ Secrets semantics:
 - `secrets.replacement` must not contain control characters, so `read` line ranges and `grep.matches[].text` stay line-oriented.
 - `db_vfs_core::redaction::SecretRedactor::from_rules()` enforces the same replacement size/control-character bounds as `VfsPolicy::validate()`, so direct crate callers cannot bypass them.
 - `ValidatedVfsPolicy::new()` also proves that policy-derived secret/traversal matchers compile, so validated-policy constructor families do not defer matcher failures to runtime.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the strict validated constructors for caller-supplied matchers; use `DbVfs::new_validated()` when callers want policy-derived matchers instead of supplying pre-built ones.
+- `DbVfs::new_with_supplied_matchers_validated()` and `DbVfs::try_new_with_supplied_matchers_validated()` are the canonical strict validated constructors for caller-supplied matchers. The older `*_with_matchers_validated()` names remain as deprecated compatibility aliases with the same fail-fast mismatch behavior. Use `DbVfs::new_validated()` when callers want policy-derived matchers instead of supplying pre-built ones.
 - Multi-line secret regexes are redacted with line structure preserved before ranged `read` slices or `grep` result lines are returned.
 - When redaction rules are active, `grep` evaluates literal/regex matches against that redacted line view instead of the hidden raw secret text, so masked content cannot still act as a match oracle.
 - `grep` and redaction-backed ranged `read` also budget redaction-expanded intermediates against `max_read_bytes`; over-budget redacted content is rejected or skipped as `file_too_large`.
@@ -435,6 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- docs/vfs-api: point validated-matcher guidance at the canonical `*_with_supplied_matchers_validated` constructors and document the older `*_with_matchers_validated` names as deprecated fail-fast aliases instead of primary API names.
 - service/rate-limiter: make missing peer IPs hit the same shared fallback bucket even when `RateLimiter` is exercised directly, so its internal contract matches the HTTP middleware behavior.
 - vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
@@ -551,7 +552,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/grep: reuse prebuilt literal searcher state during line scans to cut repeated per-line matcher setup overhead.
 - vfs/glob+grep pagination: reuse cursor string buffers across page advances to avoid per-page `String` allocations on long scans.
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
-- core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
 
 
 ---
@@ -928,8 +928,12 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the
-  strict validated constructors for caller-supplied matchers and fail fast on mismatch.
+- `DbVfs::new_with_supplied_matchers_validated()` and
+  `DbVfs::try_new_with_supplied_matchers_validated()` are the canonical strict validated
+  constructors for caller-supplied matchers and fail fast on mismatch.
+- Deprecated compatibility aliases `DbVfs::new_with_matchers_validated()` and
+  `DbVfs::try_new_with_matchers_validated()` preserve that same fail-fast behavior; they no longer
+  imply or permit silent matcher rebuild fallback.
 - `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
   against raw stored text would otherwise let callers probe masked content through context-match
   success or failure.
