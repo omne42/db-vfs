@@ -23,6 +23,12 @@ const AUDIT_DESCENDANT_PROBE_SEGMENT: &str = "__db_vfs_audit_probe__";
 const MAX_AUDIT_DENY_PROBES: usize = 128;
 
 #[derive(Debug, Clone)]
+struct AuditGlobSamples {
+    samples: Vec<String>,
+    hit_limit: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct SecretRedactor {
     deny: GlobSet,
     redact: Vec<Regex>,
@@ -190,12 +196,25 @@ impl SecretRedactor {
             return true;
         }
 
+        let literal = analyze_literal_glob_for_matching(pattern);
+        let is_exact_path = literal.as_ref().is_some_and(|analysis| analysis.exact_path);
+        let normalized = normalize_glob_pattern_for_matching(pattern);
+        if sample_paths_from_glob_pattern(&normalized, MAX_AUDIT_DENY_PROBES).hit_limit
+            && !is_exact_path
+        {
+            return true;
+        }
+
         let Some(glob) = compile_audit_glob_matcher(pattern) else {
             return false;
         };
-        let literal_prefix = literal_glob_prefix(pattern);
+        let literal_prefix = literal.map(|analysis| analysis.prefix);
+        let deny_probes = self.audit_deny_probes();
+        if deny_probes.hit_limit && !is_exact_path {
+            return true;
+        }
 
-        self.audit_deny_probes().into_iter().any(|probe| {
+        deny_probes.samples.into_iter().any(|probe| {
             glob.is_match(Path::new(&probe))
                 || literal_prefix.as_ref().is_some_and(|prefix| {
                     let prefixed = if prefix.is_empty() {
@@ -334,18 +353,28 @@ impl SecretRedactor {
         self.is_path_denied(&descendant_probe)
     }
 
-    fn audit_deny_probes(&self) -> Vec<String> {
+    fn audit_deny_probes(&self) -> AuditGlobSamples {
         let mut probes = Vec::new();
+        let mut hit_limit = false;
         for pattern in &self.source.deny_globs {
             let normalized = normalize_glob_pattern_for_matching(pattern);
-            for probe in sample_paths_from_glob_pattern(&normalized, MAX_AUDIT_DENY_PROBES) {
+            let sampled = sample_paths_from_glob_pattern(&normalized, MAX_AUDIT_DENY_PROBES);
+            hit_limit |= sampled.hit_limit;
+            for probe in sampled.samples {
                 push_unique(&mut probes, probe, MAX_AUDIT_DENY_PROBES);
                 if probes.len() >= MAX_AUDIT_DENY_PROBES {
-                    return probes;
+                    hit_limit = true;
+                    return AuditGlobSamples {
+                        samples: probes,
+                        hit_limit,
+                    };
                 }
             }
         }
-        probes
+        AuditGlobSamples {
+            samples: probes,
+            hit_limit,
+        }
     }
 }
 
@@ -354,10 +383,6 @@ fn compile_audit_glob_matcher(pattern: &str) -> Option<globset::GlobMatcher> {
     validate_normalized_root_relative_glob_pattern(&normalized).ok()?;
     let glob = build_glob_from_normalized(&normalized).ok()?;
     Some(glob.compile_matcher())
-}
-
-fn literal_glob_prefix(pattern: &str) -> Option<String> {
-    analyze_literal_glob_for_matching(pattern).map(|analysis| analysis.prefix)
 }
 
 fn audit_path_probes(path: &str) -> Vec<String> {
@@ -402,25 +427,30 @@ fn sanitize_audit_path_probe_segment(segment: &str) -> String {
         .collect()
 }
 
-fn sample_paths_from_glob_pattern(pattern: &str, limit: usize) -> Vec<String> {
+fn sample_paths_from_glob_pattern(pattern: &str, limit: usize) -> AuditGlobSamples {
     if pattern.is_empty() {
-        return Vec::new();
+        return AuditGlobSamples {
+            samples: Vec::new(),
+            hit_limit: false,
+        };
     }
 
     let mut active = vec![String::new()];
+    let mut hit_limit = false;
     for segment in pattern.split('/') {
         if segment.is_empty() || segment == "." {
             continue;
         }
 
         let variants = sample_glob_segment_variants(segment, limit);
-        if variants.is_empty() {
+        hit_limit |= variants.hit_limit;
+        if variants.samples.is_empty() {
             continue;
         }
 
         let mut next = Vec::new();
         for base in &active {
-            for variant in &variants {
+            for variant in &variants.samples {
                 let candidate = if variant.is_empty() {
                     base.clone()
                 } else if base.is_empty() {
@@ -430,6 +460,7 @@ fn sample_paths_from_glob_pattern(pattern: &str, limit: usize) -> Vec<String> {
                 };
                 push_unique(&mut next, candidate, limit);
                 if next.len() >= limit {
+                    hit_limit = true;
                     break;
                 }
             }
@@ -443,34 +474,46 @@ fn sample_paths_from_glob_pattern(pattern: &str, limit: usize) -> Vec<String> {
         }
         active = next;
         if active.len() >= limit {
+            hit_limit = true;
             break;
         }
     }
 
-    active
-        .into_iter()
-        .filter(|candidate| !candidate.is_empty())
-        .take(limit)
-        .collect()
+    AuditGlobSamples {
+        samples: active
+            .into_iter()
+            .filter(|candidate| !candidate.is_empty())
+            .take(limit)
+            .collect(),
+        hit_limit,
+    }
 }
 
-fn sample_glob_segment_variants(segment: &str, limit: usize) -> Vec<String> {
+fn sample_glob_segment_variants(segment: &str, limit: usize) -> AuditGlobSamples {
     if segment == "**" {
-        return vec![String::new(), "nested".to_string()];
+        return AuditGlobSamples {
+            samples: vec![String::new(), "nested".to_string()],
+            hit_limit: false,
+        };
     }
 
     let mut out = Vec::new();
     let expanded =
         expand_brace_variants(segment, limit).unwrap_or_else(|| vec![segment.to_string()]);
+    let mut hit_limit = segment.contains('{') && expanded.len() >= limit;
     for variant in expanded {
         if let Some(sample) = sample_glob_segment(&variant) {
             push_unique(&mut out, sample, limit);
         }
         if out.len() >= limit {
+            hit_limit = true;
             break;
         }
     }
-    out
+    AuditGlobSamples {
+        samples: out,
+        hit_limit,
+    }
 }
 
 fn sample_glob_segment(segment: &str) -> Option<String> {
@@ -873,6 +916,82 @@ mod tests {
         assert_eq!(
             redactor.redact_audit_glob_pattern("docs/{readme,license}.md"),
             "docs/{readme,license}.md"
+        );
+    }
+
+    #[test]
+    fn redact_audit_glob_pattern_masks_secret_arm_beyond_old_brace_probe_limit() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        let pattern = format!(
+            "docs/{{{}}}",
+            (0..20)
+                .map(|idx| format!("visible{idx}"))
+                .chain(std::iter::once(".env".to_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(&pattern),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+    }
+
+    #[test]
+    fn redact_audit_glob_pattern_masks_secret_arm_after_large_literal_cross_product() {
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+        let segment = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|idx| format!("{prefix}{idx}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let pattern = format!(
+            "docs/{{{}}}/{{{}}}/{{visible0,visible1,visible2,visible3,visible4,visible5,visible6,.env}}",
+            segment("dir", 8),
+            segment("leaf", 8)
+        );
+
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(&pattern),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+    }
+
+    #[test]
+    fn redact_audit_glob_pattern_fails_closed_when_brace_sampling_hits_limit() {
+        let arms = (0..MAX_AUDIT_DENY_PROBES)
+            .map(|idx| format!("visible{idx}"))
+            .chain(std::iter::once(".env".to_string()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let pattern = format!("docs/{{{arms}}}");
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert!(redactor.glob_may_match_denied_path(&pattern));
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(&pattern),
+            AUDIT_SECRET_PLACEHOLDER
+        );
+    }
+
+    #[test]
+    fn redact_audit_glob_pattern_fails_closed_when_cross_product_hits_limit() {
+        let pattern = [
+            "{visible0,visible1,visible2}",
+            "{visible3,visible4,visible5}",
+            "{visible6,visible7,visible8}",
+            "{visible9,visible10,visible11}",
+            "{visible12,visible13,visible14}",
+            "{visible15,visible16,.env}",
+        ]
+        .join("/");
+        let redactor = SecretRedactor::from_rules(&SecretRules::default()).expect("redactor");
+
+        assert!(redactor.glob_may_match_denied_path(&pattern));
+        assert_eq!(
+            redactor.redact_audit_glob_pattern(&pattern),
+            AUDIT_SECRET_PLACEHOLDER
         );
     }
 
