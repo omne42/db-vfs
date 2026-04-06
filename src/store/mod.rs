@@ -384,15 +384,19 @@ pub trait Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let Some(after) = after else {
-            return self.list_metas_by_prefix(workspace_id, prefix, limit);
-        };
 
         // Compatibility slow-path for legacy stores that only implement
         // `list_metas_by_prefix`. This may require repeated prefix scans.
         // Implement `list_metas_by_prefix_page` in concrete stores to avoid
         // this fallback and provide predictable large-prefix performance.
         warn_legacy_prefix_page_fallback::<Self>();
+        let Some(after) = after else {
+            let mut rows = self.list_metas_by_prefix(workspace_id, prefix, limit)?;
+            if rows.len() > 1 && rows.windows(2).any(|pair| pair[0].path > pair[1].path) {
+                rows.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            }
+            return Ok(rows);
+        };
         let mut fetch_limit = limit.max(64);
         loop {
             let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
@@ -851,6 +855,28 @@ mod tests {
             .expect("fallback should sort unsorted legacy rows");
         let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_page_impl_sorts_unsorted_legacy_first_page() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
+        let mut store = UnsortedPrefixStore {
+            paths: vec![
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+                "docs/c.txt".to_string(),
+            ],
+        };
+
+        let page = store
+            .list_metas_by_prefix_page("ws", "docs/", None, 2)
+            .expect("fallback should sort unsorted legacy first page");
+        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        assert_eq!(paths, vec!["docs/a.txt", "docs/b.txt"]);
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 
