@@ -47,6 +47,19 @@ struct ReadBody {
 }
 
 #[derive(serde::Deserialize)]
+struct GrepMatchBody {
+    path: String,
+    line: u64,
+    text: String,
+    line_truncated: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct GrepBody {
+    matches: Vec<GrepMatchBody>,
+}
+
+#[derive(serde::Deserialize)]
 struct ErrorBody {
     code: String,
 }
@@ -578,6 +591,117 @@ async fn slow_request_body_times_out_before_json_decode() {
         .await;
     let body = expect_json::<ErrorBody>(resp, StatusCode::REQUEST_TIMEOUT).await;
     assert_eq!(body.code, "timeout");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn slow_body_holds_io_permit_and_second_io_request_fails_fast_with_busy() {
+    let mut policy = policy_allow_all();
+    policy.limits.max_concurrency_io = 1;
+    policy.limits.max_io_ms = 2_000;
+    let server = setup_with_policy(policy).await;
+
+    let slow_write = tokio::spawn({
+        let server = TestServer {
+            app: server.app.clone(),
+            peer_addr: server.peer_addr,
+            _db: None,
+        };
+        async move {
+            server
+                .send(bearer_raw_request(
+                    "/v1/write",
+                    delayed_body(
+                        Duration::from_millis(300),
+                        r#"{"workspace_id":"ws","path":"docs/slow.txt","content":"hello\n","expected_version":null}"#,
+                    ),
+                ))
+                .await
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let busy = expect_json::<ErrorBody>(
+        server
+            .send(bearer_request(
+                "/v1/write",
+                &WriteRequest {
+                    workspace_id: "ws".to_string(),
+                    path: "docs/fast.txt".to_string(),
+                    content: "fast\n".to_string(),
+                    expected_version: None,
+                },
+            ))
+            .await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert_eq!(busy.code, "busy");
+
+    let slow =
+        expect_json::<WriteBody>(slow_write.await.expect("join slow write"), StatusCode::OK).await;
+    assert_eq!(slow.path, "docs/slow.txt");
+    assert_eq!(slow.version, 1);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn read_and_grep_treat_cr_and_crlf_as_line_boundaries() {
+    let server = setup().await;
+
+    let write_resp = server
+        .send(bearer_request(
+            "/v1/write",
+            &WriteRequest {
+                workspace_id: "ws".to_string(),
+                path: "docs/crlf.txt".to_string(),
+                content: "alpha\rbeta\r\ngamma\n".to_string(),
+                expected_version: None,
+            },
+        ))
+        .await;
+    assert_eq!(write_resp.status(), StatusCode::OK);
+
+    let read = expect_json::<ReadBody>(
+        server
+            .send(bearer_request(
+                "/v1/read",
+                &ReadRequest {
+                    workspace_id: "ws".to_string(),
+                    path: "docs/crlf.txt".to_string(),
+                    start_line: Some(2),
+                    end_line: Some(3),
+                },
+            ))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(read.content, "beta\r\ngamma\n");
+    assert_eq!(read.version, 1);
+
+    let grep = expect_json::<GrepBody>(
+        server
+            .send(bearer_request(
+                "/v1/grep",
+                &db_vfs::vfs::GrepRequest {
+                    workspace_id: "ws".to_string(),
+                    query: "beta".to_string(),
+                    regex: false,
+                    glob: None,
+                    path_prefix: Some("docs/".to_string()),
+                },
+            ))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(grep.matches.len(), 1);
+    assert_eq!(grep.matches[0].path, "docs/crlf.txt");
+    assert_eq!(grep.matches[0].line, 2);
+    assert_eq!(grep.matches[0].text, "beta");
+    assert!(!grep.matches[0].line_truncated);
 }
 
 #[cfg(feature = "sqlite")]
