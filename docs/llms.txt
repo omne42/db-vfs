@@ -552,7 +552,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth: reject oversized plaintext env-backed tokens at startup so impossible-to-authenticate configurations fail fast.
 - core/path-match+glob: replace repeated `String::drain` prefix normalization loops with linear slice-based stripping in path/glob/runtime matcher hot paths, reducing worst-case normalization CPU under long `./` prefixes without changing matching semantics.
 - core/path+vfs/glob-prefix: remove `Vec + join` intermediates in non-canonical path normalization and safe-glob-prefix derivation to reduce transient allocations on request hot paths.
-- service/audit-redaction: apply descendant-aware secret masking to audited `glob_pattern` values so protected roots (for example `.git`) are redacted consistently.
 
 
 ---
