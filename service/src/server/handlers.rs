@@ -1766,6 +1766,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn log_audit_event_with_permit_releases_slot_for_optional_audit() {
+        let audit = super::super::audit::AuditLogger::broken_optional_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+
+        super::super::log_audit_event_with_permit(
+            &audit,
+            super::super::audit::minimal_event("req-optional".to_string(), None, "read", 200, None),
+            permit,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect("optional audit disconnect should stay best-effort");
+
+        let reacquired = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("optional audit should not keep holding the semaphore slot");
+        drop(reacquired);
+    }
+
+    #[tokio::test]
     async fn log_audit_event_with_permit_keeps_semaphore_slot_until_ack_finishes() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
@@ -1815,6 +1841,85 @@ mod tests {
             .try_acquire_owned()
             .expect("permit should be released once audit finishes");
         drop(reacquired);
+    }
+
+    #[test]
+    fn required_audit_wait_does_not_depend_on_blocking_pool_capacity() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let (audit, control) =
+                super::super::audit::AuditLogger::blocking_required_logger_for_test();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("acquire initial permit");
+            let (block_started_tx, block_started_rx) = std::sync::mpsc::sync_channel(1);
+            let (block_release_tx, block_release_rx) = std::sync::mpsc::sync_channel(1);
+
+            let blocking_pool_task = tokio::task::spawn_blocking(move || {
+                block_started_tx
+                    .send(())
+                    .expect("signal blocking-pool saturation");
+                let _ = block_release_rx.recv();
+            });
+            block_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("blocking task should start");
+
+            let audit_task = tokio::spawn({
+                let audit = audit.clone();
+                async move {
+                    super::super::log_audit_event_with_permit(
+                        &audit,
+                        super::super::audit::minimal_event(
+                            "req-blocked".to_string(),
+                            None,
+                            "read",
+                            200,
+                            None,
+                        ),
+                        permit,
+                        Some(Duration::from_secs(1)),
+                    )
+                    .await
+                }
+            });
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !control.is_blocked() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect(
+                "required audit wait should reach the worker even when blocking pool is saturated",
+            );
+
+            assert!(
+                semaphore.clone().try_acquire_owned().is_err(),
+                "required audit should still keep the original semaphore slot while waiting for ack"
+            );
+
+            control.release_success();
+            audit_task
+                .await
+                .expect("join required audit task")
+                .expect("required audit should succeed once released");
+
+            block_release_tx
+                .send(())
+                .expect("release saturated blocking worker");
+            blocking_pool_task
+                .await
+                .expect("join saturated blocking worker");
+        });
     }
 
     #[tokio::test]

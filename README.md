@@ -206,6 +206,9 @@ Secrets semantics:
   finishes.
 - Unauthorized and rate-limited early rejects also follow the fail-closed path when `audit.required = true`; they acquire a frontdoor permit, spend the remaining `max_io_ms` budget on append+flush, and release that permit as soon as the request-level audit wait ends instead of waiting for any background worker lifetime.
 - Required-audit queue saturation also fails closed with `503 audit_unavailable` immediately instead of blocking indefinitely on the audit channel; the originating permit is released as soon as that bounded audit wait returns.
+- Required-audit waits do not depend on Tokio's blocking-pool scheduler; blocking-pool saturation
+  alone cannot cause a spurious `503 audit_unavailable` before the audit worker actually begins the
+  append+flush attempt.
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
