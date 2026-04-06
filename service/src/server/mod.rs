@@ -896,6 +896,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_audit_full_queue_fails_fast_and_releases_permit() {
+        let (audit, _control) = audit::AuditLogger::full_required_logger_for_test();
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire permit");
+
+        let err = log_audit_event_with_permit(
+            &audit,
+            audit::minimal_event("req-full".to_string(), None, "write", 200, None),
+            permit,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect_err("full required audit queue should fail fast");
+
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.0.code, "audit_unavailable");
+
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("permit should be released after queue-full failure")
+            .expect("acquire permit after queue-full failure");
+        drop(permit);
+    }
+
+    #[tokio::test]
     async fn required_audit_worker_loss_returns_service_unavailable() {
         let audit = audit::AuditLogger::broken_required_logger_for_test();
 

@@ -578,6 +578,7 @@ struct RequestContext {
 struct VfsLimits {
     semaphore: Arc<tokio::sync::Semaphore>,
     parse_budget: Option<Duration>,
+    worker_budget: Option<Duration>,
     runtime_budget: Option<Duration>,
 }
 
@@ -664,18 +665,22 @@ fn request_ctx(
 }
 
 fn io_limits(state: &super::AppState) -> VfsLimits {
+    let runtime_budget = Some(super::runner::io_timeout(&state.inner.policy));
     VfsLimits {
         semaphore: state.inner.io_concurrency.clone(),
-        parse_budget: Some(super::runner::io_timeout(&state.inner.policy)),
-        runtime_budget: Some(super::runner::io_timeout(&state.inner.policy)),
+        parse_budget: runtime_budget,
+        worker_budget: super::runner::worker_timeout(runtime_budget, false),
+        runtime_budget,
     }
 }
 
 fn scan_limits(state: &super::AppState) -> VfsLimits {
+    let runtime_budget = super::runner::scan_timeout(&state.inner.policy);
     VfsLimits {
         semaphore: state.inner.scan_concurrency.clone(),
         parse_budget: Some(super::runner::io_timeout(&state.inner.policy)),
-        runtime_budget: super::runner::scan_timeout(&state.inner.policy),
+        worker_budget: super::runner::worker_timeout(runtime_budget, true),
+        runtime_budget,
     }
 }
 
@@ -715,6 +720,7 @@ where
     let VfsLimits {
         semaphore,
         parse_budget,
+        worker_budget,
         runtime_budget,
     } = limits;
     let AuditHooks {
@@ -836,9 +842,13 @@ where
 
     let state_for_run = state.clone();
     let started = Instant::now();
-    let result = super::runner::run_vfs(state_for_run, permit, runtime_budget, move |vfs| {
-        run(vfs, req)
-    })
+    let result = super::runner::run_vfs(
+        state_for_run,
+        permit,
+        worker_budget,
+        runtime_budget,
+        move |vfs| run(vfs, req),
+    )
     .await;
 
     match (result, audit_req) {
@@ -1475,6 +1485,7 @@ mod tests {
             VfsLimits {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
                 parse_budget: None,
+                worker_budget: None,
                 runtime_budget: None,
             },
             |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
@@ -1594,6 +1605,7 @@ mod tests {
             VfsLimits {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
                 parse_budget: None,
+                worker_budget: None,
                 runtime_budget: None,
             },
             |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
@@ -1641,6 +1653,7 @@ mod tests {
             VfsLimits {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
                 parse_budget: None,
+                worker_budget: None,
                 runtime_budget: None,
             },
             |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),

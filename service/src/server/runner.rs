@@ -26,6 +26,17 @@ pub(super) fn db_pool_timeout(policy: &VfsPolicy) -> Duration {
     io_timeout(policy)
 }
 
+pub(super) fn worker_timeout(
+    request_runtime_timeout: Option<Duration>,
+    is_scan_request: bool,
+) -> Option<Duration> {
+    if is_scan_request {
+        None
+    } else {
+        request_runtime_timeout
+    }
+}
+
 pub(super) fn backend_operation_timeout(
     policy: &VfsPolicy,
     request_timeout: Option<Duration>,
@@ -175,7 +186,8 @@ fn record_timed_out_worker_completion(elapsed: Duration) {
 pub(super) async fn run_vfs<T>(
     state: super::AppState,
     permit: tokio::sync::OwnedSemaphorePermit,
-    timeout: Option<Duration>,
+    worker_timeout: Option<Duration>,
+    runtime_timeout: Option<Duration>,
     op: impl FnOnce(&mut DbVfs<super::backend::BackendStore>) -> db_vfs::Result<T> + Send + 'static,
 ) -> Result<
     (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
@@ -193,14 +205,14 @@ where
     let redactor = state.inner.redactor.clone();
     let traversal = state.inner.traversal.clone();
     let pool_timeout = Some(db_pool_timeout(policy.as_ref()));
-    let operation_timeout = backend_operation_timeout(policy.as_ref(), timeout);
+    let operation_timeout = backend_operation_timeout(policy.as_ref(), runtime_timeout);
 
-    let cancel = timeout.map(|_| Arc::new(CancelState::new()));
+    let cancel = worker_timeout.map(|_| Arc::new(CancelState::new()));
     let cancel_for_timeout = cancel.clone();
     let cancel_for_worker = cancel;
 
     run_blocking(
-        timeout,
+        worker_timeout,
         permit,
         cancel_for_timeout,
         move || -> db_vfs::Result<T> {
@@ -256,6 +268,30 @@ mod tests {
             backend_operation_timeout(&policy, scan_timeout(&policy)),
             Some(Duration::from_millis(700))
         );
+    }
+
+    #[test]
+    fn backend_operation_timeout_uses_scan_runtime_budget_when_present() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = 700;
+        policy.limits.max_walk_ms = Some(1200);
+        assert_eq!(
+            backend_operation_timeout(&policy, scan_timeout(&policy)),
+            Some(Duration::from_millis(1200))
+        );
+    }
+
+    #[test]
+    fn worker_timeout_keeps_io_requests_bounded() {
+        assert_eq!(
+            worker_timeout(Some(Duration::from_millis(250)), false),
+            Some(Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn worker_timeout_does_not_apply_scan_runtime_budget_to_pool_wait() {
+        assert_eq!(worker_timeout(Some(Duration::from_millis(250)), true), None);
     }
 
     #[tokio::test]
