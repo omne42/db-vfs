@@ -66,6 +66,13 @@ const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
 pub(super) const META_PAGE_SIZE: usize = 2048;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
+const MAX_GREP_CONTENT_LOAD_ATTEMPTS: usize = 8;
+
+enum GrepContentLoad {
+    Loaded(String),
+    TooLarge,
+    Missing,
+}
 
 fn grep_match_json_bytes(
     path_json_escaped_len: usize,
@@ -184,6 +191,75 @@ fn ensure_line_oriented_regex(query: &str) -> Result<()> {
     Ok(())
 }
 
+fn load_grep_content_with_retry<S: crate::store::Store>(
+    store: &mut S,
+    workspace_id: &str,
+    path: &str,
+    mut version: u64,
+    mut size_bytes: u64,
+    max_read_bytes: u64,
+) -> Result<GrepContentLoad> {
+    let mut attempts = 0usize;
+    loop {
+        if attempts >= MAX_GREP_CONTENT_LOAD_ATTEMPTS {
+            let Some(now_meta) = store.get_meta(workspace_id, path)? else {
+                return Ok(GrepContentLoad::Missing);
+            };
+            if now_meta.size_bytes > max_read_bytes {
+                return Ok(GrepContentLoad::TooLarge);
+            }
+            return match store.get_content(workspace_id, path, now_meta.version)? {
+                Some(content) => {
+                    let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+                    if content_size_bytes > max_read_bytes {
+                        Ok(GrepContentLoad::TooLarge)
+                    } else {
+                        Ok(GrepContentLoad::Loaded(content))
+                    }
+                }
+                None => Ok(GrepContentLoad::Missing),
+            };
+        }
+        attempts += 1;
+
+        if size_bytes > max_read_bytes {
+            let Some(now_meta) = store.get_meta(workspace_id, path)? else {
+                return Ok(GrepContentLoad::Missing);
+            };
+            if now_meta.version != version || now_meta.size_bytes <= max_read_bytes {
+                version = now_meta.version;
+                size_bytes = now_meta.size_bytes;
+                continue;
+            }
+            return Ok(GrepContentLoad::TooLarge);
+        }
+
+        match store.get_content(workspace_id, path, version)? {
+            Some(content) => {
+                let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
+                if content_size_bytes > max_read_bytes {
+                    return Ok(GrepContentLoad::TooLarge);
+                }
+                return Ok(GrepContentLoad::Loaded(content));
+            }
+            None => {
+                let Some(now_meta) = store.get_meta(workspace_id, path)? else {
+                    return Ok(GrepContentLoad::Missing);
+                };
+                if now_meta.version != version {
+                    version = now_meta.version;
+                    size_bytes = now_meta.size_bytes;
+                    continue;
+                }
+                if now_meta.size_bytes > max_read_bytes {
+                    return Ok(GrepContentLoad::TooLarge);
+                }
+                return Ok(GrepContentLoad::Missing);
+            }
+        }
+    }
+}
+
 pub(super) fn grep<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: GrepRequest,
@@ -300,8 +376,6 @@ pub(super) fn grep<S: crate::store::Store>(
         "grep",
         |store, meta| {
             let path = meta.path;
-            let meta_version = meta.version;
-            let meta_size_bytes = meta.size_bytes;
             let mut path_json_escaped_len: Option<usize> = None;
 
             if vfs.traversal.is_path_skipped(&path) {
@@ -330,21 +404,24 @@ pub(super) fn grep<S: crate::store::Store>(
                 return Ok(ScanControl::Continue);
             }
 
-            if meta_size_bytes > max_read_bytes {
-                skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                return Ok(ScanControl::Continue);
-            }
-
-            let Some(content) = store.get_content(&request.workspace_id, &path, meta_version)?
-            else {
-                skipped_missing_content = skipped_missing_content.saturating_add(1);
-                return Ok(ScanControl::Continue);
+            let content = match load_grep_content_with_retry(
+                store,
+                &request.workspace_id,
+                &path,
+                meta.version,
+                meta.size_bytes,
+                max_read_bytes,
+            )? {
+                GrepContentLoad::Loaded(content) => content,
+                GrepContentLoad::TooLarge => {
+                    skipped_too_large_files = skipped_too_large_files.saturating_add(1);
+                    return Ok(ScanControl::Continue);
+                }
+                GrepContentLoad::Missing => {
+                    skipped_missing_content = skipped_missing_content.saturating_add(1);
+                    return Ok(ScanControl::Continue);
+                }
             };
-            let content_size_bytes = u64::try_from(content.len()).unwrap_or(u64::MAX);
-            if content_size_bytes > max_read_bytes {
-                skipped_too_large_files = skipped_too_large_files.saturating_add(1);
-                return Ok(ScanControl::Continue);
-            }
             let redacted_content = if has_redaction_rules {
                 match vfs
                     .redactor
@@ -1533,8 +1610,13 @@ mod tests {
     struct NonMonotonicAcrossPagesStore;
 
     impl Store for NonMonotonicAcrossPagesStore {
-        fn get_meta(&mut self, _workspace_id: &str, _path: &str) -> Result<Option<FileMeta>> {
-            unimplemented!()
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            Ok(Some(FileMeta {
+                path: path.to_string(),
+                size_bytes: u64::MAX,
+                version: 1,
+                updated_at_ms: 0,
+            }))
         }
 
         fn get_content(
@@ -1734,5 +1816,243 @@ mod tests {
         assert!(response.truncated);
         assert!(response.scan_limit_reached);
         assert_eq!(response.scan_limit_reason, Some(ScanLimitReason::Time));
+    }
+
+    struct RefreshAfterOversizedMetaStore {
+        stale_meta: FileMeta,
+        current_meta: FileMeta,
+        current_content: String,
+    }
+
+    impl Store for RefreshAfterOversizedMetaStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.current_meta.path {
+                Ok(Some(self.current_meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.current_meta.path && version == self.current_meta.version {
+                Ok(Some(self.current_content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(vec![self.stale_meta.clone()])
+        }
+    }
+
+    #[test]
+    fn grep_refreshes_stale_oversized_meta_before_skipping_file() {
+        let store = RefreshAfterOversizedMetaStore {
+            stale_meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 64,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            current_meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 2,
+                updated_at_ms: 1,
+            },
+            current_content: "needle".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.limits.max_read_bytes = 16;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let response = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "needle".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "docs/a.txt");
+        assert_eq!(response.matches[0].line, 1);
+        assert_eq!(response.matches[0].text, "needle");
+        assert_eq!(response.skipped_too_large_files, 0);
+        assert_eq!(response.skipped_missing_content, 0);
+    }
+
+    struct RefreshAfterMissingContentStore {
+        stale_meta: FileMeta,
+        current_meta: FileMeta,
+        current_content: String,
+    }
+
+    impl Store for RefreshAfterMissingContentStore {
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.current_meta.path {
+                Ok(Some(self.current_meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            path: &str,
+            version: u64,
+        ) -> Result<Option<String>> {
+            if path == self.current_meta.path && version == self.current_meta.version {
+                Ok(Some(self.current_content.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            Ok(vec![self.stale_meta.clone()])
+        }
+    }
+
+    #[test]
+    fn grep_retries_when_paged_meta_version_loses_race_with_content_load() {
+        let store = RefreshAfterMissingContentStore {
+            stale_meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 1,
+                updated_at_ms: 0,
+            },
+            current_meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 2,
+                updated_at_ms: 1,
+            },
+            current_content: "needle".to_string(),
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.limits.max_read_bytes = 16;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let response = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "needle".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect("grep");
+
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "docs/a.txt");
+        assert_eq!(response.matches[0].line, 1);
+        assert_eq!(response.matches[0].text, "needle");
+        assert_eq!(response.skipped_too_large_files, 0);
+        assert_eq!(response.skipped_missing_content, 0);
     }
 }
