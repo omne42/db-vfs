@@ -76,6 +76,23 @@ impl FileMeta {
     }
 }
 
+pub(crate) fn normalize_store_workspace_id(workspace_id: &str) -> Result<String> {
+    validate_workspace_id(workspace_id)?;
+    Ok(workspace_id.to_string())
+}
+
+pub(crate) fn normalize_store_path(path: &str) -> Result<String> {
+    normalize_path(path)
+}
+
+pub(crate) fn normalize_store_path_prefix(prefix: &str) -> Result<String> {
+    db_vfs_core::path::normalize_path_prefix(prefix)
+}
+
+pub(crate) fn normalize_store_after_cursor(after: &str) -> Result<String> {
+    normalize_path(after)
+}
+
 fn validate_stored_path(path: &str) -> Result<()> {
     let normalized = normalize_path(path)
         .map_err(|err| Error::Db(format!("invalid stored path invariant for {path:?}: {err}")))?;
@@ -696,6 +713,28 @@ mod tests {
         .validated()
         .expect_err("invalid workspace id");
         assert_eq!(err.code(), "db");
+    }
+
+    #[test]
+    fn normalize_store_inputs_match_vfs_path_contract() {
+        assert_eq!(normalize_store_workspace_id("ws").expect("workspace"), "ws");
+        assert_eq!(
+            normalize_store_path("./docs//a.txt").expect("path"),
+            "docs/a.txt"
+        );
+        assert_eq!(
+            normalize_store_path_prefix("./docs").expect("prefix"),
+            "docs/"
+        );
+        assert_eq!(
+            normalize_store_after_cursor("./docs//a.txt").expect("cursor"),
+            "docs/a.txt"
+        );
+
+        let err = normalize_store_workspace_id("bad ws").expect_err("invalid workspace");
+        assert_eq!(err.code(), "invalid_path");
+        let err = normalize_store_path("../secret").expect_err("invalid path");
+        assert_eq!(err.code(), "invalid_path");
     }
 
     #[test]

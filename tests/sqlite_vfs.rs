@@ -459,6 +459,51 @@ fn store_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
 }
 
 #[test]
+fn sqlite_store_normalizes_public_keys_and_rejects_invalid_workspace_ids() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+
+    let version = store
+        .insert_file_new("ws", "./docs//a.txt", "hello\n", now)
+        .expect("insert with normalized key");
+    assert_eq!(version, 1);
+
+    let meta = store
+        .get_meta("ws", "docs/a.txt")
+        .expect("get meta")
+        .expect("meta exists");
+    assert_eq!(meta.path, "docs/a.txt");
+    assert_eq!(meta.version, 1);
+
+    let same_meta = store
+        .get_meta("ws", "./docs//a.txt")
+        .expect("get meta with dirty path")
+        .expect("meta exists");
+    assert_eq!(same_meta.path, "docs/a.txt");
+
+    let updated = store
+        .update_file_cas("ws", "./docs//a.txt", "hi\n", 1, now.saturating_add(1))
+        .expect("update with dirty path");
+    assert_eq!(updated, 2);
+
+    let listed = store
+        .list_metas_by_prefix("ws", "./docs", 16)
+        .expect("list by dirty prefix");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, "docs/a.txt");
+
+    let deleted = store
+        .delete_file("ws", "./docs//a.txt", Some(2))
+        .expect("delete with dirty path");
+    assert_eq!(deleted, DeleteOutcome::Deleted);
+
+    let err = store
+        .insert_file_new("bad ws", "docs/a.txt", "hello\n", now)
+        .expect_err("invalid workspace id");
+    assert_eq!(err.code(), "invalid_path");
+}
+
+#[test]
 fn vfs_write_rejects_stale_expected_version_after_delete_and_recreate() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);

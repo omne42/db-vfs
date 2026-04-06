@@ -103,11 +103,11 @@
 - `service/src/server/auth.rs`
   - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验、摘要匹配和 workspace allowlist 约束。
 - `src/store/mod.rs`
-  - 仍保留 legacy `list_metas_by_prefix_page` compatibility fallback，但它只保证正确性，
-    不保证大前缀 scan budget / 性能语义；fallback 命中时现在会显式告警，不再静默退化。
-  - ranged-read 的 `get_content_chunk` legacy compatibility fallback 也只保证正确性，不再
-    静默 materialize whole-file content；fallback 命中时会显式告警，提示 store 实现方补齐
-    chunked line-range 边界。
+  - 内置 SQLite/Postgres store 会在公开入口维持 `workspace_id` / `path` / `path_prefix`
+    的 VFS 不变量，避免 direct store 调用写出 VFS 无法一致访问的脏 key。
+  - 仍保留 legacy `list_metas_by_prefix_page` / `get_content_chunk` compatibility fallback，
+    但它们只保证正确性，不保证大前缀 scan budget 或 ranged-read 性能语义；fallback
+    命中时会显式告警，提示 store 实现方补齐 cursor pagination / chunked line-range 边界。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `ServicePolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 

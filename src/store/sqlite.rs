@@ -6,7 +6,11 @@ use rusqlite::OptionalExtension;
 
 use db_vfs_core::{Error, Result};
 
-use super::{DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms};
+use super::{
+    DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms,
+    normalize_store_after_cursor, normalize_store_path, normalize_store_path_prefix,
+    normalize_store_workspace_id,
+};
 
 pub struct SqliteStoreWithConn<C> {
     conn: C,
@@ -59,6 +63,8 @@ where
     C: DerefMut<Target = rusqlite::Connection>,
 {
     fn get_meta(&mut self, workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         let mut stmt = self
             .conn
             .prepare_cached(
@@ -69,7 +75,7 @@ where
             .map_err(map_sqlite_err)?;
 
         let row = stmt
-            .query_row(rusqlite::params![workspace_id, path], |row| {
+            .query_row(rusqlite::params![&workspace_id, &path], |row| {
                 Ok((
                     i64_to_u64_sql(row.get::<_, i64>(0)?, "size_bytes", 0)?,
                     i64_to_u64_sql(row.get::<_, i64>(1)?, "version", 1)?,
@@ -97,6 +103,8 @@ where
         path: &str,
         version: u64,
     ) -> Result<Option<String>> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         let version = u64_to_i64(version, "version")?;
         let mut stmt = self
             .conn
@@ -107,7 +115,7 @@ where
             )
             .map_err(map_sqlite_err)?;
 
-        stmt.query_row(rusqlite::params![workspace_id, path, version], |row| {
+        stmt.query_row(rusqlite::params![&workspace_id, &path, version], |row| {
             row.get::<_, String>(0)
         })
         .optional()
@@ -122,6 +130,8 @@ where
         start_char: u64,
         max_chars: usize,
     ) -> Result<Option<String>> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         if max_chars == 0 {
             return Ok(Some(String::new()));
         }
@@ -139,7 +149,7 @@ where
             .map_err(map_sqlite_err)?;
 
         stmt.query_row(
-            rusqlite::params![workspace_id, path, version, start_char, max_chars],
+            rusqlite::params![&workspace_id, &path, version, start_char, max_chars],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -153,6 +163,8 @@ where
         content: &str,
         now_ms: u64,
     ) -> Result<u64> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -163,22 +175,23 @@ where
         let now_ms_i64 = u64_to_i64(now_ms, "now_ms")?;
 
         let (current_version, last_version) =
-            load_current_versions_sqlite(&tx, workspace_id, path).map_err(map_sqlite_err)?;
+            load_current_versions_sqlite(&tx, &workspace_id, &path).map_err(map_sqlite_err)?;
         if current_version.is_some() {
             return Err(Error::Conflict("file exists".to_string()));
         }
 
         let version = super::next_version(i64_to_u64(last_version.unwrap_or(0), "last_version")?)?;
         let version_i64 = u64_to_i64(version, "version")?;
-        persist_generation_sqlite(&tx, workspace_id, path, version_i64).map_err(map_sqlite_err)?;
+        persist_generation_sqlite(&tx, &workspace_id, &path, version_i64)
+            .map_err(map_sqlite_err)?;
 
         tx.execute(
             "INSERT INTO files(
                 workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
-                workspace_id,
-                path,
+                &workspace_id,
+                &path,
                 content,
                 size_bytes_i64,
                 version_i64,
@@ -200,6 +213,8 @@ where
         expected_version: u64,
         now_ms: u64,
     ) -> Result<u64> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -211,7 +226,7 @@ where
                 "SELECT version, created_at_ms, updated_at_ms
                  FROM files
                  WHERE workspace_id = ?1 AND path = ?2",
-                rusqlite::params![workspace_id, path],
+                rusqlite::params![&workspace_id, &path],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -246,15 +261,15 @@ where
                     size_bytes_i64,
                     new_version_i64,
                     next_updated_at_ms_i64,
-                    workspace_id,
-                    path,
+                    &workspace_id,
+                    &path,
                     expected_version_i64,
                 ],
             )
             .map_err(map_sqlite_err)?;
 
         if updated == 1 {
-            persist_generation_sqlite(&tx, workspace_id, path, new_version_i64)
+            persist_generation_sqlite(&tx, &workspace_id, &path, new_version_i64)
                 .map_err(map_sqlite_err)?;
             tx.commit().map_err(map_sqlite_err)?;
             return Ok(new_version);
@@ -271,6 +286,8 @@ where
         path: &str,
         expected_version: Option<u64>,
     ) -> Result<DeleteOutcome> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let path = normalize_store_path(path)?;
         match expected_version {
             Some(version) => {
                 let version = u64_to_i64(version, "version")?;
@@ -283,7 +300,7 @@ where
                         "SELECT version
                          FROM files
                          WHERE workspace_id = ?1 AND path = ?2",
-                        rusqlite::params![workspace_id, path],
+                        rusqlite::params![&workspace_id, &path],
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
@@ -300,7 +317,7 @@ where
                     .execute(
                         "DELETE FROM files
                          WHERE workspace_id = ?1 AND path = ?2 AND version = ?3",
-                        rusqlite::params![workspace_id, path, version],
+                        rusqlite::params![&workspace_id, &path, version],
                     )
                     .map_err(map_sqlite_err)?;
                 if deleted != 1 {
@@ -308,7 +325,7 @@ where
                         "delete_file: expected to delete exactly one row, deleted={deleted}"
                     )));
                 }
-                persist_generation_sqlite(&tx, workspace_id, path, version)
+                persist_generation_sqlite(&tx, &workspace_id, &path, version)
                     .map_err(map_sqlite_err)?;
                 tx.commit().map_err(map_sqlite_err)?;
                 Ok(DeleteOutcome::Deleted)
@@ -323,7 +340,7 @@ where
                         "SELECT version
                          FROM files
                          WHERE workspace_id = ?1 AND path = ?2",
-                        rusqlite::params![workspace_id, path],
+                        rusqlite::params![&workspace_id, &path],
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()
@@ -335,7 +352,7 @@ where
                 let deleted = tx
                     .execute(
                         "DELETE FROM files WHERE workspace_id = ?1 AND path = ?2",
-                        rusqlite::params![workspace_id, path],
+                        rusqlite::params![&workspace_id, &path],
                     )
                     .map_err(map_sqlite_err)?;
                 if deleted != 1 {
@@ -343,7 +360,7 @@ where
                         "delete_file: expected to delete exactly one row, deleted={deleted}"
                     )));
                 }
-                persist_generation_sqlite(&tx, workspace_id, path, current_version)
+                persist_generation_sqlite(&tx, &workspace_id, &path, current_version)
                     .map_err(map_sqlite_err)?;
                 tx.commit().map_err(map_sqlite_err)?;
                 Ok(DeleteOutcome::Deleted)
@@ -367,16 +384,19 @@ where
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
+        let workspace_id = normalize_store_workspace_id(workspace_id)?;
+        let prefix = normalize_store_path_prefix(prefix)?;
+        let after = after.map(normalize_store_after_cursor).transpose()?;
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let (lower, upper) = make_prefix_bounds(prefix);
+        let (lower, upper) = make_prefix_bounds(&prefix);
         let limit_u64 = u64::try_from(limit)
             .map_err(|_| Error::Db("integer overflow converting limit".to_string()))?;
         let limit_i64 = u64_to_i64(limit_u64, "limit")?;
         let mut out = Vec::with_capacity(limit.min(1024));
-        match (after, upper.as_deref()) {
+        match (after.as_deref(), upper.as_deref()) {
             (Some(after), Some(upper)) => {
                 let mut stmt = self
                     .conn
