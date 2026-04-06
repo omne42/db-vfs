@@ -104,6 +104,11 @@ async fn log_audit_event(
     audit: &audit::AuditLogger,
     event: audit::AuditEvent,
 ) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if !audit.is_required() {
+        audit.try_log(event, None).map_err(audit_failure_response)?;
+        return Ok(());
+    }
+
     let audit = audit.clone();
     tokio::task::spawn_blocking(move || audit.try_log(event, None))
         .await

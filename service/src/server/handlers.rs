@@ -1754,6 +1754,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn log_audit_event_keeps_optional_audit_best_effort() {
+        let audit = super::super::audit::AuditLogger::broken_optional_logger_for_test();
+
+        super::super::log_audit_event(
+            &audit,
+            super::super::audit::minimal_event("req-optional".to_string(), None, "read", 200, None),
+        )
+        .await
+        .expect("optional audit disconnect should stay best-effort");
+    }
+
+    #[tokio::test]
     async fn log_audit_event_with_permit_keeps_semaphore_slot_until_ack_finishes() {
         let (audit, control) =
             super::super::audit::AuditLogger::blocking_required_logger_for_test();
