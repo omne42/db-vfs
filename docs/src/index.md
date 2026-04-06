@@ -22,7 +22,9 @@ It provides six operations:
 - **Auth** binds tokens to workspace allowlists.
 
 Scan operations are **scoped and budgeted**: callers must provide `path_prefix` (or a safe literal
-prefix must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
+scope must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
+Exact-file patterns auto-scope to a single path; wildcard patterns only auto-scope to their
+longest literal directory prefix.
 
 ## High-concurrency expectations
 
