@@ -37,6 +37,9 @@ persist keys that the VFS would later fail to address consistently.
 If an external `Store` implementation relies on the trait's compatibility fallbacks for
 `get_content_chunk` or `list_metas_by_prefix_page`, `db-vfs` now emits one-time warnings instead
 of silently degrading ranged-read or large-prefix scan semantics.
+`Store::prefix_pagination_mode()` also makes that pagination contract explicit: built-in SQLite and
+Postgres stores report native cursor pagination, while the trait's default fallback stays marked as
+legacy compatibility only.
 
 ## Quick verification
 

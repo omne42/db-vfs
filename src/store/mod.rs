@@ -1,8 +1,10 @@
-#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use db_vfs_core::path::{normalize_path, validate_workspace_id};
 use db_vfs_core::{Error, Result};
@@ -11,8 +13,8 @@ pub const MAX_STORE_VERSION: u64 = i64::MAX as u64;
 const MAX_UTF8_CHAR_BYTES: usize = 4;
 const MAX_RANGE_READ_CHUNK_CHARS: usize = 64 * 1024;
 
-static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
-static LEGACY_RANGE_READ_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static LEGACY_PREFIX_PAGE_FALLBACK_WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+static LEGACY_RANGE_READ_FALLBACK_WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
 #[cfg(test)]
 static LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
@@ -123,6 +125,12 @@ pub struct LineRangeData {
     pub content: Option<String>,
     pub bytes_read: u64,
     pub total_lines: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixPaginationMode {
+    NativeCursorPagination,
+    LegacyCompatibilityFallback,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -404,6 +412,16 @@ pub trait Store {
         limit: usize,
     ) -> Result<Vec<FileMeta>>;
 
+    /// Declares whether [`Store::list_metas_by_prefix_page`] is a native cursor-paginated
+    /// implementation or the legacy compatibility fallback.
+    ///
+    /// Native cursor pagination preserves the scan-budget and performance semantics expected by
+    /// `glob` / `grep`. The legacy mode still preserves correctness, but it may re-scan a large
+    /// prefix repeatedly and therefore should not be treated as operationally equivalent.
+    fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+        PrefixPaginationMode::LegacyCompatibilityFallback
+    }
+
     /// Cursor-based variant of [`Store::list_metas_by_prefix`].
     ///
     /// Production stores should override this instead of relying on the
@@ -470,7 +488,7 @@ pub trait Store {
 }
 
 fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
-    if !LEGACY_PREFIX_PAGE_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+    if mark_warning_emitted_for_store_type::<S>(&LEGACY_PREFIX_PAGE_FALLBACK_WARNED) {
         #[cfg(test)]
         LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
         log::warn!(
@@ -481,7 +499,7 @@ fn warn_legacy_prefix_page_fallback<S: ?Sized>() {
 }
 
 fn warn_legacy_range_read_fallback<S: ?Sized>() {
-    if !LEGACY_RANGE_READ_FALLBACK_WARNED.swap(true, Ordering::AcqRel) {
+    if mark_warning_emitted_for_store_type::<S>(&LEGACY_RANGE_READ_FALLBACK_WARNED) {
         #[cfg(test)]
         LEGACY_RANGE_READ_FALLBACK_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
         log::warn!(
@@ -491,9 +509,29 @@ fn warn_legacy_range_read_fallback<S: ?Sized>() {
     }
 }
 
+fn mark_warning_emitted_for_store_type<S: ?Sized>(
+    warned: &'static OnceLock<Mutex<HashSet<&'static str>>>,
+) -> bool {
+    let warned = warned.get_or_init(|| Mutex::new(HashSet::new()));
+    match warned.lock() {
+        Ok(mut warned) => warned.insert(std::any::type_name::<S>()),
+        Err(err) => {
+            log::warn!(
+                "legacy store fallback warning registry lock poisoned; continuing without dedupe: {err}"
+            );
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 fn reset_legacy_prefix_page_fallback_warning_for_test() {
-    LEGACY_PREFIX_PAGE_FALLBACK_WARNED.store(false, Ordering::Release);
+    if let Some(warned) = LEGACY_PREFIX_PAGE_FALLBACK_WARNED.get() {
+        warned
+            .lock()
+            .expect("lock legacy prefix fallback warned set")
+            .clear();
+    }
     LEGACY_PREFIX_PAGE_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
 }
 
@@ -504,7 +542,12 @@ fn legacy_prefix_page_fallback_warn_count_for_test() -> usize {
 
 #[cfg(test)]
 fn reset_legacy_range_read_fallback_warning_for_test() {
-    LEGACY_RANGE_READ_FALLBACK_WARNED.store(false, Ordering::Release);
+    if let Some(warned) = LEGACY_RANGE_READ_FALLBACK_WARNED.get() {
+        warned
+            .lock()
+            .expect("lock legacy range fallback warned set")
+            .clear();
+    }
     LEGACY_RANGE_READ_FALLBACK_WARN_COUNT.store(0, Ordering::Release);
 }
 
@@ -986,6 +1029,38 @@ mod tests {
             .expect("second fallback page");
 
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
+    }
+
+    #[test]
+    fn default_page_impl_warns_once_per_store_type() {
+        let _guard = LEGACY_PREFIX_PAGE_FALLBACK_TEST_LOCK
+            .lock()
+            .expect("lock legacy fallback test state");
+        reset_legacy_prefix_page_fallback_warning_for_test();
+        let mut prefix_only = PrefixOnlyStore {
+            paths: vec!["docs/a.txt".to_string(), "docs/b.txt".to_string()],
+        };
+        let mut unsorted = UnsortedPrefixStore {
+            paths: vec!["docs/b.txt".to_string(), "docs/a.txt".to_string()],
+        };
+
+        prefix_only
+            .list_metas_by_prefix_page("ws", "docs/", None, 1)
+            .expect("prefix-only fallback page");
+        unsorted
+            .list_metas_by_prefix_page("ws", "docs/", None, 1)
+            .expect("unsorted fallback page");
+
+        assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 2);
+    }
+
+    #[test]
+    fn default_prefix_pagination_mode_is_legacy_fallback() {
+        let store = PrefixOnlyStore::default();
+        assert_eq!(
+            store.prefix_pagination_mode(),
+            PrefixPaginationMode::LegacyCompatibilityFallback
+        );
     }
 
     #[derive(Default)]

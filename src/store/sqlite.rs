@@ -7,9 +7,9 @@ use rusqlite::OptionalExtension;
 use db_vfs_core::{Error, Result};
 
 use super::{
-    DeleteOutcome, FileMeta, Store, db_err, make_prefix_bounds, monotonic_updated_at_ms,
-    normalize_store_after_cursor, normalize_store_path, normalize_store_path_prefix,
-    normalize_store_workspace_id,
+    DeleteOutcome, FileMeta, PrefixPaginationMode, Store, db_err, make_prefix_bounds,
+    monotonic_updated_at_ms, normalize_store_after_cursor, normalize_store_path,
+    normalize_store_path_prefix, normalize_store_workspace_id,
 };
 
 pub struct SqliteStoreWithConn<C> {
@@ -375,6 +375,10 @@ where
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
         self.list_metas_by_prefix_page(workspace_id, prefix, None, limit)
+    }
+
+    fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+        PrefixPaginationMode::NativeCursorPagination
     }
 
     fn list_metas_by_prefix_page(
