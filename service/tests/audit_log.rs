@@ -5,10 +5,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::Request;
 use db_vfs::vfs::WriteRequest;
 use db_vfs_core::policy::{
     AuditPolicy, AuthPolicy, AuthToken, Limits, Permissions, SecretRules, TraversalRules, VfsPolicy,
 };
+use serde::Serialize;
+use tower::ServiceExt;
 
 const DEV_TOKEN: &str = "dev-token";
 const DEV_TOKEN_SHA256: &str =
@@ -41,33 +46,42 @@ fn base_policy() -> VfsPolicy {
 
 struct TestServer {
     _dir: tempfile::TempDir,
+    app: Router,
     audit_path: PathBuf,
-    base: String,
-    client: reqwest::Client,
-    handle: tokio::task::JoinHandle<()>,
+    peer_addr: SocketAddr,
 }
 
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.handle.abort();
+impl TestServer {
+    async fn send(&self, mut req: Request<Body>) -> axum::response::Response {
+        req.extensions_mut()
+            .insert(ConnectInfo::<SocketAddr>(self.peer_addr));
+        self.app.clone().oneshot(req).await.expect("response")
     }
 }
 
-async fn serve(app: Router) -> std::io::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let handle = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("serve");
-    });
-    Ok((addr, handle))
+fn raw_request(body: impl Into<Body>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/write")
+        .header("content-type", "application/json")
+        .body(body.into())
+        .expect("request")
 }
 
-async fn setup(mut policy: VfsPolicy) -> Option<TestServer> {
+fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
+    let mut req = raw_request(Body::from(
+        serde_json::to_vec(body).expect("serialize request json"),
+    ));
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {DEV_TOKEN}")
+            .parse()
+            .expect("authorization header"),
+    );
+    req
+}
+
+async fn setup(mut policy: VfsPolicy) -> TestServer {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("db.sqlite");
     let audit_path = dir.path().join("audit.jsonl");
@@ -80,22 +94,12 @@ async fn setup(mut policy: VfsPolicy) -> Option<TestServer> {
     };
 
     let app = db_vfs_service::server::build_app(db, policy, false).expect("build app");
-    let (addr, handle) = match serve(app).await {
-        Ok(server) => server,
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping audit_log test: local bind denied ({err})");
-            return None;
-        }
-        Err(err) => panic!("bind: {err}"),
-    };
-
-    Some(TestServer {
+    TestServer {
         _dir: dir,
+        app,
         audit_path,
-        base: format!("http://{addr}"),
-        client: reqwest::Client::new(),
-        handle,
-    })
+        peer_addr: SocketAddr::from(([127, 0, 0, 1], 31337)),
+    }
 }
 
 async fn wait_for_audit_lines(path: &Path, min_lines: usize) -> Vec<serde_json::Value> {
@@ -158,18 +162,9 @@ fn find_event<'a>(
 
 #[tokio::test]
 async fn audit_logs_unauthorized_requests() {
-    let Some(server) = setup(base_policy()).await else {
-        return;
-    };
+    let server = setup(base_policy()).await;
 
-    let resp = server
-        .client
-        .post(format!("{}/v1/write", server.base))
-        .header("content-type", "application/json")
-        .body("{")
-        .send()
-        .await
-        .expect("send unauthorized request");
+    let resp = server.send(raw_request("{")).await;
     assert_eq!(resp.status(), 401);
 
     let lines = wait_for_audit_lines(&server.audit_path, 1).await;
@@ -184,19 +179,16 @@ async fn audit_logs_unauthorized_requests() {
 
 #[tokio::test]
 async fn audit_logs_invalid_json_requests() {
-    let Some(server) = setup(base_policy()).await else {
-        return;
-    };
+    let server = setup(base_policy()).await;
 
-    let resp = server
-        .client
-        .post(format!("{}/v1/write", server.base))
-        .header("authorization", format!("Bearer {DEV_TOKEN}"))
-        .header("content-type", "application/json")
-        .body("{")
-        .send()
-        .await
-        .expect("send invalid json request");
+    let mut req = raw_request("{");
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {DEV_TOKEN}")
+            .parse()
+            .expect("authorization header"),
+    );
+    let resp = server.send(req).await;
     assert_eq!(resp.status(), 400);
 
     let lines = wait_for_audit_lines(&server.audit_path, 1).await;
@@ -218,9 +210,7 @@ async fn audit_logs_rate_limited_requests() {
         max_rate_limit_ips: 1024,
         ..Limits::default()
     };
-    let Some(server) = setup(policy).await else {
-        return;
-    };
+    let server = setup(policy).await;
 
     let req = WriteRequest {
         workspace_id: "ws".to_string(),
@@ -229,28 +219,14 @@ async fn audit_logs_rate_limited_requests() {
         expected_version: None,
     };
 
-    let ok = server
-        .client
-        .post(format!("{}/v1/write", server.base))
-        .header("authorization", format!("Bearer {DEV_TOKEN}"))
-        .json(&req)
-        .send()
-        .await
-        .expect("send first write");
+    let ok = server.send(bearer_request(&req)).await;
     assert_eq!(ok.status(), 200);
 
     let mut saw_rate_limit = false;
     for attempt in 0..8 {
         let mut req = req.clone();
         req.path = format!("docs/rate-limit-{attempt}.txt");
-        let resp = server
-            .client
-            .post(format!("{}/v1/write", server.base))
-            .header("authorization", format!("Bearer {DEV_TOKEN}"))
-            .json(&req)
-            .send()
-            .await
-            .expect("send follow-up write");
+        let resp = server.send(bearer_request(&req)).await;
         if resp.status() == 429 {
             saw_rate_limit = true;
             break;
