@@ -79,6 +79,8 @@ Budget semantics:
 - `max_io_ms` applies to non-scan requests (`read`/`write`/`patch`/`delete`) and bounded pool wait/connect time.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
+- Once body bytes are buffered, the service preflights `workspace_id` so token-authorized but
+  disallowed workspaces fail before full request-schema parsing or VFS execution.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
 - Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
@@ -95,11 +97,8 @@ Secrets semantics:
 
 - `secrets.replacement` must not contain control characters.
 - `DbVfs::new_validated()` rebuilds policy-derived matchers from the validated policy.
-- `DbVfs::new_with_supplied_matchers_validated()` and
-  `DbVfs::try_new_with_supplied_matchers_validated()` are the strict validated constructors for
-  caller-supplied matchers and fail fast on mismatch.
-- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` remain as
-  deprecated compatibility aliases for the caller-supplied strict path.
+- `DbVfs::new_with_matchers_validated()` and `DbVfs::try_new_with_matchers_validated()` are the
+  strict validated constructors for caller-supplied matchers and fail fast on mismatch.
 - `patch` is intentionally unavailable while `secrets.redact_regexes` is active; diff application
   against raw stored text would otherwise let callers probe masked content through context-match
   success or failure.
