@@ -117,6 +117,10 @@ whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved fo
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
 
+For `glob` and `grep`, omitting `path_prefix` is only allowed when the request still has a safe
+literal scope. Exact-file patterns auto-scope to that one path; wildcard patterns auto-scope only
+to their longest literal directory prefix.
+
 Line-range `read` still enforces `max_read_bytes` on the returned slice. Without secret redaction
 rules, the store can stop after the requested range instead of materializing the whole file. When
 secret redaction rules are active, both the raw backing file and the redacted whole-file
@@ -415,6 +419,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/read+service/store+docs: make redaction-enabled ranged reads fail before loading oversized raw files, account for redaction copy amplification in scan memory planning, and surface legacy cursor-pagination fallback usage with an explicit warning instead of silent scan-contract degradation.
 - service/startup: bind startup SQLite/Postgres migrations to `limits.max_io_ms` so lock contention fails fast instead of hanging startup behind nearly unbounded DB waits.
 - vfs/glob+grep: derive safe prefixes from exact-file literals too, so root-level patterns like `README.md` remain allowed under `allow_full_scan=false` instead of being rejected as full scans.
+- docs/vfs-scan-scope: clarify that omitted `path_prefix` on exact-file `glob` / `grep` scopes to a single path instead of widening to sibling prefix traversal.
 - vfs/grep+service/handlers+docs: treat literal `\r` queries the same as `\n` for line-oriented grep short-circuiting so CRLF inputs no longer do useless content work or return silent false negatives, and rename the internal permit helper to reflect its immediate `503 busy` semantics.
 - vfs/grep+docs: evaluate grep matches against the redacted line view whenever secret redaction is active, so masked secrets no longer remain discoverable via match/no-match behavior.
 - store/vfs/read+grep+docs: treat lone `\r` as a real line boundary alongside `\n`/`\r\n`, fixing CR-only ranged reads, grep line numbering, and legacy store line-range fallback semantics.
@@ -521,7 +526,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/grep+patch: replace remaining lossy `usize -> u64` casts in input-size error accounting with checked/saturating conversions to avoid theoretical truncation on wide-pointer targets.
 - vfs/store/docs: keep validated-matcher and ranged-read compatibility paths backward-compatible but no longer silent by emitting one-time warnings when policy/matcher rebuild fallback or whole-file ranged-read fallback is used.
 
-### Internal
 
 
 ---
@@ -576,7 +580,9 @@ It provides six operations:
 - **Auth** binds tokens to workspace allowlists.
 
 Scan operations are **scoped and budgeted**: callers must provide `path_prefix` (or a safe literal
-prefix must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
+scope must be derivable from `glob`), and traversal is constrained by `limits.*` budgets.
+Exact-file patterns auto-scope to a single path; wildcard patterns only auto-scope to their
+longest literal directory prefix.
 
 ## High-concurrency expectations
 
@@ -1003,6 +1009,9 @@ Response fields: `requested_path`, `path`, `deleted`.
 
 Request fields: `workspace_id`, `pattern`, `path_prefix` (`string|null`).
 
+If `path_prefix` is omitted, `pattern` still needs a safe literal scope. Exact-file patterns scope
+to that one file; wildcard patterns scope only to their longest literal directory prefix.
+
 Response fields: `matches`, `truncated`, `scanned_files`, `scanned_entries`,
 `scan_limit_reached`, `scan_limit_reason`, `elapsed_ms`, and public skip counters.
 
@@ -1012,6 +1021,9 @@ kept internal/audit-only and are not serialized in the public response.
 ### `/v1/grep`
 
 Request fields: `workspace_id`, `query`, `regex` (`bool`), `glob` (`string|null`), `path_prefix` (`string|null`).
+
+If `path_prefix` is omitted, `glob` still needs a safe literal scope. Exact-file globs scope to
+that one file; wildcard globs scope only to their longest literal directory prefix.
 
 `grep` is line-oriented for both literal and regex queries. When `regex = true`, patterns that can
 consume `\n` or `\r` are rejected with `invalid_regex`; multi-line whole-file regex matching is
