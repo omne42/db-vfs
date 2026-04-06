@@ -538,6 +538,22 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
+    fn deprecated_validated_constructor_alias_rejects_mismatched_matchers() {
+        let policy = validated_policy();
+        let mismatched = SecretRedactor::from_rules(&db_vfs_core::policy::SecretRules {
+            replacement: "DIFFERENT".to_string(),
+            ..policy.secrets.clone()
+        })
+        .expect("mismatched redactor");
+        let traversal = TraversalSkipper::from_rules(&policy.traversal).expect("policy traversal");
+
+        let err = DbVfs::new_with_matchers_validated(DummyStore, policy, mismatched, traversal)
+            .expect_err("deprecated alias should keep rejecting mismatched matchers");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn deprecated_validated_constructor_alias_still_accepts_aligned_matchers() {
         let policy = validated_policy();
         let redactor = SecretRedactor::from_rules(&policy.secrets).expect("matching redactor");
