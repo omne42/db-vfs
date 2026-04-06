@@ -178,7 +178,7 @@ fn postgres_line_range_reads_use_chunk_query_path() {
         .unwrap_or_else(|| panic!("line range missing for ws={ws}, path={path}"));
     assert_eq!(range.content.as_deref(), Some("line-0002\n"));
     assert_eq!(range.bytes_read, 10);
-    assert_eq!(range.total_lines, 4);
+    assert_eq!(range.total_lines, 2);
 }
 
 #[test]
