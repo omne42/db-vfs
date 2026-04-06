@@ -106,6 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/frontdoor: reserve worst-case JSON string escaping inside the router body cap for `write` / `patch`, so escape-heavy but decoded-valid payloads no longer fail early with `payload_too_large`.
 - vfs/patch: disable diff-based patching while `secrets.redact_regexes` is active, closing the hidden-content oracle created by unified diff context against raw text.
 - service/audit: rotate damaged optional audit logs aside and reopen the primary path after sink failures, so best-effort audit does not permanently stall after the first broken write.
+- ci/windows: run the required Windows gate on GitHub-hosted `windows-latest`, so PRs no longer block behind the unavailable self-hosted runner queue.
 - vfs/read: remove per-line byte-limit recount in line-range extraction by enforcing a single upfront content-size guard, reducing hot-loop overhead without changing limit behavior.
 - vfs/glob+grep pagination: reject non-monotonic path ordering within a single store page to avoid silent row skips on misordered paginated backends.
 - service/audit-redaction: treat denied directory-prefix roots (for example `.git` / `.git/`) as secret in audit field redaction to avoid leaking protected scan roots.
