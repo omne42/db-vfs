@@ -1060,3 +1060,35 @@ fn deprecated_validated_matcher_aliases_also_reject_mismatched_matchers() {
     };
     assert_eq!(err.code(), "invalid_policy");
 }
+
+#[test]
+fn deprecated_try_validated_matcher_alias_still_accepts_aligned_matchers() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite");
+    let now = now_ms();
+    store
+        .insert_file_new("ws", ".env", "SECRET=1\n", now)
+        .expect("seed denied path");
+
+    let mut policy = policy_all_perms();
+    policy.secrets.deny_globs = vec![".env".to_string()];
+    let policy = Arc::new(ValidatedVfsPolicy::new(policy).expect("validated policy"));
+
+    let redactor =
+        Arc::new(SecretRedactor::from_rules(&policy.secrets).expect("matching redactor"));
+    let traversal =
+        Arc::new(TraversalSkipper::from_rules(&policy.traversal).expect("matching traversal"));
+
+    #[allow(deprecated)]
+    let mut vfs = DbVfs::try_new_with_matchers_validated(store, policy, redactor, traversal)
+        .expect("deprecated try_* alias should stay source-compatible for aligned matchers");
+
+    let err = vfs
+        .read(ReadRequest {
+            workspace_id: "ws".to_string(),
+            path: ".env".to_string(),
+            start_line: None,
+            end_line: None,
+        })
+        .expect_err("aligned matchers should preserve policy enforcement");
+    assert_eq!(err.code(), "secret_path_denied");
+}

@@ -144,6 +144,10 @@ impl<S: Store> DbVfs<S> {
         })
     }
 
+    /// Deprecated compatibility alias.
+    ///
+    /// This remains a strict alias and will not silently rebuild mismatched
+    /// matchers from policy state.
     #[deprecated(
         since = "1.0.0",
         note = "use DbVfs::try_new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
@@ -172,6 +176,10 @@ impl<S: Store> DbVfs<S> {
         Self::try_new_with_supplied_matchers_validated(store, policy, redactor, traversal)
     }
 
+    /// Deprecated compatibility alias.
+    ///
+    /// This remains a strict alias and will not silently rebuild mismatched
+    /// matchers from policy state.
     #[deprecated(
         since = "1.0.0",
         note = "use DbVfs::new_with_supplied_matchers_validated() for strict caller-supplied matchers, or DbVfs::new_validated() for policy-derived matchers"
