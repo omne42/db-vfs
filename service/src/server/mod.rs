@@ -53,7 +53,7 @@ struct PreparedState {
     rate_limiter: rate_limiter::RateLimiter,
     io_concurrency: usize,
     scan_concurrency: usize,
-    body_limit: usize,
+    body_limits: BodyLimits,
 }
 
 struct RequiredAuditGate {
@@ -65,6 +65,13 @@ struct RequiredAuditGate {
 enum RequestClass {
     Io,
     Scan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyLimits {
+    small_json: usize,
+    write_json: usize,
+    patch_json: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -142,6 +149,9 @@ const CODE_QUOTA_EXCEEDED: &str = "quota_exceeded";
 const CODE_TIMEOUT: &str = "timeout";
 const CODE_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 const RECOMMENDED_MAX_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
+const SMALL_JSON_BODY_BYTES: u64 = 64 * 1024;
+const MAX_REQUEST_BODY_BYTES: u64 = 256 * 1024 * 1024 + 64 * 1024;
+const MAX_JSON_STRING_EXPANSION: u64 = 6;
 
 fn status_for_error_code(code: &str) -> StatusCode {
     match code {
@@ -175,21 +185,25 @@ fn map_err(err: db_vfs_core::Error) -> (StatusCode, Json<ErrorBody>) {
     (status, Json(ErrorBody { code, message }))
 }
 
-fn max_body_bytes(policy: &VfsPolicy) -> usize {
-    const MAX_BODY_BYTES: u64 = 256 * 1024 * 1024 + 64 * 1024;
-    const MAX_JSON_STRING_EXPANSION: u64 = 6;
-    let patch = policy
-        .limits
-        .max_patch_bytes
-        .unwrap_or(policy.limits.max_read_bytes);
-    let max_decoded_string_bytes = policy.limits.max_write_bytes.max(patch);
-    let max = policy
-        .limits
-        .max_read_bytes
-        .max(max_decoded_string_bytes.saturating_mul(MAX_JSON_STRING_EXPANSION));
-    let max = max.saturating_add(64 * 1024);
-    let max = max.min(MAX_BODY_BYTES);
+fn request_body_limit_for_json_string(decoded_bytes: u64) -> usize {
+    let max = decoded_bytes
+        .saturating_mul(MAX_JSON_STRING_EXPANSION)
+        .saturating_add(SMALL_JSON_BODY_BYTES)
+        .min(MAX_REQUEST_BODY_BYTES);
     usize::try_from(max).unwrap_or(usize::MAX)
+}
+
+fn body_limits(policy: &VfsPolicy) -> BodyLimits {
+    BodyLimits {
+        small_json: usize::try_from(SMALL_JSON_BODY_BYTES).unwrap_or(usize::MAX),
+        write_json: request_body_limit_for_json_string(policy.limits.max_write_bytes),
+        patch_json: request_body_limit_for_json_string(
+            policy
+                .limits
+                .max_patch_bytes
+                .unwrap_or(policy.limits.max_read_bytes),
+        ),
+    }
 }
 
 fn estimated_scan_inflight_bytes(policy: &VfsPolicy) -> u64 {
@@ -309,7 +323,7 @@ fn prepare_state(policy: ServicePolicy, unsafe_no_auth: bool) -> anyhow::Result<
         "auth configuration loaded"
     );
 
-    let body_limit = max_body_bytes(&validated_policy);
+    let body_limits = body_limits(&validated_policy);
     Ok(PreparedState {
         policy: Arc::new(validated_policy),
         max_db_connections: policy.limits.max_db_connections,
@@ -320,11 +334,11 @@ fn prepare_state(policy: ServicePolicy, unsafe_no_auth: bool) -> anyhow::Result<
         rate_limiter,
         io_concurrency,
         scan_concurrency,
-        body_limit,
+        body_limits,
     })
 }
 
-fn build_state(backend: backend::Backend, prepared: PreparedState) -> (AppState, usize) {
+fn build_state(backend: backend::Backend, prepared: PreparedState) -> (AppState, BodyLimits) {
     let state = AppState {
         inner: Arc::new(AppInner {
             backend,
@@ -339,18 +353,35 @@ fn build_state(backend: backend::Backend, prepared: PreparedState) -> (AppState,
         }),
     };
 
-    (state, prepared.body_limit)
+    (state, prepared.body_limits)
 }
 
-fn build_router(state: AppState, body_limit: usize) -> Router {
+fn build_router(state: AppState, body_limits: BodyLimits) -> Router {
     Router::new()
-        .route("/v1/read", post(handlers::read))
-        .route("/v1/write", post(handlers::write))
-        .route("/v1/patch", post(handlers::patch))
-        .route("/v1/delete", post(handlers::delete))
-        .route("/v1/glob", post(handlers::glob))
-        .route("/v1/grep", post(handlers::grep))
-        .layer(DefaultBodyLimit::max(body_limit))
+        .route(
+            "/v1/read",
+            post(handlers::read).layer(DefaultBodyLimit::max(body_limits.small_json)),
+        )
+        .route(
+            "/v1/write",
+            post(handlers::write).layer(DefaultBodyLimit::max(body_limits.write_json)),
+        )
+        .route(
+            "/v1/patch",
+            post(handlers::patch).layer(DefaultBodyLimit::max(body_limits.patch_json)),
+        )
+        .route(
+            "/v1/delete",
+            post(handlers::delete).layer(DefaultBodyLimit::max(body_limits.small_json)),
+        )
+        .route(
+            "/v1/glob",
+            post(handlers::glob).layer(DefaultBodyLimit::max(body_limits.small_json)),
+        )
+        .route(
+            "/v1/grep",
+            post(handlers::grep).layer(DefaultBodyLimit::max(body_limits.small_json)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
@@ -479,9 +510,9 @@ pub fn build_app_sqlite(
         db_vfs::migrations::migrate_sqlite(&conn).map_err(anyhow::Error::msg)?;
     }
 
-    let (state, body_limit) = build_state(backend::Backend::Sqlite { pool }, prepared);
+    let (state, body_limits) = build_state(backend::Backend::Sqlite { pool }, prepared);
 
-    Ok(build_router(state, body_limit))
+    Ok(build_router(state, body_limits))
 }
 
 #[cfg(feature = "postgres")]
@@ -517,8 +548,8 @@ pub fn build_app_postgres(
         .connection_timeout(migration_timeout)
         .build(manager)?;
 
-    let (state, body_limit) = build_state(backend::Backend::Postgres { pool }, prepared);
-    Ok(build_router(state, body_limit))
+    let (state, body_limits) = build_state(backend::Backend::Postgres { pool }, prepared);
+    Ok(build_router(state, body_limits))
 }
 
 #[cfg(feature = "sqlite")]
@@ -547,6 +578,8 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     use tempfile::tempdir;
+    #[cfg(feature = "sqlite")]
+    use tower::ServiceExt;
 
     #[cfg(feature = "sqlite")]
     #[test]
@@ -670,26 +703,66 @@ mod tests {
     }
 
     #[test]
-    fn max_body_bytes_is_capped_to_hard_limit() {
-        let mut policy = VfsPolicy::default();
-        policy.limits.max_read_bytes = u64::MAX;
-        policy.limits.max_write_bytes = u64::MAX;
-        policy.limits.max_patch_bytes = Some(u64::MAX);
-
+    fn request_body_limit_for_json_string_is_capped_to_hard_limit() {
         assert_eq!(
-            max_body_bytes(&policy),
-            (256 * 1024 * 1024 + 64 * 1024) as usize
+            request_body_limit_for_json_string(u64::MAX),
+            MAX_REQUEST_BODY_BYTES as usize
         );
     }
 
     #[test]
-    fn max_body_bytes_accounts_for_worst_case_json_string_escaping() {
+    fn body_limits_separate_small_json_from_write_and_patch_caps() {
         let mut policy = VfsPolicy::default();
-        policy.limits.max_read_bytes = 1024;
         policy.limits.max_write_bytes = 4096;
         policy.limits.max_patch_bytes = Some(8192);
 
-        assert_eq!(max_body_bytes(&policy), (8192 * 6 + 64 * 1024) as usize);
+        assert_eq!(
+            body_limits(&policy),
+            BodyLimits {
+                small_json: SMALL_JSON_BODY_BYTES as usize,
+                write_json: (4096 * 6 + SMALL_JSON_BODY_BYTES) as usize,
+                patch_json: (8192 * 6 + SMALL_JSON_BODY_BYTES) as usize,
+            }
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn router_keeps_small_json_routes_on_their_own_body_cap() {
+        let mut service_policy = ServicePolicy::default();
+        service_policy.permissions.read = true;
+        service_policy.permissions.write = true;
+        service_policy.limits.max_write_bytes = 96 * 1024;
+        let state = test_state_with_policy_audit_and_auth(service_policy.clone(), None, true);
+        let router = build_router(state, body_limits(&service_policy.vfs_policy()));
+
+        let oversized_path = "a".repeat(SMALL_JSON_BODY_BYTES as usize);
+        let read_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(format!(
+                "{{\"workspace_id\":\"ws\",\"path\":\"{oversized_path}\"}}"
+            )))
+            .expect("read request");
+        let read_resp = router
+            .clone()
+            .oneshot(read_req)
+            .await
+            .expect("read response");
+        assert_eq!(read_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let write_content = "b".repeat(SMALL_JSON_BODY_BYTES as usize);
+        let write_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(format!(
+                "{{\"workspace_id\":\"ws\",\"path\":\"docs/a.txt\",\"content\":\"{write_content}\",\"expected_version\":null}}"
+            )))
+            .expect("write request");
+        let write_resp = router.oneshot(write_req).await.expect("write response");
+        assert_ne!(write_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[cfg(feature = "sqlite")]
