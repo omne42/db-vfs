@@ -10,6 +10,7 @@ subset projects to `db_vfs_core::policy::VfsPolicy`.
 - Safety-first policy model: **Permissions + Limits + Secrets + Traversal + Auth**.
 - Tool-like operations: `read`, `write`, `patch`, `delete`, `glob`, `grep`.
 - Backends: SQLite (default/dev) and Postgres (`--features postgres`).
+- Service policy loader accepts `.toml`, `.json`, `.yaml`, and `.yml`; the format must be explicit from the file extension.
 
 `db-vfs-service` now exposes backend features explicitly:
 

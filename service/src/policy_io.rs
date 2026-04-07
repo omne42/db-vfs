@@ -8,10 +8,11 @@ use crate::policy::{ServiceLimits, ServicePolicy};
 const MAX_POLICY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_UNTRUSTED_SCAN_INFLIGHT_BYTES: u64 = 512 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum PolicyFormat {
     Json,
     Toml,
+    Yaml,
 }
 
 pub fn load_policy(
@@ -80,8 +81,14 @@ fn policy_format(path: &Path) -> anyhow::Result<PolicyFormat> {
         .map(str::to_ascii_lowercase);
     match ext.as_deref() {
         Some("json") => Ok(PolicyFormat::Json),
-        Some("toml") | None => Ok(PolicyFormat::Toml),
-        Some(other) => anyhow::bail!("unsupported policy extension: {other}"),
+        Some("toml") => Ok(PolicyFormat::Toml),
+        Some("yaml" | "yml") => Ok(PolicyFormat::Yaml),
+        Some(other) => anyhow::bail!(
+            "unsupported policy extension: {other} (expected .json, .toml, .yaml, or .yml)"
+        ),
+        None => anyhow::bail!(
+            "policy file must use an explicit extension (.json, .toml, .yaml, or .yml)"
+        ),
     }
 }
 
@@ -104,6 +111,7 @@ fn parse_policy_str_with(
     match format {
         PolicyFormat::Json => parse_json_policy(raw, trust_mode, path, lookup),
         PolicyFormat::Toml => parse_toml_policy(raw, trust_mode, path, lookup),
+        PolicyFormat::Yaml => parse_yaml_policy(raw, trust_mode, path, lookup),
     }
 }
 
@@ -143,6 +151,24 @@ fn parse_toml_policy(
     })
 }
 
+fn parse_yaml_policy(
+    raw: &str,
+    trust_mode: TrustMode,
+    path: Option<&Path>,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<ServicePolicy> {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(raw).map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse YAML policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse YAML policy: {err}"),
+    })?;
+    transform_yaml_value(&mut value, trust_mode, lookup)?;
+    enforce_interpolated_size_yaml(&value)?;
+    serde_yaml::from_value(value).map_err(|err| match path {
+        Some(path) => anyhow::anyhow!("failed to parse YAML policy {}: {err}", path.display()),
+        None => anyhow::anyhow!("failed to parse YAML policy: {err}"),
+    })
+}
+
 fn enforce_interpolated_size_json(value: &serde_json::Value) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec(value)
         .map_err(|err| anyhow::anyhow!("failed to serialize interpolated JSON policy: {err}"))?;
@@ -152,6 +178,12 @@ fn enforce_interpolated_size_json(value: &serde_json::Value) -> anyhow::Result<(
 fn enforce_interpolated_size_toml(value: &toml::Value) -> anyhow::Result<()> {
     let rendered = toml::to_string(value)
         .map_err(|err| anyhow::anyhow!("failed to serialize interpolated TOML policy: {err}"))?;
+    ensure_interpolated_size(rendered.len())
+}
+
+fn enforce_interpolated_size_yaml(value: &serde_yaml::Value) -> anyhow::Result<()> {
+    let rendered = serde_yaml::to_string(value)
+        .map_err(|err| anyhow::anyhow!("failed to serialize interpolated YAML policy: {err}"))?;
     ensure_interpolated_size(rendered.len())
 }
 
@@ -226,6 +258,38 @@ fn transform_toml_value(
         | toml::Value::Float(_)
         | toml::Value::Boolean(_)
         | toml::Value::Datetime(_) => Ok(()),
+    }
+}
+
+fn transform_yaml_value(
+    value: &mut serde_yaml::Value,
+    trust_mode: TrustMode,
+    lookup: impl FnMut(&str) -> Result<String, std::env::VarError> + Copy,
+) -> anyhow::Result<()> {
+    match value {
+        serde_yaml::Value::String(string) => {
+            let next = process_string_value(string, trust_mode, lookup)?;
+            if let Cow::Owned(next) = next {
+                *string = next;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Sequence(values) => {
+            for value in values {
+                transform_yaml_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Mapping(values) => {
+            for value in values.values_mut() {
+                transform_yaml_value(value, trust_mode, lookup)?;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Null
+        | serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Number(_)
+        | serde_yaml::Value::Tagged(_) => Ok(()),
     }
 }
 
@@ -529,6 +593,47 @@ tokens = [{ token = "${TOKEN}", allowed_workspaces = ["ws"] }]
             Some("sha256:abc123")
         );
         assert_eq!(policy.auth.tokens[0].allowed_workspaces, vec!["team-a"]);
+    }
+
+    #[test]
+    fn trusted_yaml_interpolation_walks_nested_strings() {
+        let policy = parse_policy_str_with(
+            r#"
+auth:
+  tokens:
+    - token: "sha256:${TOKEN_HASH}"
+      allowed_workspaces:
+        - "${WORKSPACE}"
+"#,
+            PolicyFormat::Yaml,
+            TrustMode::Trusted,
+            None,
+            lookup,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.auth.tokens[0].token.as_deref(),
+            Some("sha256:abc123")
+        );
+        assert_eq!(policy.auth.tokens[0].allowed_workspaces, vec!["team-a"]);
+    }
+
+    #[test]
+    fn policy_format_requires_explicit_known_extension() {
+        let err = policy_format(Path::new("policy")).expect_err("missing extension should fail");
+        assert!(
+            err.to_string().contains("explicit extension"),
+            "unexpected error: {err}"
+        );
+
+        assert!(matches!(
+            policy_format(Path::new("policy.yaml")).expect("yaml"),
+            PolicyFormat::Yaml
+        ));
+        assert!(matches!(
+            policy_format(Path::new("policy.YML")).expect("yml"),
+            PolicyFormat::Yaml
+        ));
     }
 
     #[test]

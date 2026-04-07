@@ -1,6 +1,6 @@
 # Policy
 
-Service policy is loaded as `db_vfs_service::policy::ServicePolicy` (`.toml` or `.json`).
+Service policy is loaded as `db_vfs_service::policy::ServicePolicy` (`.toml`, `.json`, `.yaml`, or `.yml`).
 
 Its core VFS subset projects to `db_vfs_core::policy::VfsPolicy`; auth/audit/runtime-only fields
 stay in the service layer instead of leaking into `db-vfs-core`.
@@ -17,7 +17,10 @@ Policy files must be direct regular files. The loader rejects symlinks, director
 device nodes, and other non-regular paths before opening them, so startup cannot block
 indefinitely on a special file or silently follow an unexpected link target.
 
-When `trust_mode=trusted`, env interpolation is applied only inside parsed JSON/TOML string
+The loader also requires an explicit recognized file extension; extensionless policy paths are
+rejected instead of silently defaulting to TOML.
+
+When `trust_mode=trusted`, env interpolation is applied only inside parsed JSON/TOML/YAML string
 values. Comments and non-string fields are not treated as template input. When
 `trust_mode=untrusted`, those same string-value placeholders are rejected instead of being
 expanded.
@@ -105,7 +108,7 @@ Budget semantics:
   it constructs the final typed request body, so token-valid but workspace-disallowed `write` /
   `patch` requests fail before allocating their full request strings.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
-- Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
+- Omitting `limits.max_walk_ms` in JSON/TOML/YAML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - `max_walk_entries` counts publicly visible scan-entry work. Hidden `secret-denied` paths stay out
