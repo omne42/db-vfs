@@ -500,7 +500,9 @@ fn audit_err_hide_secret_path(
             event.path = Some(path);
         }
         (Some(requested_path), None) => {
-            event.requested_path = Some(state.inner.redactor.redact_audit_path(&requested_path));
+            let redacted = state.inner.redactor.redact_audit_path(&requested_path);
+            event.requested_path = Some(redacted.clone());
+            event.path = Some(redacted);
         }
         (None, Some(path)) => {
             event.path = Some(state.inner.redactor.redact_audit_path(&path));
@@ -1230,6 +1232,40 @@ mod tests {
                 Some(AUDIT_SECRET_PLACEHOLDER)
             );
         }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn audit_err_hide_secret_path_mirrors_requested_path_when_runtime_path_is_unavailable() {
+        let state = test_state_with_audit(None);
+        let mut event = AuditRequest {
+            workspace_id: "ws".to_string(),
+            requested_path: Some(".env/../visible.txt".to_string()),
+            path_prefix: None,
+            glob_pattern: None,
+            grep_regex: None,
+            grep_query_len: None,
+        }
+        .into_event(
+            "req-1".to_string(),
+            None,
+            "write",
+            None,
+            StatusCode::BAD_REQUEST,
+            Some("invalid_path".to_string()),
+        );
+        let body = super::super::ErrorBody {
+            code: super::super::CODE_INVALID_PATH,
+            message: "invalid path".to_string(),
+        };
+
+        super::audit_err_hide_secret_path(&state, &mut event, &body);
+
+        assert_eq!(
+            event.requested_path.as_deref(),
+            Some(AUDIT_SECRET_PLACEHOLDER)
+        );
+        assert_eq!(event.path.as_deref(), Some(AUDIT_SECRET_PLACEHOLDER));
     }
 
     #[tokio::test]

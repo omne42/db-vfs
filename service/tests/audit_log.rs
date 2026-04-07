@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
-use db_vfs::vfs::WriteRequest;
+use db_vfs::vfs::{GlobRequest, WriteRequest};
 use db_vfs_core::policy::{Permissions, SecretRules, TraversalRules};
 use serde::Serialize;
 use tower::ServiceExt;
@@ -59,17 +59,21 @@ impl TestServer {
     }
 }
 
-fn raw_request(body: impl Into<Body>) -> Request<Body> {
+fn raw_request_for_uri(uri: &str, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri("/v1/write")
+        .uri(uri)
         .header("content-type", "application/json")
         .body(body.into())
         .expect("request")
 }
 
-fn authorized_raw_request(body: impl Into<Body>) -> Request<Body> {
-    let mut req = raw_request(body);
+fn raw_request(body: impl Into<Body>) -> Request<Body> {
+    raw_request_for_uri("/v1/write", body)
+}
+
+fn authorized_raw_request_for_uri(uri: &str, body: impl Into<Body>) -> Request<Body> {
+    let mut req = raw_request_for_uri(uri, body);
     req.headers_mut().insert(
         "authorization",
         format!("Bearer {DEV_TOKEN}")
@@ -79,10 +83,21 @@ fn authorized_raw_request(body: impl Into<Body>) -> Request<Body> {
     req
 }
 
+fn authorized_raw_request(body: impl Into<Body>) -> Request<Body> {
+    authorized_raw_request_for_uri("/v1/write", body)
+}
+
 fn bearer_request<T: Serialize>(body: &T) -> Request<Body> {
     authorized_raw_request(Body::from(
         serde_json::to_vec(body).expect("serialize request json"),
     ))
+}
+
+fn bearer_request_for_uri<T: Serialize>(uri: &str, body: &T) -> Request<Body> {
+    authorized_raw_request_for_uri(
+        uri,
+        Body::from(serde_json::to_vec(body).expect("serialize request json")),
+    )
 }
 
 async fn setup(mut policy: ServicePolicy) -> TestServer {
@@ -293,5 +308,62 @@ async fn audit_logs_invalid_workspace_id_rejects_before_response_returns() {
     let lines = read_audit_lines_immediately(&server.audit_path);
     let event = find_event(&lines, "write", 400, "invalid_path");
     assert_eq!(event["workspace_id"], "bad*ws");
+    assert_eq!(event["auth_subject"], DEV_TOKEN_SHA256);
+}
+
+#[tokio::test]
+async fn audit_redacts_secretish_malformed_write_paths_in_jsonl() {
+    let server = setup(base_policy()).await;
+
+    let resp = server
+        .send(bearer_request(&WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: ".env/../visible.txt".to_string(),
+            content: "hello\n".to_string(),
+            expected_version: None,
+        }))
+        .await;
+    assert_eq!(resp.status(), 400);
+
+    let lines = read_audit_lines_immediately(&server.audit_path);
+    let event = find_event(&lines, "write", 400, "invalid_path");
+    assert_eq!(event["workspace_id"], "ws");
+    assert_eq!(
+        event["requested_path"].as_str(),
+        Some("<secret>"),
+        "unexpected malformed-write audit event: {event:?}"
+    );
+    assert_eq!(
+        event["path"].as_str(),
+        Some("<secret>"),
+        "unexpected malformed-write audit event: {event:?}"
+    );
+    assert_eq!(event["auth_subject"], DEV_TOKEN_SHA256);
+}
+
+#[tokio::test]
+async fn audit_redacts_secretish_glob_patterns_in_jsonl() {
+    let server = setup(base_policy()).await;
+
+    let resp = server
+        .send(bearer_request_for_uri(
+            "/v1/glob",
+            &GlobRequest {
+                workspace_id: "ws".to_string(),
+                path_prefix: Some("docs".to_string()),
+                pattern: "docs/**/.env*".to_string(),
+            },
+        ))
+        .await;
+    assert_eq!(resp.status(), 200);
+
+    let lines = read_audit_lines_immediately(&server.audit_path);
+    let event = lines
+        .iter()
+        .find(|event| event["op"] == "glob" && event["status"] == 200)
+        .unwrap_or_else(|| panic!("missing successful glob audit event: {lines:?}"));
+    assert_eq!(event["workspace_id"], "ws");
+    assert_eq!(event["path_prefix"], "docs");
+    assert_eq!(event["glob_pattern"], "<secret>");
     assert_eq!(event["auth_subject"], DEV_TOKEN_SHA256);
 }
