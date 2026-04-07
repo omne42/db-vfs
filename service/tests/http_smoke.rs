@@ -66,6 +66,15 @@ struct GrepBody {
     matches: Vec<GrepMatchBody>,
 }
 
+#[cfg(feature = "sqlite")]
+#[derive(serde::Deserialize)]
+struct GlobBody {
+    matches: Vec<String>,
+    truncated: bool,
+    scanned_files: u64,
+    scanned_entries: u64,
+}
+
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(serde::Deserialize)]
 struct ErrorBody {
@@ -734,6 +743,73 @@ async fn read_and_grep_treat_cr_and_crlf_as_line_boundaries() {
     assert_eq!(grep.matches[0].path, "docs/crlf.txt");
     assert_eq!(grep.matches[0].line, 2);
     assert_eq!(grep.matches[0].text, "beta");
+    assert!(!grep.matches[0].line_truncated);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn glob_and_grep_routes_scan_the_expected_scope() {
+    let _env_guard = test_env_lock().lock().await;
+    let server = setup().await;
+
+    for (path, content) in [
+        ("docs/a.txt", "alpha\nneedle\n"),
+        ("docs/b.txt", "beta\n"),
+        ("logs/c.txt", "needle\n"),
+    ] {
+        let write = server
+            .send(bearer_request(
+                "/v1/write",
+                &WriteRequest {
+                    workspace_id: "ws".to_string(),
+                    path: path.to_string(),
+                    content: content.to_string(),
+                    expected_version: None,
+                },
+            ))
+            .await;
+        assert_eq!(write.status(), StatusCode::OK, "write failed for {path}");
+    }
+
+    let glob = expect_json::<GlobBody>(
+        server
+            .send(bearer_request(
+                "/v1/glob",
+                &db_vfs::vfs::GlobRequest {
+                    workspace_id: "ws".to_string(),
+                    pattern: "docs/*.txt".to_string(),
+                    path_prefix: None,
+                },
+            ))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(glob.matches, vec!["docs/a.txt", "docs/b.txt"]);
+    assert!(!glob.truncated);
+    assert_eq!(glob.scanned_files, 2);
+    assert_eq!(glob.scanned_entries, 2);
+
+    let grep = expect_json::<GrepBody>(
+        server
+            .send(bearer_request(
+                "/v1/grep",
+                &db_vfs::vfs::GrepRequest {
+                    workspace_id: "ws".to_string(),
+                    query: "needle".to_string(),
+                    regex: false,
+                    glob: Some("docs/*.txt".to_string()),
+                    path_prefix: None,
+                },
+            ))
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(grep.matches.len(), 1);
+    assert_eq!(grep.matches[0].path, "docs/a.txt");
+    assert_eq!(grep.matches[0].line, 2);
+    assert_eq!(grep.matches[0].text, "needle");
     assert!(!grep.matches[0].line_truncated);
 }
 
