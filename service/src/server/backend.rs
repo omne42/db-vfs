@@ -658,6 +658,53 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn sqlite_backend_maps_locked_read_under_request_budget_to_timeout() {
+        let db = tempfile::NamedTempFile::new().expect("temp sqlite file");
+        let seed = rusqlite::Connection::open(db.path()).expect("sqlite connection");
+        db_vfs::migrations::migrate_sqlite(&seed).expect("migrate sqlite");
+        seed.execute(
+            "INSERT INTO files(
+                workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params!["ws", "docs/a.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
+        )
+        .expect("seed file");
+        drop(seed);
+
+        let locker = rusqlite::Connection::open(db.path()).expect("lock sqlite connection");
+        locker
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .expect("acquire exclusive sqlite lock");
+
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db.path());
+        let pool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .expect("sqlite pool");
+        let (mut store, _cancel) = BackendStore::open(
+            Backend::Sqlite { pool },
+            Some(std::time::Duration::from_millis(100)),
+            Some(std::time::Duration::from_millis(25)),
+        )
+        .expect("open backend under sqlite lock");
+
+        let started = std::time::Instant::now();
+        let err = store
+            .get_meta("ws", "docs/a.txt")
+            .expect_err("exclusive sqlite lock should time out the read");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "sqlite busy timeout was not honored quickly"
+        );
+        assert_eq!(err.code(), "timeout");
+
+        locker
+            .execute_batch("ROLLBACK;")
+            .expect("release exclusive sqlite lock");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn backend_store_forwards_chunked_content_reads() {
         let _lock = backend_whole_content_test_lock()
             .lock()
