@@ -190,6 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.
 - tests: add regression coverage for required-audit worker loss returning stable `503 audit_unavailable` errors.
 - tests/service: run HTTP smoke and audit-log coverage against in-process routers, including delayed-body timeout coverage, so restricted environments no longer silently skip bind-dependent end-to-end checks.
+- tests/service: add end-to-end audit-log regressions for secret-ish malformed write paths and deny-matching glob patterns so JSONL redaction stays covered at the HTTP boundary.
 
 ## [0.1.0] - 2026-01-31
 
