@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth+audit: add stable hashed `auth_subject` audit identities for matched and syntactically valid presented bearer tokens, and route handler-built audit events through a shared event builder so success/error/post-auth rejection paths stay consistent.
 - service/audit-runtime: fail closed when the required-audit queue is already full, and bound required enqueue/ack waits by the same request budget so frontdoor reject paths no longer depend on non-cancellable blocking channel operations.
 - service/frontdoor: preflight `workspace_id` from buffered JSON so token-authorized but disallowed workspaces fail before full endpoint-schema parsing and VFS execution, while keeping existing permit/audit budget semantics.
+- service/frontdoor: keep `read` / `delete` / `glob` / `grep` on a fixed 64 KiB JSON body cap so large `write` / `patch` budgets no longer widen small-endpoint memory exposure.
 - vfs/scan-pagination: move page-order and cursor monotonicity checks behind a shared helper so `glob` and `grep` keep the same broken-store diagnostics instead of maintaining duplicate validation logic.
 - vfs/patch+service/secrets: disable unified-diff patching while secret redaction rules are active so masked raw content cannot be re-exposed as a patch-context oracle.
 
@@ -49,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: make missing peer IPs hit the same shared fallback bucket even when `RateLimiter` is exercised directly, so its internal contract matches the HTTP middleware behavior.
 - vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
+- store/pagination+read+grep: make cursor pagination return explicit `has_more`, reduce the legacy line-range fallback to a single whole-file load, and fail `grep` when same-version content disappears instead of silently skipping results.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.
 - service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
 - service/auth: require a literal ASCII space between `Bearer` and the token in `Authorization`, so tab-delimited credentials are rejected instead of being accepted through whitespace splitting.

@@ -72,6 +72,9 @@
   - token 已通过但 workspace 未授权的请求，service 必须在 buffered JSON 的轻量
     preflight 阶段尽早拒绝，而不是先构造完整 `write` / `patch` 大请求再发现
     workspace scope 不匹配。
+  - frontdoor JSON body cap 不是单一全局值：`read` / `delete` / `glob` / `grep` 固定走小
+    body cap，`write` / `patch` 才按 decoded string budget 乘 worst-case JSON escaping 预留，
+    避免大写入预算把小 JSON 端点的内存放大面一起抬高。
   - `audit.required = true` 是运行期 fail-closed 语义：请求必须等到对应 audit 记录
     append+flush 成功才返回；对应的 `max_concurrency_*` permit 会一直持有到 audit wait
     结束，避免请求在“已执行但未完成审计”时提前把并发槽位还回去。
@@ -123,6 +126,8 @@
   - 仍保留 legacy `list_metas_by_prefix_page` / `get_content_chunk` compatibility fallback，
     但它们只保证正确性，不保证大前缀 scan budget 或 ranged-read 性能语义；fallback
     命中时会显式告警，提示 store 实现方补齐 cursor pagination / chunked line-range 边界。
+  - legacy ranged-read fallback 现在最多只会整文件 `get_content` 一次后本地切片，不再通过
+    默认 chunk loop 反复重读同一份 whole-file 内容。
   - 每个 `Store` 实现都必须显式声明自己是在提供原生 cursor pagination / chunked
     ranged-read，还是仅接受 legacy compatibility fallback；新 backend 不能再靠默认实现静默
     编译通过。
@@ -130,7 +135,8 @@
     默认 compatibility fallback，运行期必须 fail-closed 成明确 `db` 错误，而不是把
     “声明是原生、行为却是 fallback” 的契约漂移静默吃掉。
   - 原生 `list_metas_by_prefix_page` 实现必须返回按 `path` 严格递增、且严格位于 `after`
-    cursor 之后的页面；`glob` / `grep` 会把最后一条路径直接当下一页 cursor 使用。
+    cursor 之后的页面，并显式给出 `has_more`；`glob` / `grep` 不再靠 overfetch 猜下一页，
+    而是把最后一条路径直接当下一页 cursor 使用。
 
 这些能力已经表现出复用性，但当前仍然直接服务于 `ServicePolicy` 与 `db-vfs` 的服务边界；在真正抽离之前，不要把它们包装成假通用 abstraction。
 

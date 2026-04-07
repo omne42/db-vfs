@@ -16,6 +16,8 @@ All endpoints are `POST` JSON.
 - The frontdoor body cap still has a hard ceiling, but it reserves worst-case JSON string escaping
   for `write` / `patch` payloads so decoded-content-valid requests are not rejected purely because
   the transport representation is escape-heavy.
+- `/v1/read`, `/v1/delete`, `/v1/glob`, and `/v1/grep` stay on a fixed 64 KiB JSON frontdoor cap;
+  only `write` / `patch` scale their transport cap with decoded string budgets.
 
 ## Endpoint contracts
 
@@ -100,6 +102,8 @@ When redaction rules are active, `grep` also evaluates literal/regex matches aga
 redacted line view, so hidden secrets do not remain discoverable through match/no-match behavior.
 If redaction would expand a scanned file beyond `limits.max_read_bytes`, `grep` skips that file and
 counts it under `skipped_too_large_files` instead of allocating an unbounded redacted intermediate.
+If a file changes during paged `grep` content load, the request now retries and then fails with a
+conflict/DB error instead of silently counting the file under `skipped_missing_content`.
 
 ## Path normalization rules
 
