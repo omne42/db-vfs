@@ -14,10 +14,10 @@ The service binary backend is feature-gated independently from policy loading:
 Start from [`policy.example.toml`](policy.example.toml).
 
 Policy files must be direct regular files. The loader rejects symlinks, directories, FIFOs,
-device nodes, and other non-regular paths before opening them, then verifies that the opened file
-descriptor still points at the same file it statted first. Startup therefore cannot block
-indefinitely on a special file, silently follow a replaced link target, or keep reading after the
-policy path was swapped to a different file between stat and open.
+device nodes, and other non-regular paths before reading them, then verifies that the file it
+reads still has the same identity it checked first. Startup therefore cannot block indefinitely on
+a special file, silently follow a replaced link target, or keep reading after the policy path was
+swapped to a different file between checks and read.
 
 The loader also requires an explicit recognized file extension; extensionless policy paths are
 rejected instead of silently defaulting to TOML.
