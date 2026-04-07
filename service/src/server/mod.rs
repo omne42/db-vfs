@@ -766,6 +766,65 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn router_times_out_scan_lock_contention_even_when_walk_budget_is_unbounded() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("db.sqlite");
+
+        let mut policy = ServicePolicy::default();
+        policy.permissions.glob = true;
+        policy.limits.max_io_ms = 25;
+        policy.limits.max_walk_ms = None;
+
+        let router = build_app_sqlite(db_path.clone(), policy, TrustMode::Trusted, true)
+            .expect("build sqlite router");
+
+        let locker = rusqlite::Connection::open(&db_path).expect("sqlite connection");
+        locker
+            .execute(
+                "INSERT INTO files(
+                    workspace_id, path, content, size_bytes, version, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params!["ws", "docs/a.txt", "hello", 5_i64, 1_i64, 1_i64, 1_i64],
+            )
+            .expect("seed file");
+        locker
+            .execute_batch("BEGIN EXCLUSIVE;")
+            .expect("acquire exclusive sqlite lock");
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/glob")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"workspace_id":"ws","pattern":"docs/*.txt","path_prefix":"docs"}"#,
+            ))
+            .expect("glob request");
+
+        let started = std::time::Instant::now();
+        let response = router.oneshot(request).await.expect("glob response");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "scan request did not respect the IO lock timeout budget"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read timeout response body");
+        let err: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode timeout response");
+        assert_eq!(
+            err.get("code").and_then(serde_json::Value::as_str),
+            Some(CODE_TIMEOUT)
+        );
+
+        locker
+            .execute_batch("ROLLBACK;")
+            .expect("release exclusive sqlite lock");
+    }
+
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_memory_path_uses_single_connection_pool() {
         assert!(sqlite_uses_in_memory_pool(std::path::Path::new(":memory:")));
