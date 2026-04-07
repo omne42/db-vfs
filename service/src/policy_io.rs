@@ -39,39 +39,218 @@ pub fn validate_policy_for_startup(
 }
 
 fn read_policy_file(path: &Path) -> anyhow::Result<String> {
-    let meta = std::fs::symlink_metadata(path)
-        .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
-    if meta.file_type().is_symlink() {
-        anyhow::bail!("policy path must not be a symlink: {}", path.display());
-    }
-    if !meta.is_file() {
-        anyhow::bail!("policy path is not a regular file: {}", path.display());
+    #[cfg(windows)]
+    {
+        let before_open = std::fs::symlink_metadata(path).map_err(|err| {
+            anyhow::anyhow!("failed to stat policy file {}: {err}", path.display())
+        })?;
+        if before_open.file_type().is_symlink() {
+            anyhow::bail!("policy path must not be a symlink: {}", path.display());
+        }
+        if !before_open.is_file() {
+            anyhow::bail!("policy path is not a regular file: {}", path.display());
+        }
+
+        let probe = open_policy_file_nofollow(path)?;
+        let probe_info = query_open_policy_file_info(path, &probe)?;
+        ensure_windows_regular_policy_file(path, probe_info.file_attributes)?;
+
+        let file = open_policy_file_nofollow(path)?;
+        let file_info = query_open_policy_file_info(path, &file)?;
+        ensure_windows_regular_policy_file(path, file_info.file_attributes)?;
+        if probe_info.identity() != file_info.identity() {
+            anyhow::bail!("policy path changed while opening: {}", path.display());
+        }
+
+        let limit = u64::try_from(MAX_POLICY_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let capacity = usize::try_from(file_info.file_size.min(limit))
+            .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
+            .min(MAX_POLICY_BYTES.saturating_add(1));
+        let mut bytes = Vec::<u8>::with_capacity(capacity);
+        let reader = BufReader::new(file);
+        reader.take(limit).read_to_end(&mut bytes).map_err(|err| {
+            anyhow::anyhow!("failed to read policy file {}: {err}", path.display())
+        })?;
+        if bytes.len() > MAX_POLICY_BYTES {
+            anyhow::bail!(
+                "policy file is too large ({} bytes; max {} bytes)",
+                bytes.len(),
+                MAX_POLICY_BYTES
+            );
+        }
+
+        String::from_utf8(bytes).map_err(|err| {
+            anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
+        })
     }
 
-    let file = std::fs::File::open(path)
-        .map_err(|err| anyhow::anyhow!("failed to open policy file {}: {err}", path.display()))?;
-    let limit = u64::try_from(MAX_POLICY_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let capacity = usize::try_from(meta.len().min(limit))
-        .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
-        .min(MAX_POLICY_BYTES.saturating_add(1));
-    let mut bytes = Vec::<u8>::with_capacity(capacity);
-    let reader = BufReader::new(file);
-    reader
-        .take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|err| anyhow::anyhow!("failed to read policy file {}: {err}", path.display()))?;
-    if bytes.len() > MAX_POLICY_BYTES {
+    #[cfg(not(windows))]
+    {
+        let before_open = std::fs::symlink_metadata(path).map_err(|err| {
+            anyhow::anyhow!("failed to stat policy file {}: {err}", path.display())
+        })?;
+        if before_open.file_type().is_symlink() {
+            anyhow::bail!("policy path must not be a symlink: {}", path.display());
+        }
+        if !before_open.is_file() {
+            anyhow::bail!("policy path is not a regular file: {}", path.display());
+        }
+
+        let file = open_policy_file_nofollow(path)?;
+        let after_open = file.metadata().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to stat opened policy file {}: {err}",
+                path.display()
+            )
+        })?;
+        if !after_open.is_file() {
+            anyhow::bail!("policy path is not a regular file: {}", path.display());
+        }
+        ensure_same_file(path, &before_open, &after_open)?;
+
+        let limit = u64::try_from(MAX_POLICY_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let capacity = usize::try_from(after_open.len().min(limit))
+            .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
+            .min(MAX_POLICY_BYTES.saturating_add(1));
+        let mut bytes = Vec::<u8>::with_capacity(capacity);
+        let reader = BufReader::new(file);
+        reader.take(limit).read_to_end(&mut bytes).map_err(|err| {
+            anyhow::anyhow!("failed to read policy file {}: {err}", path.display())
+        })?;
+        if bytes.len() > MAX_POLICY_BYTES {
+            anyhow::bail!(
+                "policy file is too large ({} bytes; max {} bytes)",
+                bytes.len(),
+                MAX_POLICY_BYTES
+            );
+        }
+
+        String::from_utf8(bytes).map_err(|err| {
+            anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
+        })
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsOpenedFileInfo {
+    file_attributes: u32,
+    volume_serial_number: u32,
+    file_index: u64,
+    file_size: u64,
+}
+
+#[cfg(windows)]
+impl WindowsOpenedFileInfo {
+    fn identity(self) -> (u32, u64) {
+        (self.volume_serial_number, self.file_index)
+    }
+}
+
+fn open_policy_file_nofollow(path: &Path) -> anyhow::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    configure_open_options_nofollow(&mut options);
+    options
+        .open(path)
+        .map_err(|err| anyhow::anyhow!("failed to open policy file {}: {err}", path.display()))
+}
+
+#[cfg(unix)]
+fn configure_open_options_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(libc::O_NOFOLLOW);
+}
+
+#[cfg(windows)]
+fn configure_open_options_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_open_options_nofollow(_options: &mut std::fs::OpenOptions) {}
+
+#[cfg(windows)]
+fn query_open_policy_file_info(
+    path: &Path,
+    file: &std::fs::File,
+) -> anyhow::Result<WindowsOpenedFileInfo> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` owns a live Windows handle and `info` points to writable memory.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
         anyhow::bail!(
-            "policy file is too large ({} bytes; max {} bytes)",
-            bytes.len(),
-            MAX_POLICY_BYTES
+            "failed to query opened policy file {}: {err}",
+            path.display()
         );
     }
 
-    String::from_utf8(bytes)
-        .map_err(|err| anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display()))
+    // SAFETY: `GetFileInformationByHandle` succeeded and initialized `info`.
+    let info = unsafe { info.assume_init() };
+    Ok(WindowsOpenedFileInfo {
+        file_attributes: info.dwFileAttributes,
+        volume_serial_number: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        file_size: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+    })
+}
+
+#[cfg(windows)]
+fn ensure_windows_regular_policy_file(path: &Path, file_attributes: u32) -> anyhow::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if (file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        anyhow::bail!(
+            "policy path must not be a symlink or reparse point: {}",
+            path.display()
+        );
+    }
+    if (file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        anyhow::bail!("policy path is not a regular file: {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn ensure_same_file(
+    path: &Path,
+    before_open: &std::fs::Metadata,
+    after_open: &std::fs::Metadata,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if before_open.dev() != after_open.dev() || before_open.ino() != after_open.ino() {
+            anyhow::bail!("policy path changed while opening: {}", path.display());
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        if before_open.volume_serial_number() != after_open.volume_serial_number()
+            || before_open.file_index() != after_open.file_index()
+        {
+            anyhow::bail!("policy path changed while opening: {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn policy_format(path: &Path) -> anyhow::Result<PolicyFormat> {
@@ -620,18 +799,26 @@ auth:
 
     #[test]
     fn policy_format_requires_explicit_known_extension() {
-        let err = policy_format(Path::new("policy")).expect_err("missing extension should fail");
+        let dir = tempdir().expect("tempdir");
+        let missing_ext = dir.path().join("policy");
+        std::fs::write(&missing_ext, "[permissions]\nread = true\n").expect("write policy");
+        let err = policy_format(&missing_ext).expect_err("missing extension should fail");
         assert!(
             err.to_string().contains("explicit extension"),
             "unexpected error: {err}"
         );
 
+        let yaml_path = dir.path().join("policy.yaml");
+        std::fs::write(&yaml_path, "permissions:\n  read: true\n").expect("write yaml policy");
         assert!(matches!(
-            policy_format(Path::new("policy.yaml")).expect("yaml"),
+            policy_format(&yaml_path).expect("yaml policy format"),
             PolicyFormat::Yaml
         ));
+
+        let yml_path = dir.path().join("policy.YML");
+        std::fs::write(&yml_path, "permissions:\n  read: true\n").expect("write yml policy");
         assert!(matches!(
-            policy_format(Path::new("policy.YML")).expect("yml"),
+            policy_format(&yml_path).expect("yml policy format"),
             PolicyFormat::Yaml
         ));
     }
@@ -644,6 +831,22 @@ auth:
             err.to_string()
                 .contains("policy path is not a regular file")
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ensure_same_file_rejects_replaced_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::fs::write(&first, "[permissions]\nread = true\n").expect("write first policy");
+        std::fs::write(&second, "[permissions]\nread = true\n").expect("write second policy");
+
+        let first_meta = std::fs::metadata(&first).expect("first metadata");
+        let second_meta = std::fs::metadata(&second).expect("second metadata");
+        let err = ensure_same_file(Path::new("policy.toml"), &first_meta, &second_meta)
+            .expect_err("different files should be rejected");
+        assert!(err.to_string().contains("changed while opening"));
     }
 
     #[cfg(unix)]
