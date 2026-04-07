@@ -44,7 +44,7 @@ subset projects to `db_vfs_core::policy::VfsPolicy`.
 
 - Safety-first policy model: **Permissions + Limits + Secrets + Traversal + Auth**.
 - Tool-like operations: `read`, `write`, `patch`, `delete`, `glob`, `grep`.
-- Backends: SQLite (default/dev) and Postgres (`--features postgres`).
+- Backends: SQLite (default/dev) and Postgres (Postgres-only build uses `--no-default-features --features postgres`).
 - Service policy loader accepts `.toml`, `.json`, `.yaml`, and `.yml`; the format must be explicit from the file extension.
 
 `db-vfs-service` now exposes backend features explicitly:
@@ -460,7 +460,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/pagination+read+grep: make cursor pagination return explicit `has_more`, reduce the legacy line-range fallback to a single whole-file load, and fail `grep` when same-version content disappears instead of silently skipping results.
 - store/vfs scan pagination: sort the legacy `list_metas_by_prefix_page` fallback even on the first page, so older stores without cursor pagination keep `glob`/`grep` page order deterministic instead of tripping broken-store `db` errors.
-- service/build+tests+docs: decouple `db-vfs-service` backend features so Postgres-only builds no longer hard-bind SQLite dependencies, and gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly.
+- service/build+tests+docs: gate SQLite-only helpers/tests behind matching features so `postgres`-only `--all-targets` checks compile cleanly, and document that a pure Postgres service build uses `--no-default-features --features postgres` rather than `--features postgres` alone.
 - service/auth: require a literal ASCII space between `Bearer` and the token in `Authorization`, so tab-delimited credentials are rejected instead of being accepted through whitespace splitting.
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
@@ -1246,7 +1246,7 @@ cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.local.toml
 Postgres:
 
 ```bash
-cargo run -p db-vfs-service --features postgres -- \
+cargo run -p db-vfs-service --no-default-features --features postgres -- \
   --postgres 'postgres://user:pass@localhost:5432/db_vfs' \
   --policy ./policy.local.toml
 ```
@@ -1585,4 +1585,3 @@ generator_version: scripts/llms.sh@v2
 
 Before pasting bundle content into any LLM tool, remove sensitive values (tokens, credentials,
 internal-only secrets, private URLs).
-

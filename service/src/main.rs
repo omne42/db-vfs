@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
     let app = if args.postgres.is_some() {
         anyhow::bail!(
-            "db-vfs-service was built without Postgres support; rebuild with `--features postgres`"
+            "db-vfs-service was built without Postgres support; rebuild with `--features postgres` to add Postgres alongside the default SQLite backend, or use `--no-default-features --features postgres` for a Postgres-only build"
         );
     } else {
         let Some(sqlite) = args.sqlite else {
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
         )?
     } else {
         anyhow::bail!(
-            "db-vfs-service was built without SQLite support; rebuild with `--features sqlite-bundled` or `--features sqlite`"
+            "db-vfs-service was built without SQLite support; rebuild with the default feature set or enable `sqlite-bundled` / `sqlite` explicitly"
         );
     };
 

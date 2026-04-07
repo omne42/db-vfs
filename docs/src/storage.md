@@ -52,7 +52,7 @@ cargo run -p db-vfs-service -- --sqlite ./db.sqlite --policy ./policy.local.toml
 Postgres:
 
 ```bash
-cargo run -p db-vfs-service --features postgres -- \
+cargo run -p db-vfs-service --no-default-features --features postgres -- \
   --postgres 'postgres://user:pass@localhost:5432/db_vfs' \
   --policy ./policy.local.toml
 ```
