@@ -81,9 +81,9 @@ fn read_policy_file(path: &Path) -> anyhow::Result<String> {
             );
         }
 
-        return String::from_utf8(bytes).map_err(|err| {
+        String::from_utf8(bytes).map_err(|err| {
             anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
-        });
+        })
     }
 
     #[cfg(not(windows))]
