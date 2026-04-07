@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use db_vfs_core::path::{normalize_path_prefix, validate_workspace_id};
 use db_vfs_core::policy::MAX_SCAN_RESPONSE_BYTES;
@@ -68,6 +69,8 @@ const MAX_GREP_REGEX_NEST_LIMIT: u32 = 128;
 const MAX_GREP_QUERY_BYTES: usize = 4096;
 const GREP_RESPONSE_JSON_FIXED_OVERHEAD: usize = 4096;
 const MAX_GREP_CONTENT_LOAD_ATTEMPTS: usize = 8;
+const GREP_CONTENT_RETRY_BACKOFF_MS: u64 = 2;
+const GREP_CONTENT_RETRY_YIELD_ATTEMPTS: usize = 4;
 
 enum GrepContentLoad {
     Loaded(String),
@@ -201,13 +204,28 @@ fn load_grep_content_with_retry<S: crate::store::Store>(
     max_read_bytes: u64,
 ) -> Result<GrepContentLoad> {
     let mut attempts = 0usize;
+    let original_version = version;
+    let mut saw_version_change = false;
     loop {
         if attempts >= MAX_GREP_CONTENT_LOAD_ATTEMPTS {
             let Some(now_meta) = store.get_meta(workspace_id, path)? else {
-                return Ok(GrepContentLoad::Missing);
+                return if saw_version_change {
+                    Err(Error::Conflict(format!(
+                        "file changed during grep (path={path}, expected_version={}, actual_version=<deleted>, attempts={attempts})",
+                        original_version,
+                    )))
+                } else {
+                    Ok(GrepContentLoad::Missing)
+                };
             };
             if now_meta.size_bytes > max_read_bytes {
                 return Ok(GrepContentLoad::TooLarge);
+            }
+            if now_meta.version != version || saw_version_change {
+                return Err(Error::Conflict(format!(
+                    "file changed during grep (path={path}, expected_version={}, actual_version={}, attempts={attempts})",
+                    original_version, now_meta.version
+                )));
             }
             return match store.get_content(workspace_id, path, now_meta.version)? {
                 Some(content) => {
@@ -218,7 +236,10 @@ fn load_grep_content_with_retry<S: crate::store::Store>(
                         Ok(GrepContentLoad::Loaded(content))
                     }
                 }
-                None => Ok(GrepContentLoad::Missing),
+                None => Err(Error::Db(format!(
+                    "file content could not be loaded during grep (path={path}, version={}, attempts={attempts})",
+                    now_meta.version
+                ))),
             };
         }
         attempts += 1;
@@ -228,8 +249,14 @@ fn load_grep_content_with_retry<S: crate::store::Store>(
                 return Ok(GrepContentLoad::Missing);
             };
             if now_meta.version != version || now_meta.size_bytes <= max_read_bytes {
+                saw_version_change |= now_meta.version != version;
                 version = now_meta.version;
                 size_bytes = now_meta.size_bytes;
+                if attempts <= GREP_CONTENT_RETRY_YIELD_ATTEMPTS {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(Duration::from_millis(GREP_CONTENT_RETRY_BACKOFF_MS));
+                }
                 continue;
             }
             return Ok(GrepContentLoad::TooLarge);
@@ -248,14 +275,23 @@ fn load_grep_content_with_retry<S: crate::store::Store>(
                     return Ok(GrepContentLoad::Missing);
                 };
                 if now_meta.version != version {
+                    saw_version_change = true;
                     version = now_meta.version;
                     size_bytes = now_meta.size_bytes;
+                    if attempts <= GREP_CONTENT_RETRY_YIELD_ATTEMPTS {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(Duration::from_millis(GREP_CONTENT_RETRY_BACKOFF_MS));
+                    }
                     continue;
                 }
                 if now_meta.size_bytes > max_read_bytes {
                     return Ok(GrepContentLoad::TooLarge);
                 }
-                return Ok(GrepContentLoad::Missing);
+                return Err(Error::Db(format!(
+                    "file content could not be loaded during grep (path={path}, version={}, attempts={attempts})",
+                    version
+                )));
             }
         }
     }
@@ -513,7 +549,9 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
+    use crate::store::{
+        DeleteOutcome, FileMeta, PrefixPage, PrefixPaginationMode, RangeReadMode, Store,
+    };
     use db_vfs_core::policy::VfsPolicy;
 
     struct DummyStore;
@@ -846,15 +884,23 @@ mod tests {
             prefix: &str,
             after: Option<&str>,
             limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(self
+        ) -> Result<PrefixPage> {
+            let mut rows = self
                 .rows
                 .iter()
                 .filter(|meta| meta.path.starts_with(prefix))
                 .filter(|meta| after.is_none_or(|cursor| meta.path.as_str() > cursor))
-                .take(limit)
+                .take(limit.saturating_add(1))
                 .cloned()
-                .collect())
+                .collect::<Vec<_>>();
+            let has_more = rows.len() > limit;
+            if has_more {
+                rows.truncate(limit);
+            }
+            Ok(PrefixPage {
+                metas: rows,
+                has_more,
+            })
         }
     }
 
@@ -1734,8 +1780,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(vec![self.row.clone(); META_PAGE_SIZE + 1])
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: vec![self.row.clone(); META_PAGE_SIZE],
+                has_more: true,
+            })
         }
     }
 
@@ -1841,8 +1890,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(self.rows.clone())
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: self.rows.clone(),
+                has_more: false,
+            })
         }
     }
 
@@ -1966,32 +2018,38 @@ mod tests {
             _prefix: &str,
             after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<PrefixPage> {
             if after.is_none() {
-                return Ok((0..=META_PAGE_SIZE)
-                    .map(|idx| FileMeta {
-                        path: format!("docs/{idx:04}.txt"),
+                return Ok(PrefixPage {
+                    metas: (0..META_PAGE_SIZE)
+                        .map(|idx| FileMeta {
+                            path: format!("docs/{idx:04}.txt"),
+                            size_bytes: u64::MAX,
+                            version: 1,
+                            updated_at_ms: 0,
+                        })
+                        .collect(),
+                    has_more: true,
+                });
+            }
+
+            Ok(PrefixPage {
+                metas: vec![
+                    FileMeta {
+                        path: "docs/0001.txt".to_string(),
                         size_bytes: u64::MAX,
                         version: 1,
                         updated_at_ms: 0,
-                    })
-                    .collect());
-            }
-
-            Ok(vec![
-                FileMeta {
-                    path: "docs/0001.txt".to_string(),
-                    size_bytes: u64::MAX,
-                    version: 1,
-                    updated_at_ms: 0,
-                },
-                FileMeta {
-                    path: "docs/9999.txt".to_string(),
-                    size_bytes: u64::MAX,
-                    version: 1,
-                    updated_at_ms: 0,
-                },
-            ])
+                    },
+                    FileMeta {
+                        path: "docs/9999.txt".to_string(),
+                        size_bytes: u64::MAX,
+                        version: 1,
+                        updated_at_ms: 0,
+                    },
+                ],
+                has_more: false,
+            })
         }
     }
 
@@ -2090,9 +2148,12 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<PrefixPage> {
             std::thread::sleep(Duration::from_millis(3));
-            Ok(Vec::new())
+            Ok(PrefixPage {
+                metas: Vec::new(),
+                has_more: false,
+            })
         }
     }
 
@@ -2200,8 +2261,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(vec![self.stale_meta.clone()])
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: vec![self.stale_meta.clone()],
+                has_more: false,
+            })
         }
     }
 
@@ -2327,8 +2391,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(vec![self.stale_meta.clone()])
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: vec![self.stale_meta.clone()],
+                has_more: false,
+            })
         }
     }
 
@@ -2371,5 +2438,120 @@ mod tests {
         assert_eq!(response.matches[0].text, "needle");
         assert_eq!(response.skipped_too_large_files, 0);
         assert_eq!(response.skipped_missing_content, 0);
+    }
+
+    struct StableMissingContentStore {
+        meta: FileMeta,
+    }
+
+    impl Store for StableMissingContentStore {
+        fn range_read_mode(&self) -> RangeReadMode {
+            RangeReadMode::LegacyCompatibilityFallback
+        }
+
+        fn get_meta(&mut self, _workspace_id: &str, path: &str) -> Result<Option<FileMeta>> {
+            if path == self.meta.path {
+                Ok(Some(self.meta.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn get_content(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _version: u64,
+        ) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn insert_file_new(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn update_file_cas(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _content: &str,
+            _expected_version: u64,
+            _now_ms: u64,
+        ) -> Result<u64> {
+            unimplemented!()
+        }
+
+        fn delete_file(
+            &mut self,
+            _workspace_id: &str,
+            _path: &str,
+            _expected_version: Option<u64>,
+        ) -> Result<DeleteOutcome> {
+            unimplemented!()
+        }
+
+        fn list_metas_by_prefix(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _limit: usize,
+        ) -> Result<Vec<FileMeta>> {
+            unimplemented!()
+        }
+
+        fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
+            PrefixPaginationMode::NativeCursorPagination
+        }
+
+        fn list_metas_by_prefix_page(
+            &mut self,
+            _workspace_id: &str,
+            _prefix: &str,
+            _after: Option<&str>,
+            _limit: usize,
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: vec![self.meta.clone()],
+                has_more: false,
+            })
+        }
+    }
+
+    #[test]
+    fn grep_fails_closed_when_visible_meta_has_no_same_version_content() {
+        let store = StableMissingContentStore {
+            meta: FileMeta {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 6,
+                version: 7,
+                updated_at_ms: 1,
+            },
+        };
+
+        let mut policy = VfsPolicy::default();
+        policy.permissions.grep = true;
+        policy.limits.max_read_bytes = 16;
+
+        let mut vfs = DbVfs::new(store, policy).expect("vfs");
+        let err = vfs
+            .grep(GrepRequest {
+                workspace_id: "ws".to_string(),
+                query: "needle".to_string(),
+                regex: false,
+                glob: None,
+                path_prefix: Some("docs/".to_string()),
+            })
+            .expect_err("stable missing content should not be skipped");
+        assert_eq!(err.code(), "db");
+        assert!(
+            err.to_string().contains("could not be loaded during grep"),
+            "unexpected error: {err}"
+        );
     }
 }

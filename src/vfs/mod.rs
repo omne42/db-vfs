@@ -317,12 +317,11 @@ where
         let page_budget = scan_page_budget(remaining_entries);
         let (mut metas, has_more) = match target {
             ScanTarget::Prefix(prefix) => {
-                let fetch_limit = page_budget.saturating_add(1);
-                let mut metas = store.list_metas_by_prefix_page(
+                let page = store.list_metas_by_prefix_page(
                     workspace_id,
                     prefix,
                     after.as_deref(),
-                    fetch_limit,
+                    page_budget,
                 )?;
                 if max_walk.is_some_and(|limit| started.elapsed() >= limit) {
                     return Ok(ScanOutcome {
@@ -330,12 +329,8 @@ where
                         started,
                     });
                 }
-                validate_scan_page_order(&metas, after.as_deref(), op)?;
-                let has_more = metas.len() > page_budget;
-                if has_more {
-                    metas.truncate(page_budget);
-                }
-                (metas, has_more)
+                validate_scan_page_order(&page.metas, after.as_deref(), op)?;
+                (page.metas, page.has_more)
             }
             ScanTarget::ExactPath(path) => {
                 if exact_path_fetched {
@@ -472,7 +467,9 @@ fn validate_scan_target_page(
 mod tests {
     use super::*;
 
-    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
+    use crate::store::{
+        DeleteOutcome, FileMeta, PrefixPage, PrefixPaginationMode, RangeReadMode, Store,
+    };
 
     #[derive(Debug)]
     struct DummyStore;
@@ -833,15 +830,23 @@ mod tests {
             prefix: &str,
             after: Option<&str>,
             limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(self
+        ) -> Result<PrefixPage> {
+            let mut rows = self
                 .rows
                 .iter()
                 .filter(|meta| meta.path.starts_with(prefix))
                 .filter(|meta| after.is_none_or(|cursor| meta.path.as_str() > cursor))
-                .take(limit)
+                .take(limit.saturating_add(1))
                 .cloned()
-                .collect())
+                .collect::<Vec<_>>();
+            let has_more = rows.len() > limit;
+            if has_more {
+                rows.truncate(limit);
+            }
+            Ok(PrefixPage {
+                metas: rows,
+                has_more,
+            })
         }
     }
 

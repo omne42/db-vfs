@@ -139,6 +139,12 @@ pub enum RangeReadMode {
     LegacyCompatibilityFallback,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrefixPage {
+    pub metas: Vec<FileMeta>,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LineSegment<'a> {
     pub text: &'a str,
@@ -309,6 +315,19 @@ pub trait Store {
         end_line: u64,
         max_bytes: u64,
     ) -> Result<Option<LineRangeData>> {
+        if matches!(
+            self.range_read_mode(),
+            RangeReadMode::LegacyCompatibilityFallback
+        ) {
+            warn_legacy_range_read_fallback::<Self>();
+            let Some(content) = self.get_content(workspace_id, path, version)? else {
+                return Ok(None);
+            };
+            return Ok(Some(line_range_from_full_content(
+                &content, start_line, end_line, max_bytes,
+            )));
+        }
+
         let chunk_chars = range_read_chunk_chars(max_bytes);
         let chunk_byte_budget = range_read_chunk_byte_budget(max_bytes);
         let mut start_char = 1u64;
@@ -466,9 +485,12 @@ pub trait Store {
         prefix: &str,
         after: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<FileMeta>> {
+    ) -> Result<PrefixPage> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok(PrefixPage {
+                metas: Vec::new(),
+                has_more: false,
+            });
         }
         if !matches!(
             self.prefix_pagination_mode(),
@@ -486,11 +508,19 @@ pub trait Store {
         // this fallback and provide predictable large-prefix performance.
         warn_legacy_prefix_page_fallback::<Self>();
         let Some(after) = after else {
-            let mut rows = self.list_metas_by_prefix(workspace_id, prefix, limit)?;
+            let fetch_limit = limit.saturating_add(1);
+            let mut rows = self.list_metas_by_prefix(workspace_id, prefix, fetch_limit)?;
             if rows.len() > 1 && rows.windows(2).any(|pair| pair[0].path > pair[1].path) {
                 rows.sort_unstable_by(|a, b| a.path.cmp(&b.path));
             }
-            return Ok(rows);
+            let has_more = rows.len() > limit;
+            if has_more {
+                rows.truncate(limit);
+            }
+            return Ok(PrefixPage {
+                metas: rows,
+                has_more,
+            });
         };
         let mut fetch_limit = limit.max(64);
         loop {
@@ -503,12 +533,26 @@ pub trait Store {
             }
             let split = rows.partition_point(|meta| meta.path.as_str() <= after);
             let mut out = rows.split_off(split);
-            if out.len() >= limit {
+            let out_len = out.len();
+            if out_len > limit {
                 out.truncate(limit);
-                return Ok(out);
+                return Ok(PrefixPage {
+                    metas: out,
+                    has_more: true,
+                });
+            }
+            if out_len == limit {
+                let has_more = rows_len >= fetch_limit;
+                return Ok(PrefixPage {
+                    metas: out,
+                    has_more,
+                });
             }
             if rows_len < fetch_limit {
-                return Ok(out);
+                return Ok(PrefixPage {
+                    metas: out,
+                    has_more: false,
+                });
             }
 
             let next = if split == rows_len {
@@ -518,10 +562,41 @@ pub trait Store {
                 fetch_limit.saturating_add(missing.max(fetch_limit / 2))
             };
             if next == fetch_limit {
-                return Ok(out);
+                return Ok(PrefixPage {
+                    metas: out,
+                    has_more: rows_len >= fetch_limit,
+                });
             }
             fetch_limit = next;
         }
+    }
+}
+
+fn line_range_from_full_content(
+    content_source: &str,
+    start_line: u64,
+    end_line: u64,
+    max_bytes: u64,
+) -> LineRangeData {
+    let mut bytes_read = 0u64;
+    let mut content = String::new();
+    let mut total_lines = 0u64;
+
+    for (idx, segment) in line_segments(content_source).enumerate() {
+        let line_no = u64::try_from(idx.saturating_add(1)).unwrap_or(u64::MAX);
+        total_lines = line_no;
+        if line_no >= start_line && line_no <= end_line {
+            append_range_segment(&mut content, &mut bytes_read, max_bytes, segment.full);
+        }
+        if line_no == end_line {
+            break;
+        }
+    }
+
+    LineRangeData {
+        content: (bytes_read <= max_bytes).then_some(content),
+        bytes_read,
+        total_lines,
     }
 }
 
@@ -1012,8 +1087,13 @@ mod tests {
         let page = store
             .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
             .expect("cursor pagination fallback should work");
-        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        let paths = page
+            .metas
+            .into_iter()
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert!(!page.has_more);
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 
@@ -1034,8 +1114,13 @@ mod tests {
         let page = store
             .list_metas_by_prefix_page("ws", "docs/", Some("docs/a.txt"), 2)
             .expect("fallback should sort unsorted legacy rows");
-        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        let paths = page
+            .metas
+            .into_iter()
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/b.txt", "docs/c.txt"]);
+        assert!(!page.has_more);
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 
@@ -1056,8 +1141,13 @@ mod tests {
         let page = store
             .list_metas_by_prefix_page("ws", "docs/", None, 2)
             .expect("fallback should sort unsorted legacy first page");
-        let paths = page.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        let paths = page
+            .metas
+            .into_iter()
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>();
         assert_eq!(paths, vec!["docs/a.txt", "docs/b.txt"]);
+        assert!(page.has_more);
         assert_eq!(legacy_prefix_page_fallback_warn_count_for_test(), 1);
     }
 
@@ -1199,6 +1289,7 @@ mod tests {
     #[derive(Default)]
     struct ContentOnlyStore {
         content: String,
+        content_reads: usize,
     }
 
     impl Store for ContentOnlyStore {
@@ -1216,6 +1307,7 @@ mod tests {
             _path: &str,
             _version: u64,
         ) -> Result<Option<String>> {
+            self.content_reads = self.content_reads.saturating_add(1);
             Ok(Some(self.content.clone()))
         }
 
@@ -1271,6 +1363,7 @@ mod tests {
         reset_legacy_range_read_fallback_warning_for_test();
         let mut store = ContentOnlyStore {
             content: "line1\nline2\n".to_string(),
+            ..Default::default()
         };
 
         let range = store
@@ -1285,6 +1378,7 @@ mod tests {
                 total_lines: 2,
             }
         );
+        assert_eq!(store.content_reads, 1);
         assert_eq!(legacy_range_read_fallback_warn_count_for_test(), 1);
     }
 
@@ -1296,6 +1390,7 @@ mod tests {
         reset_legacy_range_read_fallback_warning_for_test();
         let mut store = ContentOnlyStore {
             content: "line1\nline2\nline3\n".to_string(),
+            ..Default::default()
         };
 
         store
@@ -1484,6 +1579,7 @@ mod tests {
         reset_legacy_range_read_fallback_warning_for_test();
         let mut store = ContentOnlyStore {
             content: "line1\rline2\rline3".to_string(),
+            ..Default::default()
         };
 
         let range = store
@@ -1508,6 +1604,7 @@ mod tests {
         reset_legacy_range_read_fallback_warning_for_test();
         let mut store = ContentOnlyStore {
             content: "line1\rline2\nline3\r\nline4".to_string(),
+            ..Default::default()
         };
 
         let range = store
