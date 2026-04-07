@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth: require a literal ASCII space between `Bearer` and the token in `Authorization`, so tab-delimited credentials are rejected instead of being accepted through whitespace splitting.
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
+- service/audit-handlers: mirror malformed-request path redaction into both `requested_path` and `path` when no canonical runtime path exists, keeping invalid-path audit entries aligned with the fail-closed masking contract.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
 - store/api: require every `Store` impl to declare whether chunked ranged reads and cursor pagination are native or legacy fallback paths, and fail closed when an impl claims native behavior but still hits the default compatibility fallback.
@@ -190,6 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tests: add Postgres rollback regression coverage proving missing-path update/delete attempts do not persist `file_generations` rows.
 - tests: add regression coverage for required-audit worker loss returning stable `503 audit_unavailable` errors.
 - tests/service: run HTTP smoke and audit-log coverage against in-process routers, including delayed-body timeout coverage, so restricted environments no longer silently skip bind-dependent end-to-end checks.
+- tests/service: add end-to-end audit-log regressions for secret-ish malformed write paths and deny-matching glob patterns so JSONL redaction stays covered at the HTTP boundary.
 
 ## [0.1.0] - 2026-01-31
 
