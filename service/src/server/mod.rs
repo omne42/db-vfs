@@ -814,7 +814,10 @@ mod tests {
             .expect("read timeout response body");
         let err: serde_json::Value =
             serde_json::from_slice(&body).expect("decode timeout response");
-        assert_eq!(err.get("code").and_then(serde_json::Value::as_str), Some(CODE_TIMEOUT));
+        assert_eq!(
+            err.get("code").and_then(serde_json::Value::as_str),
+            Some(CODE_TIMEOUT)
+        );
 
         locker
             .execute_batch("ROLLBACK;")
