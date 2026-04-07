@@ -111,8 +111,9 @@
 
 - `service/src/policy_io.rs`
   - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML/YAML 的显式格式识别与解析。
-  - loader 先做 no-follow 风格的路径探测：只接受 direct regular file，拒绝 symlink、
-    FIFO、目录和其他非常规文件，避免在特殊文件或意外链接目标上阻塞/漂移。
+  - loader 不只是在 open 前做路径探测；它会先拒绝 symlink/FIFO/目录等非常规路径，再用
+    no-follow 风格 open 拿到真实文件描述符，并校验 open 前后的文件身份一致，避免 policy
+    path 在 stat/open 窗口里被替换成别的 regular file 或 link target。
   - policy loader 只接受 regular file；env interpolation 只作用于解析后的字符串值，
     不把注释或非字符串字段当模板系统处理。
   - 当前这里仍是本仓本地实现，尚未接到 `omne_foundation` 的 config-kit。
