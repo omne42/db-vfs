@@ -99,6 +99,8 @@ Budget semantics:
 - Healthy pool checkout waits map to `408 timeout`; checkout/setup failures that already carry backend connection detail remain internal `500 db` faults instead of being folded into the timeout bucket.
 - JSON body buffering and decode also consume the frontdoor `max_io_ms` budget, including `glob` /
   `grep` requests before scan execution starts.
+- `read` / `delete` / `glob` / `grep` stay on a fixed 64 KiB JSON frontdoor cap; `write` /
+  `patch` alone reserve worst-case JSON string escaping on top of their decoded-content budgets.
 - Once the body is buffered, the service does a lightweight `workspace_id` auth preflight before
   it constructs the final typed request body, so token-valid but workspace-disallowed `write` /
   `patch` requests fail before allocating their full request strings.

@@ -166,6 +166,7 @@ Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and healthy DB pool wait/connect time.
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
+- `read` / `delete` / `glob` / `grep` stay on a fixed 64 KiB JSON frontdoor cap instead of inheriting the larger `write` / `patch` transport budget.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.
 - Omitting `limits.max_walk_ms` in policy config deserializes to the default `Some(2000)` scan budget.
 - Once the JSON body is buffered, the service preflights the top-level `workspace_id` before full request-schema deserialization, so token-valid requests aimed at a disallowed workspace can fail with `403 not_permitted` without materializing large `content` / `patch` fields.
