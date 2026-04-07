@@ -455,7 +455,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ci/service/tests: add explicit `postgres`-only build/test gates for `db-vfs` and `db-vfs-service`, and gate SQLite-only test helpers so the Postgres-only feature profile stays warning-free and catches backend coupling regressions before merge.
 - service/runner tests: add deterministic coverage that timed-out blocking workers still record their eventual background completion metrics, so the timeout-with-late-completion model stays mechanically verified.
 - docs/vfs-api: point validated-matcher guidance at the canonical `*_with_supplied_matchers_validated` constructors and document the older `*_with_matchers_validated` names as deprecated fail-fast aliases instead of primary API names.
-- service/rate-limiter: make missing peer IPs hit the same shared fallback bucket even when `RateLimiter` is exercised directly, so its internal contract matches the HTTP middleware behavior.
+- service/rate-limiter: skip service-local per-IP limiting when a request has no installed peer address, so embedded routers no longer collapse unrelated clients into one shared unspecified-IP bucket while audit `peer_ip` stays empty.
 - vfs/glob-match: route runtime glob path normalization through `db_vfs_core::path::normalize_runtime_relative_path_for_matching`, so VFS glob matching shares the same invalid-path boundary as core redaction/traversal helpers instead of keeping a near-duplicate local normalizer.
 - service/frontdoor: preflight buffered JSON for `workspace_id` before constructing the full request type, so token-valid but disallowed workspaces fail before `write` / `patch` materialize their full request payloads while keeping the same permit and required-audit semantics.
 - store/pagination+read+grep: make cursor pagination return explicit `has_more`, reduce the legacy line-range fallback to a single whole-file load, and fail `grep` when same-version content disappears instead of silently skipping results.
@@ -1302,6 +1302,8 @@ Recommended deployment pattern:
 
 - enforce edge/gateway rate limits first;
 - keep service rate limit as a second guardrail;
+- embedded/direct `Router` use without `ConnectInfo<SocketAddr>` disables the service-local per-IP
+  limiter for those requests, so install peer metadata or rely on a trusted edge limiter;
 - avoid trusting spoofable forwarded headers unless handled by a trusted edge.
 
 
@@ -1350,8 +1352,8 @@ leave the field empty because no stable authenticated subject exists.
 
 - source: TCP peer address (`ConnectInfo<SocketAddr>`) when the hosting server installs it;
 - embedded/direct `Router` use without `into_make_service_with_connect_info::<SocketAddr>()` keeps
-  `peer_ip` empty and falls back to the shared missing-IP rate-limit bucket instead of failing the
-  request;
+  `peer_ip` empty and skips service-local per-IP rate limiting for those requests instead of
+  failing the request;
 - no forwarded-header parsing;
 - apply local retention policy according to compliance requirements.
 

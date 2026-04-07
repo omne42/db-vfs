@@ -37,8 +37,6 @@ const MAX_BUCKETS_BEFORE_PRUNE: usize = 4096;
 const BUCKET_TTL: Duration = Duration::from_secs(10 * 60);
 const PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_SHARDS: usize = 32;
-const FALLBACK_RATE_LIMIT_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
-
 impl RateLimiter {
     pub(super) fn new(limits: &ServiceLimits) -> Self {
         let enabled = limits.max_requests_per_ip_per_sec > 0
@@ -86,7 +84,9 @@ impl RateLimiter {
         if !self.cfg.enabled {
             return true;
         }
-        let ip = ip.unwrap_or(FALLBACK_RATE_LIMIT_IP);
+        let Some(ip) = ip else {
+            return true;
+        };
         let idx = self.shard_index(&ip);
         let mut state = self.shards[idx].lock().await;
 
@@ -405,12 +405,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rate_limiter_uses_shared_fallback_bucket_for_missing_ip() {
+    async fn rate_limiter_skips_missing_ip_without_tracking_buckets() {
         let limiter = RateLimiter::new(&limits_with_rate_limit(1, 1, 16));
 
         assert!(limiter.allow(None).await);
-        assert!(!limiter.allow(None).await);
-        assert!(!limiter.allow(Some(FALLBACK_RATE_LIMIT_IP)).await);
+        assert!(limiter.allow(None).await);
+
+        assert_eq!(limiter.total_bucket_count().await, 0);
+        assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 0);
+
+        let unspecified = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        assert!(limiter.allow(Some(unspecified)).await);
+        assert!(!limiter.allow(Some(unspecified)).await);
 
         assert_eq!(limiter.total_bucket_count().await, 1);
         assert_eq!(limiter.tracked_ips.load(Ordering::Acquire), 1);
