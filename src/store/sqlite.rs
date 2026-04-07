@@ -7,7 +7,7 @@ use rusqlite::OptionalExtension;
 use db_vfs_core::{Error, Result};
 
 use super::{
-    DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store, db_err,
+    DeleteOutcome, FileMeta, PrefixPage, PrefixPaginationMode, RangeReadMode, Store, db_err,
     make_prefix_bounds, monotonic_updated_at_ms, normalize_store_after_cursor,
     normalize_store_path, normalize_store_path_prefix, normalize_store_workspace_id,
 };
@@ -378,7 +378,9 @@ where
         prefix: &str,
         limit: usize,
     ) -> Result<Vec<FileMeta>> {
-        self.list_metas_by_prefix_page(workspace_id, prefix, None, limit)
+        Ok(self
+            .list_metas_by_prefix_page(workspace_id, prefix, None, limit)?
+            .metas)
     }
 
     fn prefix_pagination_mode(&self) -> PrefixPaginationMode {
@@ -391,16 +393,20 @@ where
         prefix: &str,
         after: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<FileMeta>> {
+    ) -> Result<PrefixPage> {
         let workspace_id = normalize_store_workspace_id(workspace_id)?;
         let prefix = normalize_store_path_prefix(prefix)?;
         let after = after.map(normalize_store_after_cursor).transpose()?;
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok(PrefixPage {
+                metas: Vec::new(),
+                has_more: false,
+            });
         }
 
         let (lower, upper) = make_prefix_bounds(&prefix);
-        let limit_u64 = u64::try_from(limit)
+        let fetch_limit = limit.saturating_add(1);
+        let limit_u64 = u64::try_from(fetch_limit)
             .map_err(|_| Error::Db("integer overflow converting limit".to_string()))?;
         let limit_i64 = u64_to_i64(limit_u64, "limit")?;
         let mut out = Vec::with_capacity(limit.min(1024));
@@ -526,7 +532,14 @@ where
                 }
             }
         }
-        Ok(out)
+        let has_more = out.len() > limit;
+        if has_more {
+            out.truncate(limit);
+        }
+        Ok(PrefixPage {
+            metas: out,
+            has_more,
+        })
     }
 }
 
@@ -677,14 +690,24 @@ mod tests {
         let page1 = store
             .list_metas_by_prefix_page("ws", "docs/", None, 2)
             .expect("page1");
-        let page1_paths = page1.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        let page1_paths = page1
+            .metas
+            .into_iter()
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>();
         assert_eq!(page1_paths, vec!["docs/a.txt", "docs/b.txt"]);
+        assert!(page1.has_more);
 
         let page2 = store
             .list_metas_by_prefix_page("ws", "docs/", Some("docs/b.txt"), 2)
             .expect("page2");
-        let page2_paths = page2.into_iter().map(|meta| meta.path).collect::<Vec<_>>();
+        let page2_paths = page2
+            .metas
+            .into_iter()
+            .map(|meta| meta.path)
+            .collect::<Vec<_>>();
         assert_eq!(page2_paths, vec!["docs/c.txt"]);
+        assert!(!page2.has_more);
     }
 
     #[test]

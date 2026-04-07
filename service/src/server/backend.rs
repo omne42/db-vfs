@@ -1,4 +1,6 @@
-use db_vfs::store::{DeleteOutcome, FileMeta, LineRangeData, PrefixPaginationMode, Store};
+use db_vfs::store::{
+    DeleteOutcome, FileMeta, LineRangeData, PrefixPage, PrefixPaginationMode, Store,
+};
 
 #[cfg(feature = "postgres")]
 use db_vfs::store::postgres::PostgresStore;
@@ -417,7 +419,7 @@ impl Store for BackendStore {
         prefix: &str,
         after: Option<&str>,
         limit: usize,
-    ) -> db_vfs::Result<Vec<FileMeta>> {
+    ) -> db_vfs::Result<PrefixPage> {
         dispatch_store!(
             self,
             list_metas_by_prefix_page(workspace_id, prefix, after, limit)

@@ -162,7 +162,9 @@ mod tests {
 
     use std::time::Duration;
 
-    use crate::store::{DeleteOutcome, FileMeta, PrefixPaginationMode, RangeReadMode, Store};
+    use crate::store::{
+        DeleteOutcome, FileMeta, PrefixPage, PrefixPaginationMode, RangeReadMode, Store,
+    };
     use db_vfs_core::policy::VfsPolicy;
 
     struct PrefixFilteringStore {
@@ -452,8 +454,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(vec![self.row.clone(); META_PAGE_SIZE + 1])
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: vec![self.row.clone(); META_PAGE_SIZE],
+                has_more: true,
+            })
         }
     }
 
@@ -573,7 +578,7 @@ mod tests {
             _prefix: &str,
             after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<PrefixPage> {
             let rows = match after {
                 None => vec![
                     FileMeta {
@@ -597,7 +602,10 @@ mod tests {
                 }],
                 _ => Vec::new(),
             };
-            Ok(rows)
+            Ok(PrefixPage {
+                has_more: false,
+                metas: rows,
+            })
         }
     }
 
@@ -696,8 +704,11 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
-            Ok(self.rows.clone())
+        ) -> Result<PrefixPage> {
+            Ok(PrefixPage {
+                metas: self.rows.clone(),
+                has_more: false,
+            })
         }
     }
 
@@ -814,32 +825,38 @@ mod tests {
             _prefix: &str,
             after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<PrefixPage> {
             if after.is_none() {
-                return Ok((0..=META_PAGE_SIZE)
-                    .map(|idx| FileMeta {
-                        path: format!("docs/{idx:04}.txt"),
+                return Ok(PrefixPage {
+                    metas: (0..META_PAGE_SIZE)
+                        .map(|idx| FileMeta {
+                            path: format!("docs/{idx:04}.txt"),
+                            size_bytes: 1,
+                            version: 1,
+                            updated_at_ms: 0,
+                        })
+                        .collect(),
+                    has_more: true,
+                });
+            }
+
+            Ok(PrefixPage {
+                metas: vec![
+                    FileMeta {
+                        path: "docs/0001.txt".to_string(),
                         size_bytes: 1,
                         version: 1,
                         updated_at_ms: 0,
-                    })
-                    .collect());
-            }
-
-            Ok(vec![
-                FileMeta {
-                    path: "docs/0001.txt".to_string(),
-                    size_bytes: 1,
-                    version: 1,
-                    updated_at_ms: 0,
-                },
-                FileMeta {
-                    path: "docs/9999.txt".to_string(),
-                    size_bytes: 1,
-                    version: 1,
-                    updated_at_ms: 0,
-                },
-            ])
+                    },
+                    FileMeta {
+                        path: "docs/9999.txt".to_string(),
+                        size_bytes: 1,
+                        version: 1,
+                        updated_at_ms: 0,
+                    },
+                ],
+                has_more: false,
+            })
         }
     }
 
@@ -936,9 +953,12 @@ mod tests {
             _prefix: &str,
             _after: Option<&str>,
             _limit: usize,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<PrefixPage> {
             std::thread::sleep(Duration::from_millis(3));
-            Ok(Vec::new())
+            Ok(PrefixPage {
+                metas: Vec::new(),
+                has_more: false,
+            })
         }
     }
 
