@@ -25,6 +25,7 @@ r2d2_sqlite = { version = "0.25", optional = true }
 rusqlite = { version = "0.32", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 toml = "0.8"

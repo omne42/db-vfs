@@ -110,12 +110,12 @@
 ## 当前仍在本仓本地实现的通用能力
 
 - `service/src/policy_io.rs`
-  - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML 识别与解析。
+  - 自己做配置文件读取、大小限制、env interpolation，以及 JSON/TOML/YAML 的显式格式识别与解析。
   - loader 先做 no-follow 风格的路径探测：只接受 direct regular file，拒绝 symlink、
     FIFO、目录和其他非常规文件，避免在特殊文件或意外链接目标上阻塞/漂移。
   - policy loader 只接受 regular file；env interpolation 只作用于解析后的字符串值，
     不把注释或非字符串字段当模板系统处理。
-  - 当前这里没有接入 YAML。
+  - 当前这里仍是本仓本地实现，尚未接到 `omne_foundation` 的 config-kit。
 - `service/src/server/auth.rs`
   - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验和摘要匹配；
     `allowed_workspaces` 的 pattern 解析/匹配语义则复用 `core::workspace_pattern`，避免
