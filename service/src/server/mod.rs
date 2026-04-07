@@ -560,7 +560,7 @@ pub fn build_app_postgres(
 ///
 /// The returned router can be served with or without `ConnectInfo<SocketAddr>`. When no peer
 /// address is installed by the outer server, request handling still succeeds; audit `peer_ip`
-/// stays unset and rate limiting falls back to the shared unspecified-IP bucket.
+/// stays unset and service-local per-IP rate limiting is skipped for those requests.
 pub fn build_app(
     db_path: std::path::PathBuf,
     policy: ServicePolicy,

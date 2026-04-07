@@ -10,7 +10,6 @@ use tracing::Instrument;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MISSING_IP_COUNT: AtomicU64 = AtomicU64::new(0);
-const FALLBACK_RATE_LIMIT_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 
 #[derive(Clone, Debug)]
 pub(super) struct RequestId(pub String);
@@ -40,8 +39,7 @@ pub(super) async fn rate_limit_middleware(
         if missing == 1 || missing.is_multiple_of(1000) {
             tracing::warn!(
                 missing_ip_total = missing,
-                fallback_ip = %FALLBACK_RATE_LIMIT_IP,
-                "request missing peer ip; applying shared fallback rate-limit bucket"
+                "request missing peer ip; skipping service-local per-IP rate limiting"
             );
         }
     }
@@ -172,6 +170,56 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    fn request_with_peer(uri: &str, peer: SocketAddr) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request");
+        request.extensions_mut().insert(ConnectInfo(peer));
+        request
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn rate_limit_middleware_skips_requests_without_peer_ip() {
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
+                max_requests_per_ip_per_sec: 1,
+                max_requests_burst_per_ip: 1,
+                max_rate_limit_ips: 16,
+                ..ServiceLimits::default()
+            },
+            ..ServicePolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, None);
+
+        let app = Router::new()
+            .route("/v1/read", post(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::rate_limit_middleware,
+            ))
+            .with_state(state);
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("first request");
+        let first_resp = app.clone().oneshot(first).await.expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/read")
+            .body(Body::empty())
+            .expect("second request");
+        let second_resp = app.oneshot(second).await.expect("second response");
+        assert_eq!(second_resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn rate_limit_middleware_keeps_io_permit_while_required_audit_blocks() {
         let (audit, control) =
@@ -199,19 +247,12 @@ mod tests {
             ))
             .with_state(state.clone());
 
-        let first = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/read")
-            .body(Body::empty())
-            .expect("first request");
+        let peer: SocketAddr = "127.0.0.1:3000".parse().expect("peer");
+        let first = request_with_peer("/v1/read", peer);
         let first_resp = app.clone().oneshot(first).await.expect("first response");
         assert_eq!(first_resp.status(), StatusCode::OK);
 
-        let second = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/read")
-            .body(Body::empty())
-            .expect("second request");
+        let second = request_with_peer("/v1/read", peer);
         let task = tokio::spawn(async move { app.oneshot(second).await.expect("second response") });
 
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -266,19 +307,12 @@ mod tests {
             ))
             .with_state(state.clone());
 
-        let first = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/read")
-            .body(Body::empty())
-            .expect("first request");
+        let peer: SocketAddr = "127.0.0.1:3001".parse().expect("peer");
+        let first = request_with_peer("/v1/read", peer);
         let first_resp = app.clone().oneshot(first).await.expect("first response");
         assert_eq!(first_resp.status(), StatusCode::OK);
 
-        let second = axum::http::Request::builder()
-            .method("POST")
-            .uri("/v1/read")
-            .body(Body::empty())
-            .expect("second request");
+        let second = request_with_peer("/v1/read", peer);
         let resp = app.oneshot(second).await.expect("second response");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 

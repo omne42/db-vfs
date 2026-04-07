@@ -37,8 +37,8 @@ leave the field empty because no stable authenticated subject exists.
 
 - source: TCP peer address (`ConnectInfo<SocketAddr>`) when the hosting server installs it;
 - embedded/direct `Router` use without `into_make_service_with_connect_info::<SocketAddr>()` keeps
-  `peer_ip` empty and falls back to the shared missing-IP rate-limit bucket instead of failing the
-  request;
+  `peer_ip` empty and skips service-local per-IP rate limiting for those requests instead of
+  failing the request;
 - no forwarded-header parsing;
 - apply local retention policy according to compliance requirements.
 

@@ -40,4 +40,6 @@ Recommended deployment pattern:
 
 - enforce edge/gateway rate limits first;
 - keep service rate limit as a second guardrail;
+- embedded/direct `Router` use without `ConnectInfo<SocketAddr>` disables the service-local per-IP
+  limiter for those requests, so install peer metadata or rely on a trusted edge limiter;
 - avoid trusting spoofable forwarded headers unless handled by a trusted edge.

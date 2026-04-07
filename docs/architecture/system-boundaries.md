@@ -42,8 +42,9 @@
   - service 启动和 policy 文件解析的 canonical 类型是 `db_vfs_service::policy::ServicePolicy`；
     service 会把其中的 core 子集投影成 `db_vfs_core::policy::VfsPolicy` 再交给
     `ValidatedVfsPolicy` 和 VFS 构造链路。
-  - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时只影响 `peer_ip`
-    与 per-IP rate-limit 归桶，不应让 handler 在运行时失败。
+  - service `Router` 可以带或不带 `ConnectInfo<SocketAddr>` 运行；缺失时不会让 handler
+    在运行时失败，但 `peer_ip` 会保持为空，service-local per-IP rate limit 也会对这些请求
+    直接跳过，而不是把所有无 peer 的请求悄悄挤进同一个共享桶。
   - service 启动会先完成 policy/auth/audit/matcher 组合校验，再触发 DB pool 建立与 migration；
     坏配置不应先对后端产生副作用。
   - `trust_mode=untrusted` 不只是关闭高风险 capability；它还必须拒绝把 service 资源旋钮放大到
