@@ -87,56 +87,52 @@ fn read_policy_file(path: &Path) -> anyhow::Result<String> {
     }
 
     #[cfg(not(windows))]
-    let before_open = std::fs::symlink_metadata(path)
-        .map_err(|err| anyhow::anyhow!("failed to stat policy file {}: {err}", path.display()))?;
-    #[cfg(not(windows))]
-    if before_open.file_type().is_symlink() {
-        anyhow::bail!("policy path must not be a symlink: {}", path.display());
-    }
-    #[cfg(not(windows))]
-    if !before_open.is_file() {
-        anyhow::bail!("policy path is not a regular file: {}", path.display());
-    }
+    {
+        let before_open = std::fs::symlink_metadata(path).map_err(|err| {
+            anyhow::anyhow!("failed to stat policy file {}: {err}", path.display())
+        })?;
+        if before_open.file_type().is_symlink() {
+            anyhow::bail!("policy path must not be a symlink: {}", path.display());
+        }
+        if !before_open.is_file() {
+            anyhow::bail!("policy path is not a regular file: {}", path.display());
+        }
 
-    let file = open_policy_file_nofollow(path)?;
-    #[cfg(not(windows))]
-    let after_open = file.metadata().map_err(|err| {
-        anyhow::anyhow!(
-            "failed to stat opened policy file {}: {err}",
-            path.display()
-        )
-    })?;
-    #[cfg(not(windows))]
-    if !after_open.is_file() {
-        anyhow::bail!("policy path is not a regular file: {}", path.display());
-    }
-    #[cfg(not(windows))]
-    ensure_same_file(path, &before_open, &after_open)?;
+        let file = open_policy_file_nofollow(path)?;
+        let after_open = file.metadata().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to stat opened policy file {}: {err}",
+                path.display()
+            )
+        })?;
+        if !after_open.is_file() {
+            anyhow::bail!("policy path is not a regular file: {}", path.display());
+        }
+        ensure_same_file(path, &before_open, &after_open)?;
 
-    #[cfg(not(windows))]
-    let limit = u64::try_from(MAX_POLICY_BYTES)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    #[cfg(not(windows))]
-    let capacity = usize::try_from(after_open.len().min(limit))
-        .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
-        .min(MAX_POLICY_BYTES.saturating_add(1));
-    let mut bytes = Vec::<u8>::with_capacity(capacity);
-    let reader = BufReader::new(file);
-    reader
-        .take(limit)
-        .read_to_end(&mut bytes)
-        .map_err(|err| anyhow::anyhow!("failed to read policy file {}: {err}", path.display()))?;
-    if bytes.len() > MAX_POLICY_BYTES {
-        anyhow::bail!(
-            "policy file is too large ({} bytes; max {} bytes)",
-            bytes.len(),
-            MAX_POLICY_BYTES
-        );
-    }
+        let limit = u64::try_from(MAX_POLICY_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let capacity = usize::try_from(after_open.len().min(limit))
+            .unwrap_or(MAX_POLICY_BYTES.saturating_add(1))
+            .min(MAX_POLICY_BYTES.saturating_add(1));
+        let mut bytes = Vec::<u8>::with_capacity(capacity);
+        let reader = BufReader::new(file);
+        reader.take(limit).read_to_end(&mut bytes).map_err(|err| {
+            anyhow::anyhow!("failed to read policy file {}: {err}", path.display())
+        })?;
+        if bytes.len() > MAX_POLICY_BYTES {
+            anyhow::bail!(
+                "policy file is too large ({} bytes; max {} bytes)",
+                bytes.len(),
+                MAX_POLICY_BYTES
+            );
+        }
 
-    String::from_utf8(bytes)
-        .map_err(|err| anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display()))
+        String::from_utf8(bytes).map_err(|err| {
+            anyhow::anyhow!("policy file {} is not valid UTF-8: {err}", path.display())
+        })
+    }
 }
 
 #[cfg(windows)]
@@ -837,6 +833,7 @@ auth:
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn ensure_same_file_rejects_replaced_regular_file() {
         let dir = tempdir().expect("tempdir");
