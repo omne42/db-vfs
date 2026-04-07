@@ -1,7 +1,7 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 use std::net::{Ipv4Addr, SocketAddr};
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use std::sync::OnceLock;
 #[cfg(feature = "sqlite")]
 use std::time::Duration;
@@ -170,18 +170,18 @@ fn policy_allow_all() -> ServicePolicy {
     }
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 struct BackendWholeContentGuard {
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl BackendWholeContentGuard {
     fn install(limit: u64) -> Self {
         let previous = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
@@ -196,7 +196,7 @@ impl BackendWholeContentGuard {
     }
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 impl Drop for BackendWholeContentGuard {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -862,6 +862,8 @@ async fn write_then_read_postgres() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn write_then_read_line_range_postgres() {
+    let _env_guard = test_env_lock().lock().await;
+    let _whole_content_guard = BackendWholeContentGuard::install(12);
     let Some(server) = setup_postgres().await else {
         return;
     };
