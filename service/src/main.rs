@@ -28,7 +28,7 @@ struct Args {
     #[arg(long)]
     postgres: Option<String>,
 
-    /// Policy file path (.toml or .json), parsed as db_vfs_service::policy::ServicePolicy.
+    /// Policy file path (.toml, .json, .yaml, or .yml), parsed as db_vfs_service::policy::ServicePolicy.
     #[arg(long)]
     policy: std::path::PathBuf,
 

@@ -448,6 +448,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/policy-loader+docs: require an explicit `.json` / `.toml` / `.yaml` / `.yml` policy extension and add YAML parsing/interpolation support so config format selection is no longer a silent TOML fallback.
 - service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
 - ci/service/tests: add explicit `postgres`-only build/test gates for `db-vfs` and `db-vfs-service`, and gate SQLite-only test helpers so the Postgres-only feature profile stays warning-free and catches backend coupling regressions before merge.
 - service/runner tests: add deterministic coverage that timed-out blocking workers still record their eventual background completion metrics, so the timeout-with-late-completion model stays mechanically verified.
@@ -562,7 +563,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/rate-limiter: reduce per-request shard-index overhead by replacing generic hasher-based indexing with lightweight IP-key mapping.
 - service/rate-limiter: reclaim empty/low-utilization shard `HashMap` capacity at the configured prune threshold to reduce long-lived memory retention after bursty traffic.
 - service/rate-limiter: re-check per-IP buckets after prune/retry capacity paths before denying, avoiding false rejections under concurrent bucket churn at max tracked-IP limits.
-- service/rate-limiter: when a shard is fully pruned to empty, shrink its bucket map even below the high-capacity threshold to reclaim long-lived memory after bursty traffic.
 
 
 ---
@@ -836,7 +836,7 @@ section_id: "docs-src-policy-md"
 
 # Policy
 
-Service policy is loaded as `db_vfs_service::policy::ServicePolicy` (`.toml` or `.json`).
+Service policy is loaded as `db_vfs_service::policy::ServicePolicy` (`.toml`, `.json`, `.yaml`, or `.yml`).
 
 Its core VFS subset projects to `db_vfs_core::policy::VfsPolicy`; auth/audit/runtime-only fields
 stay in the service layer instead of leaking into `db-vfs-core`.
@@ -852,8 +852,10 @@ Start from [`policy.example.toml`](policy.example.toml).
 Policy files must be direct regular files. The loader rejects symlinks, directories, FIFOs,
 device nodes, and other non-regular paths before opening them, so startup cannot block
 indefinitely on a special file or silently follow an unexpected link target.
+The loader also requires an explicit `.toml`, `.json`, `.yaml`, or `.yml` extension instead of
+guessing a default format from extensionless paths.
 
-When `trust_mode=trusted`, env interpolation is applied only inside parsed JSON/TOML string
+When `trust_mode=trusted`, env interpolation is applied only inside parsed JSON/TOML/YAML string
 values. Comments and non-string fields are not treated as template input. When
 `trust_mode=untrusted`, those same string-value placeholders are rejected instead of being
 expanded.
@@ -941,7 +943,7 @@ Budget semantics:
   it constructs the final typed request body, so token-valid but workspace-disallowed `write` /
   `patch` requests fail before allocating their full request strings.
 - Service startup migrations also reuse `max_io_ms` for their connect/lock budget.
-- Omitting `limits.max_walk_ms` in JSON/TOML policy config deserializes to the default `Some(2000)`.
+- Omitting `limits.max_walk_ms` in JSON/TOML/YAML policy config deserializes to the default `Some(2000)`.
 - `glob` and `grep` use `max_walk_ms` as their runtime budget.
 - `max_walk_ms = None` keeps scan execution unbounded; DB pool wait/connect stays bounded by `max_io_ms`.
 - `max_walk_entries` counts publicly visible scan-entry work. Hidden `secret-denied` paths stay out

@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/policy-loader+docs: require an explicit `.json` / `.toml` / `.yaml` / `.yml` policy extension and add YAML parsing/interpolation support so config format selection is no longer a silent TOML fallback.
 - service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
 - ci/service/tests: add explicit `postgres`-only build/test gates for `db-vfs` and `db-vfs-service`, and gate SQLite-only test helpers so the Postgres-only feature profile stays warning-free and catches backend coupling regressions before merge.
 - service/runner tests: add deterministic coverage that timed-out blocking workers still record their eventual background completion metrics, so the timeout-with-late-completion model stays mechanically verified.
