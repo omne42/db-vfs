@@ -5,6 +5,7 @@ use db_vfs_core::policy::{
 };
 use db_vfs_core::workspace_pattern::AllowedWorkspacePattern;
 use db_vfs_core::{Error, Result};
+use omne_integrity_primitives::parse_sha256_digest;
 use serde::{Deserialize, Serialize};
 
 const MAX_AUDIT_JSONL_PATH_BYTES: usize = 4096;
@@ -276,7 +277,10 @@ fn validate_auth(auth: &AuthPolicy) -> Result<()> {
                         "auth.tokens[{idx}].token must be sha256:<64 hex chars> (use token_env_var for plaintext tokens)"
                     )));
                 };
-                if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                if token != token.trim()
+                    || hex.len() != 64
+                    || parse_sha256_digest(Some(token)).is_none()
+                {
                     return Err(Error::InvalidPolicy(format!(
                         "auth.tokens[{idx}].token must be sha256:<64 hex chars>"
                     )));

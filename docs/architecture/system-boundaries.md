@@ -119,7 +119,9 @@
     不把注释或非字符串字段当模板系统处理。
   - 当前这里仍是本仓本地实现，尚未接到 `omne_foundation` 的 config-kit。
 - `service/src/server/auth.rs`
-  - 自己做 bearer token 的 `sha256:<hex>` 解析、token68 校验和摘要匹配；
+  - bearer token 的 token68 校验、constant-time 匹配和 workspace allowlist 仍留在 service
+    边界；`sha256:<hex>` 解析与 SHA-256 摘要原语已经收口到
+    `omne-runtime/omne-integrity-primitives`，避免继续在服务层重复实现 digest 细节。
     `allowed_workspaces` 的 pattern 解析/匹配语义则复用 `core::workspace_pattern`，避免
     policy validate/runtime 分叉。
 - `src/store/mod.rs`
