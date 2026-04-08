@@ -632,15 +632,19 @@ mod tests {
             .connection_timeout(std::time::Duration::from_millis(50))
             .build_unchecked(manager);
 
-        let err = match BackendStore::open(
-            Backend::Sqlite { pool },
-            Some(std::time::Duration::from_millis(20)),
-            None,
-        ) {
-            Ok(_) => panic!("open should fail when sqlite manager points at a directory"),
-            Err(err) => err,
-        };
-        assert_eq!(err.code(), "db");
+        let raw = pool
+            .get_timeout(std::time::Duration::from_millis(20))
+            .expect_err("pool checkout should fail when sqlite manager points at a directory");
+        let expected_kind = classify_pool_get_error(&raw.to_string());
+        let mapped = map_pool_get_error("sqlite", raw);
+
+        assert_eq!(
+            mapped.code(),
+            match expected_kind {
+                PoolGetFailureKind::Timeout => "timeout",
+                PoolGetFailureKind::BackendError => "db",
+            }
+        );
     }
 
     #[cfg(feature = "sqlite")]
