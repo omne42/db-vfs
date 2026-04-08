@@ -211,6 +211,10 @@ impl<S: Store> DbVfs<S> {
     ///
     /// This still bypasses all VFS invariants; prefer `store_mut_unchecked` for any new callsites
     /// so the escape hatch is explicit at the type boundary.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use store_mut_unchecked() to make the raw-store policy bypass explicit"
+    )]
     pub fn store_mut(&mut self) -> &mut S {
         self.store_mut_unchecked()
     }

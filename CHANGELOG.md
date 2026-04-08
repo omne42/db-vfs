@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - release: keep crate versions at `0.2.0` while the public API and service contract are still
   evolving, so semver expectations remain aligned with the current pre-1.0 development model.
+- vfs/api: make the raw-store escape hatch explicit as `store_mut_unchecked()` and deprecate the
+  older `store_mut()` name so direct store mutation is no longer presented like a normal safe VFS
+  API.
 - service/auth+policy: reuse `omne-runtime`'s `omne-integrity-primitives` for `sha256:<hex>`
   parsing and SHA-256 fingerprinting so startup validation, runtime auth matching, and smoke
   tests no longer duplicate digest logic inside `db-vfs`.
@@ -46,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/audit-runtime: when a request times out but the background VFS worker later settles, emit
+  a second JSONL record with `late_completion=true` and the actual settled result instead of
+  leaving audit permanently stuck at the frontdoor `408 timeout`.
+- vfs/cas+patch: reject `expected_version = 0` across write/patch/delete, and fail projected
+  over-budget patch outputs before unified-diff apply allocates the full rewritten buffer.
 - service/policy-loader: close the stat/open race on policy files by opening with no-follow semantics and rejecting opened-file identity drift before reading, while preserving the existing string-only interpolation contract.
 - service/policy-loader+docs: require an explicit `.json` / `.toml` / `.yaml` / `.yml` policy extension and add YAML parsing/interpolation support so config format selection is no longer a silent TOML fallback.
 - service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
