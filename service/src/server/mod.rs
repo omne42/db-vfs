@@ -773,7 +773,9 @@ mod tests {
 
         let mut policy = ServicePolicy::default();
         policy.permissions.glob = true;
-        policy.limits.max_io_ms = 25;
+        // Startup migrations reuse `max_io_ms`, so keep enough headroom that the
+        // test exercises request-time lock contention rather than initialization jitter.
+        policy.limits.max_io_ms = 100;
         policy.limits.max_walk_ms = None;
 
         let router = build_app_sqlite(db_path.clone(), policy, TrustMode::Trusted, true)
@@ -805,7 +807,7 @@ mod tests {
         let response = router.oneshot(request).await.expect("glob response");
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(
-            started.elapsed() < Duration::from_millis(300),
+            started.elapsed() < Duration::from_millis(600),
             "scan request did not respect the IO lock timeout budget"
         );
 
