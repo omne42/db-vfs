@@ -25,6 +25,36 @@ pub struct PatchResponse {
 
 const MAX_PATCH_HUNKS: usize = 512;
 
+fn projected_patch_output_size(
+    existing_size_bytes: u64,
+    patch: &diffy::Patch<'_, str>,
+) -> Option<u64> {
+    let mut inserted_bytes = 0u64;
+    let mut deleted_bytes = 0u64;
+
+    for hunk in patch.hunks() {
+        for line in hunk.lines() {
+            match line {
+                diffy::Line::Insert(text) => {
+                    inserted_bytes = inserted_bytes.checked_add(u64::try_from(text.len()).ok()?)?;
+                }
+                diffy::Line::Delete(text) => {
+                    deleted_bytes = deleted_bytes.checked_add(u64::try_from(text.len()).ok()?)?;
+                }
+                diffy::Line::Context(_) => {}
+            }
+        }
+    }
+
+    let projected = i128::from(existing_size_bytes)
+        .checked_add(i128::from(inserted_bytes))?
+        .checked_sub(i128::from(deleted_bytes))?;
+    if projected < 0 {
+        return None;
+    }
+    u64::try_from(projected).ok()
+}
+
 pub(super) fn apply_unified_patch<S: crate::store::Store>(
     vfs: &mut DbVfs<S>,
     request: PatchRequest,
@@ -41,12 +71,7 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
     if vfs.redactor.is_path_denied(&requested_path) {
         return Err(Error::SecretPathDenied(requested_path));
     }
-    if request.expected_version > i64::MAX as u64 {
-        return Err(Error::Conflict(format!(
-            "expected_version is too large (max {})",
-            i64::MAX
-        )));
-    }
+    super::validate_expected_version(request.expected_version)?;
 
     let max_patch_bytes = vfs
         .policy
@@ -145,6 +170,16 @@ pub(super) fn apply_unified_patch<S: crate::store::Store>(
             path: requested_path.clone(),
             size_bytes: existing_size_bytes,
             max_bytes: max_fetch_bytes,
+        });
+    }
+
+    if let Some(projected_size_bytes) = projected_patch_output_size(existing_size_bytes, &parsed)
+        && projected_size_bytes > vfs.policy.limits.max_write_bytes
+    {
+        return Err(Error::FileTooLarge {
+            path: requested_path,
+            size_bytes: projected_size_bytes,
+            max_bytes: vfs.policy.limits.max_write_bytes,
         });
     }
 
