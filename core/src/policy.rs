@@ -13,6 +13,8 @@ const MAX_LIMIT_MAX_RESULTS: usize = 100_000;
 const MAX_LIMIT_MAX_WALK_FILES: usize = 500_000;
 const MAX_LIMIT_MAX_WALK_ENTRIES: usize = 1_000_000;
 const MAX_LIMIT_MAX_WALK_MS: u64 = 600_000;
+// Keep in sync with backend session-timeout contracts (SQLite busy_timeout / Postgres statement_timeout).
+const MAX_LIMIT_MAX_IO_MS: u64 = i32::MAX as u64;
 const MAX_LIMIT_MAX_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_SCAN_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 // Keep in sync with `core::path::normalize_path_inner` max path bytes.
@@ -389,6 +391,12 @@ impl VfsPolicy {
                 "limits.max_io_ms must be > 0".to_string(),
             ));
         }
+        if self.limits.max_io_ms > MAX_LIMIT_MAX_IO_MS {
+            return Err(Error::InvalidPolicy(format!(
+                "limits.max_io_ms is too large (max {} ms)",
+                MAX_LIMIT_MAX_IO_MS
+            )));
+        }
         if self.limits.max_concurrency_io == 0 {
             return Err(Error::InvalidPolicy(
                 "limits.max_concurrency_io must be > 0".to_string(),
@@ -546,6 +554,14 @@ mod tests {
     fn validate_rejects_too_large_max_walk_ms() {
         let mut policy = VfsPolicy::default();
         policy.limits.max_walk_ms = Some(MAX_LIMIT_MAX_WALK_MS + 1);
+        let err = policy.validate().expect_err("should fail");
+        assert_eq!(err.code(), "invalid_policy");
+    }
+
+    #[test]
+    fn validate_rejects_too_large_max_io_ms() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = MAX_LIMIT_MAX_IO_MS + 1;
         let err = policy.validate().expect_err("should fail");
         assert_eq!(err.code(), "invalid_policy");
     }
