@@ -146,6 +146,9 @@ Error body:
 `workspace_id` is a literal namespace, not a glob. It must be non-empty and must not contain
 whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved for auth
 `allowed_workspaces` pattern syntax.
+`allowed_workspaces` exact entries and trailing-`*` prefix literals must themselves satisfy the
+same `workspace_id` syntax, so impossible patterns such as `team/ops` or `team:prod-*` are
+rejected at startup instead of silently never matching.
 
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.
@@ -475,6 +478,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit-runtime: recover optional audit after sink failure by rotating the possibly corrupted JSONL file and spawning a fresh worker on the next event instead of staying permanently disconnected.
 - service/audit-runtime: keep best-effort audit on the async hot path instead of dispatching optional audit `try_send` calls through the blocking pool, while leaving required-audit fail-closed behavior unchanged.
 - service/audit-handlers: mirror malformed-request path redaction into both `requested_path` and `path` when no canonical runtime path exists, keeping invalid-path audit entries aligned with the fail-closed masking contract.
+- service/auth+docs: reject `allowed_workspaces` exact/prefix literals that cannot satisfy `workspace_id` rules, and add regression coverage that audit glob redaction keeps literal denied prefixes through pure wildcard segments.
 - core/path+redaction+traversal+service/auth+docs: centralize runtime match-path normalization for policy-derived matchers, remove `unsafe` env mutation from auth tests via an injected env lookup seam, and correct validated-matcher constructor docs to match the current strict fail-fast behavior.
 - store/api+docs: expose whether `list_metas_by_prefix_page` is native cursor pagination or the legacy compatibility fallback, and warn once per store type when the fallback is used so degraded scan semantics stay visible.
 - store/api: require every `Store` impl to declare whether chunked ranged reads and cursor pagination are native or legacy fallback paths, and fail closed when an impl claims native behavior but still hits the default compatibility fallback.
@@ -570,7 +574,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/auth: enforce constant-time full-scan token matching path while still rejecting duplicate configured token hashes.
 - core/vfs: centralize scan-response byte cap constant so policy validation and `glob`/`grep` runtime truncation stay aligned.
 - service/middleware: apply a shared fallback rate-limit bucket for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
-- vfs/scan: speed up literal `grep` matching and JSON escaped-byte accounting on ASCII-heavy content paths to reduce scan CPU overhead.
 
 
 ---
@@ -911,6 +914,7 @@ Not supported:
 
 - multiple `*` (`foo*bar*`)
 - middle wildcard (`a*b`)
+- exact or prefix literals that violate `workspace_id` rules, e.g. `team/ops`, `team:prod`, `team..prod`, `team/ops-*`
 - malformed patterns rejected by policy validation.
 
 The same `db_vfs_core::workspace_pattern` parser/matcher is used for both service policy
