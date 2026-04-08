@@ -2081,6 +2081,9 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn handle_vfs_request_audits_late_completion_after_timeout() {
+        let _guard = super::super::runner::timeout_metrics_test_lock()
+            .lock()
+            .await;
         let dir = tempfile::tempdir().expect("tempdir");
         let audit_path = dir.path().join("audit.jsonl");
         let audit =

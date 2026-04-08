@@ -176,9 +176,9 @@ semantics, including files that mix those terminators.
 raw backing text would otherwise turn patch context match/no-match into a secret oracle, so the
 service now returns `not_permitted` instead of pretending redacted files are safely patchable.
 
-`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
-a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
-lifetime by accident.
+`expected_version` must be `>= 1` whenever it is present. It is monotonic per `(workspace_id,
+path)` even across delete/recreate, so recreating a deleted file does not reset its version back
+to `1` and stale CAS tokens cannot hit a new file lifetime by accident.
 
 ## Security Baseline
 
@@ -265,6 +265,10 @@ Secrets semantics:
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
+- If a request returns `408 timeout` but the background worker later settles, audit emits a second
+  JSONL record with the same `request_id` and `late_completion=true` carrying the final settled
+  result, so operators can distinguish “timed out and later succeeded/failed” from “timed out and
+  never reconciled”.
 - Audit path/glob redaction is conservative for malformed or pattern-based secret-ish inputs too;
   values such as `.env/../visible.txt`, `".[en]nv"`, or control-character variants are masked as
   `<secret>` instead of being written through to JSONL. That masking is derived from the same
@@ -445,6 +449,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - release: keep crate versions at `0.2.0` while the public API and service contract are still
   evolving, so semver expectations remain aligned with the current pre-1.0 development model.
+- vfs/api: make the raw-store escape hatch explicit as `store_mut_unchecked()` and deprecate the
+  older `store_mut()` name so direct store mutation is no longer presented like a normal safe VFS
+  API.
 - service/auth+policy: reuse `omne-runtime`'s `omne-integrity-primitives` for `sha256:<hex>`
   parsing and SHA-256 fingerprinting so startup validation, runtime auth matching, and smoke
   tests no longer duplicate digest logic inside `db-vfs`.
@@ -462,6 +469,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- service/audit-runtime: when a request times out but the background VFS worker later settles, emit
+  a second JSONL record with `late_completion=true` and the actual settled result instead of
+  leaving audit permanently stuck at the frontdoor `408 timeout`.
+- vfs/cas+patch: reject `expected_version = 0` across write/patch/delete, and fail projected
+  over-budget patch outputs before unified-diff apply allocates the full rewritten buffer.
 - service/policy-loader: close the stat/open race on policy files by opening with no-follow semantics and rejecting opened-file identity drift before reading, while preserving the existing string-only interpolation contract.
 - service/policy-loader+docs: require an explicit `.json` / `.toml` / `.yaml` / `.yml` policy extension and add YAML parsing/interpolation support so config format selection is no longer a silent TOML fallback.
 - service/backend+docs: stop mapping pool-checkout failures with backend connect/health-check detail to `408 timeout`; healthy pool wait exhaustion still returns `timeout`, while backend bootstrap/health failures now surface as internal `db` errors.
@@ -566,14 +578,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - service/audit: preserve request-time `ts_ms` in async audit worker instead of overwriting it with worker flush time.
 - read/grep/glob/patch: tighten limit enforcement (size, redaction, scan truncation) and improve conflict/diagnostic behavior.
 - core/redaction+traversal+glob-match: reject control/NUL and parent-segment runtime paths during matcher normalization to close invalid-path bypass edges.
-- vfs/scan counters: avoid lossy `usize -> u64` casts in scan/read/patch accounting paths on wide-pointer targets.
-- vfs/glob-match: tighten fast-path canonical-path checks so non-canonical runtime paths continue through normalization and preserve match behavior.
-- store/pagination: restore compatibility for legacy `Store` implementations by adding default cursor-page fallback when only prefix listing is implemented.
-- store/pagination: optimize legacy fallback cursor scanning by avoiding redundant filtering work and adapting growth strategy based on cursor position.
-- audit: improve lock-path derivation, batch flush behavior, and failure handling for early rejection paths.
-- service/auth: enforce constant-time full-scan token matching path while still rejecting duplicate configured token hashes.
-- core/vfs: centralize scan-response byte cap constant so policy validation and `glob`/`grep` runtime truncation stay aligned.
-- service/middleware: apply a shared fallback rate-limit bucket for missing peer IP and ensure fallback request IDs for middleware-generated audit events.
 
 
 ---
@@ -777,8 +781,8 @@ Examples:
 | `delete` | yes | `v` mismatches | `conflict` |
 | `delete` | no | any | `not_found` |
 
-`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Reusing the
-same path does not reset CAS back to `1`.
+`expected_version` must be `>= 1` whenever it is present. It is monotonic per `(workspace_id,
+path)` even across delete/recreate, so reusing the same path does not reset CAS back to `1`.
 
 If `delete.ignore_missing = true`, the missing-target branch becomes `200 { deleted: false }`
 instead of `not_found`.
@@ -1064,13 +1068,16 @@ Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`,
 Request fields: `workspace_id`, `path`, `content`, `expected_version` (`u64|null`).
 
 `expected_version` is scoped to a monotonically increasing per-path version stream. Deleting and
-recreating the same `(workspace_id, path)` does not reset the version counter.
+recreating the same `(workspace_id, path)` does not reset the version counter. When present, it
+must be `>= 1`.
 
 Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`.
 
 ### `/v1/patch`
 
 Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+`expected_version` must be `>= 1`.
 
 When `secrets.redact_regexes` is active, `/v1/patch` returns `403 not_permitted` instead of
 applying unified diffs against the raw backing text. This closes the otherwise unavoidable oracle
@@ -1082,6 +1089,8 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing`
 (`bool`, optional, default `false`).
+
+When present, `expected_version` must be `>= 1`.
 
 When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false`
 instead of `404 not_found`.
@@ -1178,7 +1187,9 @@ until any required audit append+flush completes.
 `timeout` is reserved for request-budget exhaustion while waiting or executing, such as body
 buffering/decode, healthy pool checkout wait, or DB lock/query runtime. If pooled checkout already
 contains a backend connect/health-check failure detail, the service surfaces that path as an
-internal `db` error instead of `timeout`.
+internal `db` error instead of `timeout`. When audit is enabled and the timed-out background worker
+later settles, JSONL also gains a second record with the same `request_id` and
+`late_completion=true` carrying that final result.
 
 The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
 escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
@@ -1191,7 +1202,8 @@ token attempts without persisting the raw credential.
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution): verify state before replaying writes, and use the audit trail's optional `late_completion=true` follow-up event when available to reconcile the final settled result.
+- `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `503 audit_unavailable`: restore audit backend health first; for writes, check current file state before deciding whether to retry.
 - `500 db`: inspect service logs plus backend/pool health first; retry only after the server-side fault is understood or cleared.
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
@@ -1219,7 +1231,7 @@ section_id: "docs-src-storage-md"
 
 | Backend | Timeout mechanism | On timeout |
 | --- | --- | --- |
-| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background |
+| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background, and audit can later emit a `late_completion=true` reconciliation record |
 | Postgres | per-request `statement_timeout` + service wall-clock | query canceled and surfaced as `timeout` |
 
 Retry decision still depends on operation semantics (`conflict`, idempotency, etc).
@@ -1353,12 +1365,18 @@ Core fields:
 | `status` | u16 | yes | HTTP status |
 | `workspace_id` | string | yes | `<unknown>` for early rejects |
 | `auth_subject` | string|null | no | stable bearer-token fingerprint (`sha256:<64 hex>`) when available |
+| `late_completion` | bool|null | no | present only on the follow-up audit record emitted after a request already returned `408 timeout` |
 | `peer_ip` | string|null | no | TCP peer IP when available |
 | `error_code` | string|null | no | stable error code |
 
 `auth_subject` is derived from the presented or matched bearer token hash, never from the raw
 token text. Requests running with `--unsafe-no-auth` or malformed/missing `Authorization` headers
 leave the field empty because no stable authenticated subject exists.
+
+When `late_completion = true`, the event is a second audit record for the same `request_id` after
+the client already saw `408 timeout`. Its `status` / `error_code` fields describe the final
+settled background result so operators can reconcile whether the timed-out work later succeeded,
+conflicted, or failed.
 
 ## `peer_ip` handling
 

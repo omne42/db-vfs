@@ -26,12 +26,18 @@ Core fields:
 | `status` | u16 | yes | HTTP status |
 | `workspace_id` | string | yes | `<unknown>` for early rejects |
 | `auth_subject` | string|null | no | stable bearer-token fingerprint (`sha256:<64 hex>`) when available |
+| `late_completion` | bool|null | no | present only on the follow-up audit record emitted after a request already returned `408 timeout` |
 | `peer_ip` | string|null | no | TCP peer IP when available |
 | `error_code` | string|null | no | stable error code |
 
 `auth_subject` is derived from the presented or matched bearer token hash, never from the raw
 token text. Requests running with `--unsafe-no-auth` or malformed/missing `Authorization` headers
 leave the field empty because no stable authenticated subject exists.
+
+When `late_completion = true`, the event is a second audit record for the same `request_id` after
+the client already saw `408 timeout`. Its `status` / `error_code` fields describe the final
+settled background result so operators can reconcile whether the timed-out work later succeeded,
+conflicted, or failed.
 
 ## `peer_ip` handling
 

@@ -198,7 +198,7 @@ fn record_timed_out_worker_completion(elapsed: Duration) {
 }
 
 #[cfg(test)]
-fn timeout_metrics_test_lock() -> &'static tokio::sync::Mutex<()> {
+pub(super) fn timeout_metrics_test_lock() -> &'static tokio::sync::Mutex<()> {
     TIMEOUT_METRICS_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 

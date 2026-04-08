@@ -141,9 +141,9 @@ semantics, including files that mix those terminators.
 raw backing text would otherwise turn patch context match/no-match into a secret oracle, so the
 service now returns `not_permitted` instead of pretending redacted files are safely patchable.
 
-`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Recreating
-a deleted file does not reset its version back to `1`, so stale CAS tokens cannot hit a new file
-lifetime by accident.
+`expected_version` must be `>= 1` whenever it is present. It is monotonic per `(workspace_id,
+path)` even across delete/recreate, so recreating a deleted file does not reset its version back
+to `1` and stale CAS tokens cannot hit a new file lifetime by accident.
 
 ## Security Baseline
 
@@ -230,6 +230,10 @@ Secrets semantics:
 - If required audit append/flush fails after startup, the service returns `503 audit_unavailable`;
   the operation may already have completed, so clients should verify state before retrying writes.
   The same error is used when required audit cannot finish within the request's remaining runtime budget.
+- If a request returns `408 timeout` but the background worker later settles, audit emits a second
+  JSONL record with the same `request_id` and `late_completion=true` carrying the final settled
+  result, so operators can distinguish “timed out and later succeeded/failed” from “timed out and
+  never reconciled”.
 - Audit path/glob redaction is conservative for malformed or pattern-based secret-ish inputs too;
   values such as `.env/../visible.txt`, `".[en]nv"`, or control-character variants are masked as
   `<secret>` instead of being written through to JSONL. That masking is derived from the same

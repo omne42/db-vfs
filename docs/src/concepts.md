@@ -34,8 +34,8 @@ Examples:
 | `delete` | yes | `v` mismatches | `conflict` |
 | `delete` | no | any | `not_found` |
 
-`expected_version` is monotonic per `(workspace_id, path)` even across delete/recreate. Reusing the
-same path does not reset CAS back to `1`.
+`expected_version` must be `>= 1` whenever it is present. It is monotonic per `(workspace_id,
+path)` even across delete/recreate, so reusing the same path does not reset CAS back to `1`.
 
 If `delete.ignore_missing = true`, the missing-target branch becomes `200 { deleted: false }`
 instead of `not_found`.

@@ -13,7 +13,7 @@
 
 | Backend | Timeout mechanism | On timeout |
 | --- | --- | --- |
-| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background |
+| SQLite | per-request `busy_timeout` + service wall-clock + interrupt handle | returns `timeout`; interrupted work may finish shortly in background, and audit can later emit a `late_completion=true` reconciliation record |
 | Postgres | per-request `statement_timeout` + service wall-clock | query canceled and surfaced as `timeout` |
 
 Retry decision still depends on operation semantics (`conflict`, idempotency, etc).

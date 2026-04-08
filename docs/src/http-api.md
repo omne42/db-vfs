@@ -39,13 +39,16 @@ Response fields: `requested_path`, `path`, `bytes_read`, `content`, `truncated`,
 Request fields: `workspace_id`, `path`, `content`, `expected_version` (`u64|null`).
 
 `expected_version` is scoped to a monotonically increasing per-path version stream. Deleting and
-recreating the same `(workspace_id, path)` does not reset the version counter.
+recreating the same `(workspace_id, path)` does not reset the version counter. When present, it
+must be `>= 1`.
 
 Response fields: `requested_path`, `path`, `bytes_written`, `created`, `version`.
 
 ### `/v1/patch`
 
 Request fields: `workspace_id`, `path`, `patch`, `expected_version` (`u64`, required).
+
+`expected_version` must be `>= 1`.
 
 When `secrets.redact_regexes` is active, `/v1/patch` returns `403 not_permitted` instead of
 applying unified diffs against the raw backing text. This closes the otherwise unavoidable oracle
@@ -57,6 +60,8 @@ Response fields: `requested_path`, `path`, `bytes_written`, `version`.
 
 Request fields: `workspace_id`, `path`, `expected_version` (`u64|null`), `ignore_missing`
 (`bool`, optional, default `false`).
+
+When present, `expected_version` must be `>= 1`.
 
 When `ignore_missing = true`, deleting a missing target returns `200` with `deleted = false`
 instead of `404 not_found`.
@@ -153,7 +158,9 @@ until any required audit append+flush completes.
 `timeout` is reserved for request-budget exhaustion while waiting or executing, such as body
 buffering/decode, healthy pool checkout wait, or DB lock/query runtime. If pooled checkout already
 contains a backend connect/health-check failure detail, the service surfaces that path as an
-internal `db` error instead of `timeout`.
+internal `db` error instead of `timeout`. When audit is enabled and the timed-out background worker
+later settles, JSONL also gains a second record with the same `request_id` and
+`late_completion=true` carrying that final result.
 
 The router-side body cap still has a hard upper bound, but it now budgets worst-case JSON string
 escape expansion for `write` / `patch` bodies so requests that are valid after decode are not
@@ -166,7 +173,8 @@ token attempts without persisting the raw credential.
 
 ## Retry guidance
 
-- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution), `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
+- `408 timeout` (operation may still complete; typically healthy pool wait, lock wait, or in-flight execution): verify state before replaying writes, and use the audit trail's optional `late_completion=true` follow-up event when available to reconcile the final settled result.
+- `429 rate_limited`, `503 busy`: exponential backoff (e.g., 100ms, 250ms, 500ms, max 3-5 retries).
 - `503 audit_unavailable`: restore audit backend health first; for writes, check current file state before deciding whether to retry.
 - `500 db`: inspect service logs plus backend/pool health first; retry only after the server-side fault is understood or cleared.
 - `409 conflict`: fetch latest version and retry with fresh `expected_version`.
