@@ -231,7 +231,7 @@ async fn log_unauthorized(
                 .await
                 .map_err(IntoResponse::into_response)?
         {
-            super::log_audit_event_with_permit(audit, event, permit, budget)
+            let _permit = super::log_audit_event_with_permit(audit, event, permit, budget)
                 .await
                 .map_err(IntoResponse::into_response)?;
         } else {

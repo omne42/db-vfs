@@ -117,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - vfs/glob+grep pagination: advance the cursor only when another page is expected, trimming redundant cursor string writes on terminal pages.
 - service/request-id: saturate UNIX-millis narrowing when generating `x-request-id` to avoid lossy timestamp wrap on extreme clock values.
 - service/handlers timeout budgeting: stop queueing behind saturated semaphores so request budgets are not spent before execution starts.
+- service/frontdoor: keep a timed-out blocking JSON decode worker on the original `max_concurrency_*` permit until that worker actually unwinds, so schema/body decode timeouts cannot keep running in the background after the frontdoor slot has already been released.
 - service/handlers+audit: allow embedded routers to run without `ConnectInfo`, omitting `peer_ip` instead of failing requests, and make `audit.required=true` wait for per-request write/flush acknowledgement so write failures surface to the triggering request.
 - service/handlers timeout budgeting: guard `tokio::Instant` deadline construction with `checked_add` so extremely large budgets no longer panic on overflow, and fast-fail zero-budget requests before semaphore wait.
 - vfs/grep + core/redaction: build regex error previews lazily only on compile failure, removing avoidable per-request/per-rule string allocations on successful paths.

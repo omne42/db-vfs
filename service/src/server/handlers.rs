@@ -186,33 +186,61 @@ fn json_decode_timeout_error() -> (StatusCode, Json<super::ErrorBody>) {
     )
 }
 
+struct TimedOutJsonDecode<T> {
+    handle: tokio::task::JoinHandle<T>,
+}
+
+impl<T: Send + 'static> TimedOutJsonDecode<T> {
+    fn retain_permit_until_completion(self, permit: tokio::sync::OwnedSemaphorePermit) {
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(err) = self.handle.await {
+                tracing::warn!(
+                    err = %err,
+                    "timed-out JSON decode worker failed before reporting completion"
+                );
+            }
+        });
+    }
+}
+
+enum JsonDecodeStageError<T> {
+    TimedOut(TimedOutJsonDecode<T>),
+    Response((StatusCode, Json<super::ErrorBody>)),
+}
+
 async fn run_json_decode_stage<T, F>(
     budget: Option<Duration>,
     f: F,
-) -> Result<(T, Option<Duration>), (StatusCode, Json<super::ErrorBody>)>
+) -> Result<(T, Option<Duration>), JsonDecodeStageError<T>>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     if budget.is_some_and(|limit| limit.is_zero()) {
-        return Err(json_decode_timeout_error());
+        let (status, body) = json_decode_timeout_error();
+        return Err(JsonDecodeStageError::Response((status, body)));
     }
 
     let started = Instant::now();
-    let decode = tokio::task::spawn_blocking(f);
+    let mut decode = tokio::task::spawn_blocking(f);
     let output = if let Some(timeout) = budget {
-        match tokio::time::timeout(timeout, decode).await {
+        match tokio::time::timeout(timeout, &mut decode).await {
             Ok(output) => output,
-            Err(_) => return Err(json_decode_timeout_error()),
+            Err(_) => {
+                return Err(JsonDecodeStageError::TimedOut(TimedOutJsonDecode {
+                    handle: decode,
+                }));
+            }
         }
     } else {
         decode.await
     };
     let remaining = budget.map(|limit| limit.saturating_sub(started.elapsed()));
     let output = output.map_err(|err| {
-        super::map_err(db_vfs_core::Error::Db(format!(
+        JsonDecodeStageError::Response(super::map_err(db_vfs_core::Error::Db(format!(
             "json decode worker failed: {err}"
-        )))
+        ))))
     })?;
     Ok((output, remaining))
 }
@@ -661,7 +689,7 @@ async fn log_request_rejection_audit(
     body: &super::ErrorBody,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     remaining: Option<Duration>,
-) -> Result<(), (StatusCode, Json<super::ErrorBody>)> {
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, (StatusCode, Json<super::ErrorBody>)> {
     let RejectionAuditContext {
         state,
         event_ctx,
@@ -672,15 +700,17 @@ async fn log_request_rejection_audit(
         let mut event = event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
         audit_err(state, &mut event, body);
         if let Some(permit) = permit {
-            super::log_audit_event_with_permit(audit, event, permit, remaining).await?;
+            let permit =
+                super::log_audit_event_with_permit(audit, event, permit, remaining).await?;
+            return Ok(Some(permit));
         } else {
             super::log_audit_event(audit, event).await?;
         }
-    } else if let Some(permit) = permit {
-        drop(permit);
+    } else {
+        return Ok(permit);
     }
 
-    Ok(())
+    Ok(None)
 }
 
 fn request_ctx(
@@ -801,26 +831,130 @@ where
             }
             Err((status, Json(body))) => return Err((status, Json(body))),
         };
-    let (prelude, decode_remaining) = run_json_decode_stage(remaining, {
+    let (prelude, decode_remaining) = match run_json_decode_stage(remaining, {
         let patterns = auth.allowed_workspaces.clone();
         let body = body.clone();
         move || preflight_workspace_authorization(&patterns, body.as_ref())
     })
-    .await?;
+    .await
+    {
+        Ok(stage) => stage,
+        Err(JsonDecodeStageError::Response((status, Json(body)))) => {
+            let _permit = log_request_rejection_audit(
+                RejectionAuditContext {
+                    state: &state,
+                    event_ctx: audit_event_ctx,
+                    audit_err: audit_err_noop,
+                },
+                AuditRequest {
+                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                    requested_path: None,
+                    path_prefix: None,
+                    glob_pattern: None,
+                    grep_regex: None,
+                    grep_query_len: None,
+                },
+                status,
+                &body,
+                Some(permit),
+                remaining,
+            )
+            .await?;
+            return Err((status, Json(body)));
+        }
+        Err(JsonDecodeStageError::TimedOut(worker)) => {
+            let (status, Json(body)) = json_decode_timeout_error();
+            let permit = log_request_rejection_audit(
+                RejectionAuditContext {
+                    state: &state,
+                    event_ctx: audit_event_ctx,
+                    audit_err: audit_err_noop,
+                },
+                AuditRequest {
+                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                    requested_path: None,
+                    path_prefix: None,
+                    glob_pattern: None,
+                    grep_regex: None,
+                    grep_query_len: None,
+                },
+                status,
+                &body,
+                Some(permit),
+                Some(Duration::ZERO),
+            )
+            .await?
+            .expect("JSON decode timeout should return the retained permit");
+            worker.retain_permit_until_completion(permit);
+            return Err((status, Json(body)));
+        }
+    };
     remaining = decode_remaining;
     let req = match prelude {
         PreludeDecision::Continue => {
-            let (decoded, decode_remaining) = run_json_decode_stage(remaining, {
+            let (decoded, decode_remaining) = match run_json_decode_stage(remaining, {
                 let body = body.clone();
                 move || serde_json::from_slice::<Req>(&body)
             })
-            .await?;
+            .await
+            {
+                Ok(stage) => stage,
+                Err(JsonDecodeStageError::Response((status, Json(body)))) => {
+                    let _permit = log_request_rejection_audit(
+                        RejectionAuditContext {
+                            state: &state,
+                            event_ctx: audit_event_ctx,
+                            audit_err: audit_err_noop,
+                        },
+                        AuditRequest {
+                            workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                            requested_path: None,
+                            path_prefix: None,
+                            glob_pattern: None,
+                            grep_regex: None,
+                            grep_query_len: None,
+                        },
+                        status,
+                        &body,
+                        Some(permit),
+                        remaining,
+                    )
+                    .await?;
+                    return Err((status, Json(body)));
+                }
+                Err(JsonDecodeStageError::TimedOut(worker)) => {
+                    let (status, Json(body)) = json_decode_timeout_error();
+                    let permit = log_request_rejection_audit(
+                        RejectionAuditContext {
+                            state: &state,
+                            event_ctx: audit_event_ctx,
+                            audit_err: audit_err_noop,
+                        },
+                        AuditRequest {
+                            workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                            requested_path: None,
+                            path_prefix: None,
+                            glob_pattern: None,
+                            grep_regex: None,
+                            grep_query_len: None,
+                        },
+                        status,
+                        &body,
+                        Some(permit),
+                        Some(Duration::ZERO),
+                    )
+                    .await?
+                    .expect("JSON decode timeout should return the retained permit");
+                    worker.retain_permit_until_completion(permit);
+                    return Err((status, Json(body)));
+                }
+            };
             remaining = decode_remaining;
             match decoded {
                 Ok(req) => req,
                 Err(err) => {
                     let (status, Json(body)) = map_json_slice_error(err);
-                    log_request_rejection_audit(
+                    let _permit = log_request_rejection_audit(
                         RejectionAuditContext {
                             state: &state,
                             event_ctx: audit_event_ctx,
@@ -849,7 +983,7 @@ where
             status,
             body,
         } => {
-            log_request_rejection_audit(
+            let _permit = log_request_rejection_audit(
                 RejectionAuditContext {
                     state: &state,
                     event_ctx: audit_event_ctx,
@@ -869,7 +1003,7 @@ where
 
     if let Err(err) = db_vfs_core::path::validate_workspace_id(req.workspace_id()) {
         let (status, Json(body)) = super::map_err(err);
-        log_request_rejection_audit(
+        let _permit = log_request_rejection_audit(
             RejectionAuditContext {
                 state: &state,
                 event_ctx: audit_event_ctx,
@@ -898,7 +1032,8 @@ where
                 let mut event = audit_event_ctx.build_event(audit_req, StatusCode::OK, None);
                 audit_ok(&state, &mut event, &resp);
                 let audit_budget = audit_budget_after_execution(&state, runtime_budget, started);
-                super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
+                let _permit =
+                    super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
             } else {
                 drop(permit);
             }
@@ -911,14 +1046,15 @@ where
                     audit_event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
                 audit_err(&state, &mut event, &body);
                 let audit_budget = audit_budget_after_execution(&state, runtime_budget, started);
-                super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
+                let _permit =
+                    super::log_audit_event_with_permit(audit, event, permit, audit_budget).await?;
             } else {
                 drop(permit);
             }
             Err((status, Json(body)))
         }
         (Err((permit, status, Json(body))), audit_req) => {
-            log_request_rejection_audit(
+            let _permit = log_request_rejection_audit(
                 RejectionAuditContext {
                     state: &state,
                     event_ctx: audit_event_ctx,
@@ -1100,9 +1236,9 @@ pub(super) async fn grep(
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditEventContext, AuditRequest, PermitThenBufferJson, PreludeDecision, audit_preview,
-        preflight_workspace_authorization, run_json_decode_stage, try_acquire_permit,
-        try_acquire_permit_then_buffer_json,
+        AuditEventContext, AuditRequest, JsonDecodeStageError, PermitThenBufferJson,
+        PreludeDecision, audit_preview, preflight_workspace_authorization, run_json_decode_stage,
+        try_acquire_permit, try_acquire_permit_then_buffer_json,
     };
     #[cfg(feature = "sqlite")]
     use super::{AuditHooks, VfsLimits, handle_vfs_request, io_limits, request_ctx};
@@ -1372,8 +1508,49 @@ mod tests {
         .await
         .expect_err("slow decode should consume the remaining JSON budget");
 
-        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(err.1.0.code, "timeout");
+        assert!(matches!(err, JsonDecodeStageError::TimedOut(_)));
+    }
+
+    #[tokio::test]
+    async fn timed_out_json_decode_can_keep_permit_until_worker_finishes() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire initial permit");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let timeout = run_json_decode_stage(Some(Duration::from_millis(10)), move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_millis(60));
+        })
+        .await
+        .expect_err("slow decode should time out");
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("worker started")
+            .expect("start signal");
+
+        let JsonDecodeStageError::TimedOut(worker) = timeout else {
+            panic!("expected decode timeout worker");
+        };
+        worker.retain_permit_until_completion(permit);
+
+        let immediate =
+            tokio::time::timeout(Duration::from_millis(20), semaphore.clone().acquire_owned())
+                .await;
+        assert!(
+            immediate.is_err(),
+            "timed-out decode should keep the original permit until the worker unwinds"
+        );
+
+        let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
+            .await
+            .expect("timed-out decode should eventually release the permit")
+            .expect("acquire permit after decode unwind");
+        drop(permit);
     }
 
     #[test]
@@ -2009,7 +2186,7 @@ mod tests {
         );
 
         control.release_success();
-        task.await.expect("audit task join").expect("audit log");
+        drop(task.await.expect("audit task join").expect("audit log"));
 
         let reacquired = semaphore
             .clone()
