@@ -67,6 +67,7 @@ Not supported:
 
 - multiple `*` (`foo*bar*`)
 - middle wildcard (`a*b`)
+- exact or prefix literals that violate `workspace_id` rules, e.g. `team/ops`, `team:prod`, `team..prod`, `team/ops-*`
 - malformed patterns rejected by policy validation.
 
 The same `db_vfs_core::workspace_pattern` parser/matcher is used for both service policy

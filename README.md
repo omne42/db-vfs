@@ -111,6 +111,9 @@ Error body:
 `workspace_id` is a literal namespace, not a glob. It must be non-empty and must not contain
 whitespace, path separators, `:`, `..`, or `*`. The `*` character is reserved for auth
 `allowed_workspaces` pattern syntax.
+`allowed_workspaces` exact entries and trailing-`*` prefix literals must themselves satisfy the
+same `workspace_id` syntax, so impossible patterns such as `team/ops` or `team:prod-*` are
+rejected at startup instead of silently never matching.
 
 `ignore_missing = true` makes `/v1/delete` idempotent for absent targets by returning
 `200 {"deleted":false,...}`.

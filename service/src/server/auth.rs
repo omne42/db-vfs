@@ -6,6 +6,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use db_vfs_core::path::validate_workspace_id;
 use omne_integrity_primitives::{Sha256Digest, hash_sha256, parse_sha256_digest};
 
 use crate::policy::AuthPolicy;
@@ -43,13 +44,28 @@ pub(super) struct AuthContext {
 fn compile_workspace_patterns(patterns: &[String]) -> anyhow::Result<Arc<[WorkspacePattern]>> {
     let mut compiled = Vec::with_capacity(patterns.len());
     for pattern in patterns {
-        compiled.push(
-            WorkspacePattern::parse(pattern).map_err(|err| {
-                anyhow::anyhow!("invalid auth workspace pattern {pattern:?}: {err}")
-            })?,
-        );
+        let parsed = WorkspacePattern::parse(pattern)
+            .map_err(|err| anyhow::anyhow!("invalid auth workspace pattern {pattern:?}: {err}"))?;
+        validate_workspace_pattern_literal(pattern, &parsed)?;
+        compiled.push(parsed);
     }
     Ok(Arc::from(compiled))
+}
+
+fn validate_workspace_pattern_literal(
+    raw_pattern: &str,
+    pattern: &WorkspacePattern,
+) -> anyhow::Result<()> {
+    let literal = match pattern {
+        WorkspacePattern::Any => return Ok(()),
+        WorkspacePattern::Prefix(prefix) | WorkspacePattern::Exact(prefix) => prefix,
+    };
+
+    validate_workspace_id(literal).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid auth workspace pattern {raw_pattern:?}: literal portion must satisfy workspace_id rules: {err}"
+        )
+    })
 }
 
 pub(super) fn build_auth_mode(
@@ -434,6 +450,19 @@ mod tests {
         let err = compile_workspace_patterns(&[String::from("team a")])
             .expect_err("whitespace-bearing pattern should fail");
         assert!(err.to_string().contains("must not contain whitespace"));
+    }
+
+    #[test]
+    fn compile_workspace_patterns_rejects_literals_that_cannot_match_legal_workspace_ids() {
+        for pattern in ["team/ops", "team:prod", "team..prod", "team/ops-*"] {
+            let err = compile_workspace_patterns(&[pattern.to_string()])
+                .expect_err("illegal workspace pattern literal should fail");
+            assert!(
+                err.to_string()
+                    .contains("literal portion must satisfy workspace_id rules"),
+                "unexpected error for {pattern:?}: {err}"
+            );
+        }
     }
 
     #[test]
