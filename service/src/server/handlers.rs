@@ -713,6 +713,17 @@ async fn log_request_rejection_audit(
     Ok(None)
 }
 
+fn require_retained_permit(
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    context: &'static str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, Json<super::ErrorBody>)> {
+    permit.ok_or_else(|| {
+        super::map_err(db_vfs_core::Error::Db(format!(
+            "{context}: missing retained permit after audit logging"
+        )))
+    })
+}
+
 fn request_ctx(
     peer: Option<SocketAddr>,
     state: super::AppState,
@@ -864,27 +875,29 @@ where
         }
         Err(JsonDecodeStageError::TimedOut(worker)) => {
             let (status, Json(body)) = json_decode_timeout_error();
-            let permit = log_request_rejection_audit(
-                RejectionAuditContext {
-                    state: &state,
-                    event_ctx: audit_event_ctx,
-                    audit_err: audit_err_noop,
-                },
-                AuditRequest {
-                    workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                    requested_path: None,
-                    path_prefix: None,
-                    glob_pattern: None,
-                    grep_regex: None,
-                    grep_query_len: None,
-                },
-                status,
-                &body,
-                Some(permit),
-                Some(Duration::ZERO),
-            )
-            .await?
-            .expect("JSON decode timeout should return the retained permit");
+            let permit = require_retained_permit(
+                log_request_rejection_audit(
+                    RejectionAuditContext {
+                        state: &state,
+                        event_ctx: audit_event_ctx,
+                        audit_err: audit_err_noop,
+                    },
+                    AuditRequest {
+                        workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                        requested_path: None,
+                        path_prefix: None,
+                        glob_pattern: None,
+                        grep_regex: None,
+                        grep_query_len: None,
+                    },
+                    status,
+                    &body,
+                    Some(permit),
+                    Some(Duration::ZERO),
+                )
+                .await?,
+                "timed-out JSON preflight decode",
+            )?;
             worker.retain_permit_until_completion(permit);
             return Err((status, Json(body)));
         }
@@ -924,27 +937,29 @@ where
                 }
                 Err(JsonDecodeStageError::TimedOut(worker)) => {
                     let (status, Json(body)) = json_decode_timeout_error();
-                    let permit = log_request_rejection_audit(
-                        RejectionAuditContext {
-                            state: &state,
-                            event_ctx: audit_event_ctx,
-                            audit_err: audit_err_noop,
-                        },
-                        AuditRequest {
-                            workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
-                            requested_path: None,
-                            path_prefix: None,
-                            glob_pattern: None,
-                            grep_regex: None,
-                            grep_query_len: None,
-                        },
-                        status,
-                        &body,
-                        Some(permit),
-                        Some(Duration::ZERO),
-                    )
-                    .await?
-                    .expect("JSON decode timeout should return the retained permit");
+                    let permit = require_retained_permit(
+                        log_request_rejection_audit(
+                            RejectionAuditContext {
+                                state: &state,
+                                event_ctx: audit_event_ctx,
+                                audit_err: audit_err_noop,
+                            },
+                            AuditRequest {
+                                workspace_id: super::audit::UNKNOWN_WORKSPACE_ID.to_string(),
+                                requested_path: None,
+                                path_prefix: None,
+                                glob_pattern: None,
+                                grep_regex: None,
+                                grep_query_len: None,
+                            },
+                            status,
+                            &body,
+                            Some(permit),
+                            Some(Duration::ZERO),
+                        )
+                        .await?,
+                        "timed-out typed JSON decode",
+                    )?;
                     worker.retain_permit_until_completion(permit);
                     return Err((status, Json(body)));
                 }
