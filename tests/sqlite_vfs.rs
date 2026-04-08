@@ -199,6 +199,22 @@ fn write_rejects_expected_version_overflow() {
 }
 
 #[test]
+fn write_rejects_expected_version_zero() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let err = vfs
+        .write(WriteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            content: "hello".to_string(),
+            expected_version: Some(0),
+        })
+        .expect_err("should reject expected_version zero");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
 fn delete_ignore_missing_returns_deleted_false() {
     let policy = policy_all_perms();
     let mut vfs = open_vfs(policy);
@@ -222,10 +238,10 @@ fn glob_scan_diagnostics_exclude_secret_denied_entries() {
     let mut vfs = open_vfs(policy);
     let now = now_ms();
 
-    vfs.store_mut()
+    vfs.store_mut_unchecked()
         .insert_file_new("ws", "docs/a.txt", "hello\n", now)
         .expect("seed visible path");
-    vfs.store_mut()
+    vfs.store_mut_unchecked()
         .insert_file_new("ws", "docs/.env", "SECRET=1\n", now)
         .expect("seed denied path");
 
@@ -250,10 +266,10 @@ fn grep_scan_diagnostics_exclude_secret_denied_entries() {
     let mut vfs = open_vfs(policy);
     let now = now_ms();
 
-    vfs.store_mut()
+    vfs.store_mut_unchecked()
         .insert_file_new("ws", "docs/a.txt", "needle\n", now)
         .expect("seed visible path");
-    vfs.store_mut()
+    vfs.store_mut_unchecked()
         .insert_file_new("ws", "docs/.env", "needle\n", now)
         .expect("seed denied path");
 
@@ -331,6 +347,22 @@ fn delete_rejects_expected_version_overflow() {
             ignore_missing: true,
         })
         .expect_err("should reject expected_version overflow");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn delete_rejects_expected_version_zero() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    let err = vfs
+        .delete(DeleteRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            expected_version: Some(0),
+            ignore_missing: true,
+        })
+        .expect_err("should reject expected_version zero");
     assert_eq!(err.code(), "conflict");
 }
 
@@ -570,6 +602,62 @@ fn patch_rejects_expected_version_overflow() {
         })
         .expect_err("should reject expected_version overflow");
     assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn patch_rejects_expected_version_zero() {
+    let policy = policy_all_perms();
+    let mut vfs = open_vfs(policy);
+
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "docs/a.txt".to_string(),
+        content: "hello\n".to_string(),
+        expected_version: None,
+    })
+    .expect("seed write");
+
+    let err = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            patch: "".to_string(),
+            expected_version: 0,
+        })
+        .expect_err("should reject expected_version zero");
+    assert_eq!(err.code(), "conflict");
+}
+
+#[test]
+fn patch_rejects_projected_over_budget_output_before_apply() {
+    let mut policy = policy_all_perms();
+    policy.limits.max_write_bytes = 4;
+    let mut vfs = open_vfs(policy);
+
+    vfs.write(WriteRequest {
+        workspace_id: "ws".to_string(),
+        path: "docs/a.txt".to_string(),
+        content: "a\n".to_string(),
+        expected_version: None,
+    })
+    .expect("seed write");
+
+    let err = vfs
+        .apply_unified_patch(PatchRequest {
+            workspace_id: "ws".to_string(),
+            path: "docs/a.txt".to_string(),
+            patch: concat!(
+                "--- a/docs/a.txt\n",
+                "+++ b/docs/a.txt\n",
+                "@@ -1 +1 @@\n",
+                "-z\n",
+                "+12345\n",
+            )
+            .to_string(),
+            expected_version: 1,
+        })
+        .expect_err("projected oversize output should fail before diff apply");
+    assert_eq!(err.code(), "file_too_large");
 }
 
 #[test]

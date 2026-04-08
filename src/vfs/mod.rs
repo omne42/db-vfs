@@ -197,8 +197,22 @@ impl<S: Store> DbVfs<S> {
         self.policy.as_ref()
     }
 
-    pub fn store_mut(&mut self) -> &mut S {
+    /// Bypasses all VFS policy and path invariants to mutate the raw store directly.
+    ///
+    /// This exists only for tests and narrow integration glue that must seed or inspect
+    /// backend state underneath the VFS contract.
+    #[doc(hidden)]
+    pub fn store_mut_unchecked(&mut self) -> &mut S {
         &mut self.store
+    }
+
+    #[doc(hidden)]
+    /// Compatibility shim for existing tests/integration glue.
+    ///
+    /// This still bypasses all VFS invariants; prefer `store_mut_unchecked` for any new callsites
+    /// so the escape hatch is explicit at the type boundary.
+    pub fn store_mut(&mut self) -> &mut S {
+        self.store_mut_unchecked()
     }
 }
 
@@ -245,6 +259,26 @@ impl<S> DbVfs<S> {
             Err(Error::NotPermitted(format!("{op} is disabled by policy")))
         }
     }
+}
+
+pub(super) fn validate_expected_version(expected_version: u64) -> Result<()> {
+    if expected_version == 0 {
+        return Err(Error::Conflict("expected_version must be >= 1".to_string()));
+    }
+    if expected_version > i64::MAX as u64 {
+        return Err(Error::Conflict(format!(
+            "expected_version is too large (max {})",
+            i64::MAX
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_optional_expected_version(expected_version: Option<u64>) -> Result<()> {
+    if let Some(expected_version) = expected_version {
+        validate_expected_version(expected_version)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
