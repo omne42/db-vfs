@@ -85,14 +85,7 @@ async fn run_blocking<T>(
     permit: tokio::sync::OwnedSemaphorePermit,
     cancel: Option<Arc<CancelState>>,
     f: impl FnOnce() -> db_vfs::Result<T> + Send + 'static,
-) -> Result<
-    (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
-    (
-        tokio::sync::OwnedSemaphorePermit,
-        StatusCode,
-        Json<super::ErrorBody>,
-    ),
->
+) -> Result<(db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit), RunBlockingError<T>>
 where
     T: Send + 'static,
 {
@@ -110,17 +103,6 @@ where
                 if let Some(cancel) = cancel {
                     cancel.request_cancel();
                 }
-                tokio::spawn(async move {
-                    match handle.await {
-                        Ok((_result, elapsed)) => record_timed_out_worker_completion(elapsed),
-                        Err(err) => {
-                            tracing::warn!(
-                                err = %err,
-                                "timed-out db-vfs worker failed before reporting completion"
-                            );
-                        }
-                    }
-                });
                 let timeout_count = TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                 if timeout_count == 1 || timeout_count.is_multiple_of(100) {
                     tracing::warn!(
@@ -134,7 +116,12 @@ where
                     "timeout",
                     "request timed out; operation status is unknown and may still complete",
                 );
-                return Err((permit, status, body));
+                return Err(RunBlockingError::TimedOut {
+                    permit,
+                    completion: TimedOutCompletion { handle },
+                    status,
+                    body,
+                });
             }
         }
     } else {
@@ -145,10 +132,44 @@ where
         Ok(result) => result,
         Err(err) => {
             let (status, body) = super::map_err(db_vfs_core::Error::Db(err.to_string()));
-            return Err((permit, status, body));
+            return Err(RunBlockingError::Response {
+                permit,
+                status,
+                body,
+            });
         }
     };
     Ok((result, permit))
+}
+
+pub(super) enum RunBlockingError<T> {
+    TimedOut {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        completion: TimedOutCompletion<T>,
+        status: StatusCode,
+        body: Json<super::ErrorBody>,
+    },
+    Response {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        status: StatusCode,
+        body: Json<super::ErrorBody>,
+    },
+}
+
+pub(super) struct TimedOutCompletion<T> {
+    handle: tokio::task::JoinHandle<(db_vfs::Result<T>, Duration)>,
+}
+
+impl<T> TimedOutCompletion<T> {
+    pub(super) async fn finish(self) -> Result<db_vfs::Result<T>, tokio::task::JoinError> {
+        match self.handle.await {
+            Ok((result, elapsed)) => {
+                record_timed_out_worker_completion(elapsed);
+                Ok(result)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 fn record_timed_out_worker_completion(elapsed: Duration) {
@@ -204,14 +225,7 @@ pub(super) async fn run_vfs<T>(
     permit: tokio::sync::OwnedSemaphorePermit,
     timeout: Option<Duration>,
     op: impl FnOnce(&mut DbVfs<super::backend::BackendStore>) -> db_vfs::Result<T> + Send + 'static,
-) -> Result<
-    (db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit),
-    (
-        tokio::sync::OwnedSemaphorePermit,
-        StatusCode,
-        Json<super::ErrorBody>,
-    ),
->
+) -> Result<(db_vfs::Result<T>, tokio::sync::OwnedSemaphorePermit), RunBlockingError<T>>
 where
     T: Send + 'static,
 {
@@ -327,7 +341,15 @@ mod tests {
             .expect("worker started")
             .expect("start signal");
         let result = run.await.expect("run task join");
-        let (permit, status, body) = result.expect_err("request should time out");
+        let RunBlockingError::TimedOut {
+            permit,
+            completion,
+            status,
+            body,
+        } = result.expect_err("request should time out")
+        else {
+            panic!("request should time out");
+        };
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
         assert_eq!(body.0.code, "timeout");
         assert!(
@@ -343,7 +365,11 @@ mod tests {
         );
         drop(permit.expect("acquire result").expect("acquire permit"));
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(Duration::from_secs(1), completion.finish())
+            .await
+            .expect("timed-out worker should complete in background")
+            .expect("join timed-out worker")
+            .expect("timed-out worker result");
     }
 
     #[tokio::test]
@@ -379,24 +405,26 @@ mod tests {
             .expect("start signal");
 
         let result = run.await.expect("run task join");
-        let (permit, status, body) = result.expect_err("request should time out");
+        let RunBlockingError::TimedOut {
+            permit,
+            completion,
+            status,
+            body,
+        } = result.expect_err("request should time out")
+        else {
+            panic!("request should time out");
+        };
         assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
         assert_eq!(body.0.code, "timeout");
         drop(permit);
 
         assert_eq!(timeout_metrics_for_test().0, 1);
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let metrics = timeout_metrics_for_test();
-                if metrics.1 == 1 {
-                    return metrics;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("background completion should be recorded");
+        tokio::time::timeout(Duration::from_secs(1), completion.finish())
+            .await
+            .expect("background completion should be recorded")
+            .expect("join timed-out worker")
+            .expect("timed-out worker result");
 
         let (timeout_count, completed_count, completed_total_ms, completed_long_count) =
             timeout_metrics_for_test();
