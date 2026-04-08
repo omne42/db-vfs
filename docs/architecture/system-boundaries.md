@@ -71,6 +71,9 @@
     模式语法，避免授权边界出现“字面 workspace 名”和“通配规则”混淆。
   - `allowed_workspaces = ["team-*"]` 这类 trailing `-*` 前缀只匹配带非空后缀的 workspace；
     它不能顺带放行字面 `team-`，避免授权边界比策略作者肉眼看到的更宽。
+  - `allowed_workspaces` 的 exact / trailing-`*` 字面部分也必须满足 `workspace_id`
+    语法；像 `team/ops`、`team:prod`、`team..prod`、`team/ops-*` 这类根本不可能匹配合法
+    namespace 的模式必须在启动时直接拒绝，不能静默留在策略里。
   - token 已通过但 workspace 未授权的请求，service 必须在 buffered JSON 的轻量
     preflight 阶段尽早拒绝，而不是先构造完整 `write` / `patch` 大请求再发现
     workspace scope 不匹配。

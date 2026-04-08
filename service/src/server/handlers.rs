@@ -1393,6 +1393,37 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn audit_redact_scan_fields_keeps_literal_prefix_through_pure_wildcard_segments() {
+        let mut policy = ServicePolicy::default();
+        policy.secrets.deny_globs = vec!["private/**".to_string()];
+        let state = super::super::test_state_with_policy_and_audit(policy, None);
+        let mut event = AuditRequest {
+            workspace_id: "ws".to_string(),
+            requested_path: None,
+            path_prefix: None,
+            glob_pattern: Some("private/*/token.txt".to_string()),
+            grep_regex: None,
+            grep_query_len: None,
+        }
+        .into_event(
+            "req-prefix-probe".to_string(),
+            None,
+            "glob",
+            None,
+            StatusCode::OK,
+            None,
+        );
+
+        super::audit_redact_scan_fields(&state, &mut event);
+
+        assert_eq!(
+            event.glob_pattern.as_deref(),
+            Some(AUDIT_SECRET_PLACEHOLDER)
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn audit_err_hide_secret_path_mirrors_requested_path_when_runtime_path_is_unavailable() {
         let state = test_state_with_audit(None);
         let mut event = AuditRequest {
