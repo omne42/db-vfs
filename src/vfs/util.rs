@@ -6,9 +6,7 @@ use db_vfs_core::glob_utils::{
     analyze_literal_glob_for_matching, build_glob_from_normalized,
     normalize_glob_pattern_for_matching, validate_normalized_root_relative_glob_pattern,
 };
-use db_vfs_core::path::{
-    is_canonical_runtime_relative_path, normalize_runtime_relative_path_for_matching,
-};
+use db_vfs_core::path::normalize_runtime_relative_path_for_matching;
 use db_vfs_core::{Error, Result};
 
 const MAX_GLOB_PATTERN_BYTES: usize = 4096;
@@ -91,15 +89,7 @@ pub(super) fn compile_glob(pattern: &str) -> Result<GlobMatcher> {
     Ok(glob.compile_matcher())
 }
 
-fn is_canonical_runtime_path(path: &str) -> bool {
-    is_canonical_runtime_relative_path(path)
-}
-
 pub(super) fn glob_is_match(glob: &GlobMatcher, path: &str) -> bool {
-    if is_canonical_runtime_path(path) {
-        return glob.is_match(std::path::Path::new(path));
-    }
-
     let Some(normalized) = normalize_runtime_relative_path_for_matching(path) else {
         return false;
     };
@@ -145,11 +135,21 @@ mod tests {
 
     #[test]
     fn canonical_runtime_path_detection_is_strict() {
-        assert!(is_canonical_runtime_path("docs/a.txt"));
-        assert!(!is_canonical_runtime_path("./docs/a.txt"));
-        assert!(!is_canonical_runtime_path("/docs/a.txt"));
-        assert!(!is_canonical_runtime_path("docs//a.txt"));
-        assert!(!is_canonical_runtime_path("docs/a.txt/"));
+        assert!(db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "./docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "/docs/a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs//a.txt"
+        ));
+        assert!(!db_vfs_core::path::is_canonical_runtime_relative_path(
+            "docs/a.txt/"
+        ));
     }
 
     #[test]

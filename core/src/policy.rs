@@ -216,7 +216,7 @@ pub struct VfsPolicy {
 /// This guarantees the structural validation enforced by `VfsPolicy::validate()` (permissions,
 /// core VFS limits, and secret/traversal rules) *and* that policy-derived secret/traversal
 /// matchers can be built. That keeps constructor families such as `DbVfs::new_validated()` and
-/// `DbVfs::new_with_matchers_validated()` aligned on the same invariant.
+/// `DbVfs::new_with_supplied_matchers_validated()` aligned on the same invariant.
 #[derive(Debug, Clone)]
 pub struct ValidatedVfsPolicy(VfsPolicy);
 
