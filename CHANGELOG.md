@@ -186,6 +186,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - docs/dev: clarify that `./scripts/gate.sh` already runs the all-features test pass, and that
   setting `DB_VFS_TEST_POSTGRES_URL` upgrades the same local gate to live Postgres coverage.
+- tests/service: add a targeted runner regression that locks scan backend-operation budgeting to
+  the shorter `max_walk_ms` runtime budget when it is present, so future refactors cannot silently
+  fall back to the looser `max_io_ms` path.
 - ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
 - ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
 - tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
