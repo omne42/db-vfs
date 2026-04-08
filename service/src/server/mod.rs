@@ -127,12 +127,12 @@ async fn log_audit_event_with_permit(
     event: audit::AuditEvent,
     permit: tokio::sync::OwnedSemaphorePermit,
     budget: Option<Duration>,
-) -> Result<(), (StatusCode, Json<ErrorBody>)> {
-    let _permit = permit;
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, Json<ErrorBody>)> {
     audit
         .log_required(event, budget)
         .await
-        .map_err(audit_failure_response)
+        .map_err(audit_failure_response)?;
+    Ok(permit)
 }
 
 const CODE_NOT_PERMITTED: &str = "not_permitted";
@@ -962,10 +962,12 @@ mod tests {
         );
 
         control.release_success();
-        audit_task
-            .await
-            .expect("audit task join")
-            .expect("audit should succeed");
+        drop(
+            audit_task
+                .await
+                .expect("audit task join")
+                .expect("audit should succeed"),
+        );
 
         let permit = tokio::time::timeout(Duration::from_secs(1), semaphore.acquire_owned())
             .await
