@@ -75,7 +75,7 @@ struct GlobBody {
     scanned_entries: u64,
 }
 
-#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[cfg(feature = "sqlite")]
 #[derive(serde::Deserialize)]
 struct ErrorBody {
     code: String,
