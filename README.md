@@ -72,6 +72,12 @@ CI extends that baseline in two directions:
   `cargo test --workspace --all-features --locked` with
   `DB_VFS_TEST_POSTGRES_URL` pointed at a live Postgres service
 
+`./scripts/gate.sh` is the local superset of that baseline: it already runs
+`cargo test --workspace --all-features --locked` alongside the feature-profile checks. When
+`DB_VFS_TEST_POSTGRES_URL` is unset, the Postgres-backed tests in that pass self-skip their live
+backend path; when the env var is set, the same local gate exercises the live Postgres coverage
+that Linux CI enforces before merge.
+
 When you touch Postgres-specific code, feature gating, or the validation matrix itself, mirror that
 coverage locally with:
 

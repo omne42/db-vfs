@@ -24,7 +24,9 @@ Common failures:
 
 - stale lockfile/features -> run targeted `cargo check` locally first
 - stale llms bundle -> run `./scripts/llms.sh`
-- Postgres-only regressions need `DB_VFS_TEST_POSTGRES_URL=postgres://... cargo test --workspace --all-features --locked`
+- `./scripts/gate.sh` already runs `cargo test --workspace --all-features --locked`; set
+  `DB_VFS_TEST_POSTGRES_URL=postgres://...` when you want that same gate to exercise the live
+  Postgres-backed tests instead of letting them self-skip
 
 ### `./scripts/docs.sh`
 
