@@ -6,7 +6,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use sha2::{Digest, Sha256};
+use omne_integrity_primitives::{Sha256Digest, hash_sha256, parse_sha256_digest};
 
 use crate::policy::AuthPolicy;
 pub(super) use db_vfs_core::workspace_pattern::AllowedWorkspacePattern as WorkspacePattern;
@@ -29,7 +29,7 @@ pub(super) enum AuthMode {
 
 #[derive(Clone)]
 pub(super) struct AuthRule {
-    token_sha256: [u8; 32],
+    token_sha256: Sha256Digest,
     allowed_workspaces: Arc<[WorkspacePattern]>,
     audit_subject: Arc<str>,
 }
@@ -78,7 +78,7 @@ fn build_auth_mode_with_env_lookup(
     }
 
     let mut rules = Vec::with_capacity(policy.tokens.len());
-    let mut seen = HashSet::<[u8; 32]>::with_capacity(policy.tokens.len());
+    let mut seen = HashSet::<Sha256Digest>::with_capacity(policy.tokens.len());
     for (idx, rule) in policy.tokens.iter().enumerate() {
         let token_sha256 = if let Some(token) = rule.token.as_deref() {
             parse_token_sha256(token)?
@@ -92,12 +92,12 @@ fn build_auth_mode_with_env_lookup(
             anyhow::bail!("auth token entry {idx} is missing token / token_env_var");
         };
 
-        if !seen.insert(token_sha256) {
+        if !seen.insert(token_sha256.clone()) {
             anyhow::bail!("auth token entry {idx} duplicates a previous token hash");
         }
 
         rules.push(AuthRule {
-            token_sha256,
+            token_sha256: token_sha256.clone(),
             allowed_workspaces: compile_workspace_patterns(&rule.allowed_workspaces)?,
             audit_subject: format_token_audit_subject(&token_sha256),
         });
@@ -127,13 +127,12 @@ pub(super) fn workspace_allowed(patterns: &[WorkspacePattern], workspace_id: &st
     patterns.iter().any(|pattern| pattern.matches(workspace_id))
 }
 
-fn hash_token_sha256(token: &str) -> [u8; 32] {
-    let digest = Sha256::digest(token.as_bytes());
-    digest.into()
+fn hash_token_sha256(token: &str) -> Sha256Digest {
+    hash_sha256(token.as_bytes())
 }
 
-fn format_token_audit_subject(token_sha256: &[u8; 32]) -> Arc<str> {
-    Arc::<str>::from(format!("sha256:{}", hex::encode(token_sha256)))
+fn format_token_audit_subject(token_sha256: &Sha256Digest) -> Arc<str> {
+    Arc::<str>::from(format!("sha256:{token_sha256}"))
 }
 
 fn audit_subject_for_presented_token(token: &str) -> Arc<str> {
@@ -170,27 +169,26 @@ fn validate_plaintext_bearer_token(token: &str, source: &str) -> anyhow::Result<
     Ok(())
 }
 
-fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<[u8; 32]> {
+fn hash_plaintext_token_sha256(token: &str, source: &str) -> anyhow::Result<Sha256Digest> {
     validate_plaintext_bearer_token(token, source)?;
     Ok(hash_token_sha256(token))
 }
 
-fn parse_token_sha256(token: &str) -> anyhow::Result<[u8; 32]> {
+fn parse_token_sha256(token: &str) -> anyhow::Result<Sha256Digest> {
     let Some(hex) = token.strip_prefix("sha256:") else {
         anyhow::bail!("auth token must be sha256:<64 hex chars>");
     };
-    if hex.len() != 64 {
+    if token != token.trim() || hex.len() != 64 {
         anyhow::bail!("invalid sha256 token hash length");
     }
-    let mut hash = [0u8; 32];
-    hex::decode_to_slice(hex, &mut hash).map_err(anyhow::Error::msg)?;
-    Ok(hash)
+    parse_sha256_digest(Some(token))
+        .ok_or_else(|| anyhow::anyhow!("auth token must be sha256:<64 hex chars>"))
 }
 
-fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+fn constant_time_eq_32(a: &Sha256Digest, b: &Sha256Digest) -> bool {
     let mut diff: u8 = 0;
-    for idx in 0..32 {
-        diff |= a[idx] ^ b[idx];
+    for (lhs, rhs) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
+        diff |= *lhs ^ *rhs;
     }
     diff == 0
 }
@@ -444,7 +442,7 @@ mod tests {
         assert!(parse_token_sha256("abcd").is_err());
 
         let ok = parse_token_sha256(&format!("sha256:{}", "a".repeat(64))).unwrap();
-        assert_eq!(ok.len(), 32);
+        assert_eq!(ok.as_bytes().len(), 32);
     }
 
     #[test]
@@ -524,7 +522,7 @@ mod tests {
     fn build_auth_mode_hashes_env_backed_plaintext_token() {
         let var = format!("DB_VFS_TEST_TOKEN_OK_{}", std::process::id());
         let token = "dev-token";
-        let digest = format!("sha256:{}", hex::encode(hash_token_sha256(token)));
+        let digest = format!("sha256:{}", hash_token_sha256(token));
 
         let policy = AuthPolicy {
             tokens: vec![AuthToken {
@@ -744,6 +742,6 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     fn dev_token_sha256_for_test() -> String {
-        format!("sha256:{}", hex::encode(hash_token_sha256("dev-token")))
+        format!("sha256:{}", hash_token_sha256("dev-token"))
     }
 }

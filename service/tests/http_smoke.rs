@@ -17,9 +17,9 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use db_vfs::vfs::{ReadRequest, WriteRequest};
 use db_vfs_core::policy::{Permissions, SecretRules, TraversalRules};
+use omne_integrity_primitives::hash_sha256;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 #[cfg(feature = "sqlite")]
 use tokio::sync::mpsc;
 #[cfg(feature = "sqlite")]
@@ -150,8 +150,7 @@ impl Drop for TestServer {
 }
 
 fn dev_token_sha256() -> String {
-    let digest = Sha256::digest(DEV_TOKEN.as_bytes());
-    format!("sha256:{}", hex::encode(digest))
+    format!("sha256:{}", hash_sha256(DEV_TOKEN.as_bytes()))
 }
 
 fn policy_allow_all() -> ServicePolicy {
