@@ -285,6 +285,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backend_operation_timeout_prefers_shorter_scan_budget_when_present() {
+        let mut policy = VfsPolicy::default();
+        policy.limits.max_io_ms = 700;
+        policy.limits.max_walk_ms = Some(150);
+        assert_eq!(
+            backend_operation_timeout(&policy, scan_timeout(&policy)),
+            Some(Duration::from_millis(150))
+        );
+    }
+
     #[tokio::test]
     async fn timeout_releases_permit_when_request_wait_ends() {
         let _guard = timeout_metrics_test_lock().lock().await;
