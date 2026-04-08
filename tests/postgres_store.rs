@@ -466,6 +466,42 @@ fn postgres_missing_delete_does_not_create_generation_state() {
 }
 
 #[test]
+fn postgres_missing_delete_without_expected_version_does_not_create_generation_state() {
+    let Some(url) = require_postgres_url(
+        "postgres_missing_delete_without_expected_version_does_not_create_generation_state",
+    ) else {
+        return;
+    };
+    ensure_postgres_schema(&url);
+    let mut store = PostgresStore::connect_no_migrate(&url).expect("connect postgres store");
+
+    let unique = format!(
+        "{}_{}_{}",
+        std::process::id(),
+        now_nanos(),
+        TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let ws = format!("test_{unique}");
+    let path = format!("docs/{unique}.txt");
+    let _cleanup = CleanupGuard {
+        url: url.clone(),
+        workspace_id: ws.clone(),
+        path: path.clone(),
+    };
+
+    let outcome = store
+        .delete_file(&ws, &path, None)
+        .unwrap_or_else(|err| panic!("delete_file failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(outcome, DeleteOutcome::NotFound);
+    assert_eq!(generation_row_count(&url, &ws, &path), 0);
+
+    let inserted = store
+        .insert_file_new(&ws, &path, "hello", now_ms())
+        .unwrap_or_else(|err| panic!("insert failed for ws={ws}, path={path}: {err}"));
+    assert_eq!(inserted, 1);
+}
+
+#[test]
 fn postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards() {
     let Some(url) = require_postgres_url(
         "postgres_update_keeps_updated_at_monotonic_when_clock_moves_backwards",
