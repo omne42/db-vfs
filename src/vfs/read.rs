@@ -1027,7 +1027,7 @@ mod tests {
             })
             .expect("ranged read");
         assert_eq!(resp.content, "line-2\n");
-        assert!(vfs.store_mut().chunk_reads > 1);
+        assert!(vfs.store.chunk_reads > 1);
     }
 
     #[test]
@@ -1059,7 +1059,7 @@ mod tests {
             })
             .expect("ranged read");
         assert_eq!(resp.content, "line-2\r\n");
-        assert!(vfs.store_mut().chunk_reads > 1);
+        assert!(vfs.store.chunk_reads > 1);
     }
 
     #[test]

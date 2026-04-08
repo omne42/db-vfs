@@ -93,6 +93,9 @@
   - required audit append+flush 会消费同一条请求的剩余运行期预算；超出剩余预算、worker
     丢失或写失败都会转成稳定 `503 audit_unavailable` 故障，而不是静默丢日志或
     panic/连接级失败。
+  - 如果请求先以 `408 timeout` 返回、但后台 worker 之后才真正结束，audit 仍必须补记
+    第二条带 `late_completion=true` 的 JSONL 事件，写出真实 settled result；不能把审计
+    永远停留在“只有 timeout、没有最终结果”的黑洞状态。
   - `audit.required = false` 仍然允许 fail-open，但 optional audit sink 一次写失败后不能把
     后续整个进程永久打成“有请求、无审计”的状态；至少要 rotate 掉可能损坏的 JSONL 并恢复
     worker，让后续事件重新可写。
@@ -105,6 +108,8 @@
     构造器都能在创建时直接暴露 policy/matcher 不一致，而不是把状态推迟到运行期或做静默
     “自动修复”；保留下来的 `*_with_matchers_validated` 旧名字只能是 deprecated
     compatibility alias，不能重新引入 silent fallback 语义。
+  - `DbVfs` 不应把底层 store 逃生口伪装成正常安全 API；任何直接越过 policy/path
+    不变量去改原始 store 的入口，都必须在命名上显式表现为 unchecked bypass。
   - 审计 redaction 对 malformed secret-ish path 必须保守遮蔽；即使请求最终会因为
     traversal/control-char 等原因被拒绝，也不能把原始 secret 片段直接写进 JSONL。
     glob/pattern 审计字段也必须按真实 deny-glob 语义保守遮蔽，不能靠一套会漂移的本地猜测规则。

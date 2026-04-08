@@ -1473,7 +1473,7 @@ mod tests {
 
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
-        assert_eq!(vfs.store_mut().content_calls, 0);
+        assert_eq!(vfs.store.content_calls, 0);
     }
 
     #[test]
@@ -1507,7 +1507,7 @@ mod tests {
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
         assert_eq!(resp.skipped_too_large_files, 0);
-        assert_eq!(vfs.store_mut().content_calls, 0);
+        assert_eq!(vfs.store.content_calls, 0);
     }
 
     #[test]
@@ -1571,7 +1571,7 @@ mod tests {
 
         assert!(resp.matches.is_empty());
         assert_eq!(resp.scanned_files, 1);
-        assert_eq!(vfs.store_mut().content_calls, 0);
+        assert_eq!(vfs.store.content_calls, 0);
     }
 
     #[test]
