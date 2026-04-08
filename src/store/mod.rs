@@ -78,19 +78,23 @@ impl FileMeta {
     }
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 pub(crate) fn normalize_store_workspace_id(workspace_id: &str) -> Result<String> {
     validate_workspace_id(workspace_id)?;
     Ok(workspace_id.to_string())
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 pub(crate) fn normalize_store_path(path: &str) -> Result<String> {
     normalize_path(path)
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 pub(crate) fn normalize_store_path_prefix(prefix: &str) -> Result<String> {
     db_vfs_core::path::normalize_path_prefix(prefix)
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 pub(crate) fn normalize_store_after_cursor(after: &str) -> Result<String> {
     normalize_path(after)
 }
@@ -716,14 +720,17 @@ fn append_range_segment(content: &mut String, bytes_read: &mut u64, max_bytes: u
     }
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn db_err(err: impl std::fmt::Display) -> Error {
     Error::Db(err.to_string())
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 fn make_prefix_bounds(prefix: &str) -> (String, Option<String>) {
     (prefix.to_string(), prefix_successor(prefix))
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 fn prefix_successor(prefix: &str) -> Option<String> {
     if prefix.is_empty() {
         return None;
@@ -741,6 +748,7 @@ fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 fn next_scalar_char(ch: char) -> Option<char> {
     let mut code = (ch as u32).saturating_add(1);
     while code <= char::MAX as u32 {
@@ -752,6 +760,7 @@ fn next_scalar_char(ch: char) -> Option<char> {
     None
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 fn next_version(expected_version: u64) -> Result<u64> {
     if expected_version >= MAX_STORE_VERSION {
         return Err(Error::Conflict("version overflow".to_string()));
@@ -759,6 +768,7 @@ fn next_version(expected_version: u64) -> Result<u64> {
     Ok(expected_version + 1)
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 fn monotonic_updated_at_ms(now_ms: u64, created_at_ms: u64, previous_updated_at_ms: u64) -> u64 {
     now_ms.max(created_at_ms).max(previous_updated_at_ms)
 }

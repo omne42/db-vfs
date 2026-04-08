@@ -93,7 +93,8 @@ fn validate_existing_sqlite_invariants(conn: &rusqlite::Connection) -> rusqlite:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "sqlite")]
+    use super::{migrate_sqlite, sqlite_has_column};
 
     #[cfg(feature = "postgres")]
     #[test]

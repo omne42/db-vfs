@@ -1119,6 +1119,7 @@ mod tests {
     use db_vfs_core::redaction::{AUDIT_SECRET_PLACEHOLDER, SecretRedactor};
     #[cfg(feature = "sqlite")]
     use db_vfs_core::traversal::TraversalSkipper;
+    #[cfg(feature = "sqlite")]
     use serde::Deserialize;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1170,16 +1171,19 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     #[derive(Debug, Deserialize)]
     struct SlowRequestHelper {
         workspace_id: String,
     }
 
+    #[cfg(feature = "sqlite")]
     #[derive(Debug)]
     struct SlowRequest {
         workspace_id: String,
     }
 
+    #[cfg(feature = "sqlite")]
     impl<'de> Deserialize<'de> for SlowRequest {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
@@ -1193,12 +1197,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     impl super::HasWorkspaceId for SlowRequest {
         fn workspace_id(&self) -> &str {
             &self.workspace_id
         }
     }
 
+    #[cfg(feature = "sqlite")]
     fn audit_ok_unit(_state: &super::super::AppState, _event: &mut super::AuditEvent, _resp: &()) {}
 
     #[cfg(feature = "sqlite")]

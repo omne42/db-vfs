@@ -183,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ci/scripts/hooks: pin actions, align multi-platform gates, add workflow timeouts, and strengthen local commit policy checks.
 - ci/scripts/hooks: add strict pre-commit clippy profile to block `unwrap/expect`, ignored must-use results, redundant clones, and common low-level iteration/IO pitfalls in non-test code.
 - tooling/docs: enforce llms bundle freshness and mdBook workflow consistency in local/CI gates.
+- quality-gates: gate backend-specific helpers and SQLite-only test scaffolding by feature so `--no-default-features` and Postgres-only gate runs stay warning-free instead of burying real regressions under dead-code noise.
 - tests/service: add SQLite lock-contention regressions at both backend and router levels so `max_walk_ms = None` scans stay mechanically covered under bounded `max_io_ms` DB wait semantics.
 - tests: add regression coverage for request-id sanitization, auth-before-json parsing, no-IP rate-limit semantics, store invariants, and migration constraints.
 - tests/service-policy: add an explicit FIFO regression test so policy loading keeps rejecting special files before `open`, instead of only covering generic non-regular paths.

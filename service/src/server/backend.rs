@@ -515,17 +515,21 @@ mod postgres_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(feature = "sqlite")]
     fn backend_whole_content_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    #[cfg(feature = "sqlite")]
     struct BackendWholeContentGuard {
         previous: Option<std::ffi::OsString>,
     }
 
+    #[cfg(feature = "sqlite")]
     impl BackendWholeContentGuard {
         fn install(limit: usize) -> Self {
             let previous = std::env::var_os("DB_VFS_TEST_BACKEND_WHOLE_CONTENT_MAX_BYTES");
@@ -540,6 +544,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "sqlite")]
     impl Drop for BackendWholeContentGuard {
         fn drop(&mut self) {
             match self.previous.take() {
