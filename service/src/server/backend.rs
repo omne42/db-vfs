@@ -36,23 +36,18 @@ struct PostgresCancelDispatch {
 #[cfg(feature = "postgres")]
 static POSTGRES_CANCEL_DISPATCH: OnceLock<PostgresCancelDispatch> = OnceLock::new();
 #[cfg(feature = "postgres")]
-static POSTGRES_CANCEL_QUEUE_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+static POSTGRES_CANCEL_QUEUE_OVERFLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "postgres")]
-const POSTGRES_CANCEL_FALLBACK_MAX_INFLIGHT: usize = 64;
+static POSTGRES_CANCEL_OVERFLOW_PENDING: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "postgres")]
-static POSTGRES_CANCEL_FALLBACK_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+const POSTGRES_CANCEL_OVERFLOW_WARN_PENDING: usize = 256;
 #[cfg(feature = "postgres")]
-static POSTGRES_CANCEL_FALLBACK_SKIPPED: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "postgres")]
-struct PostgresCancelFallbackInflightGuard;
-
-#[cfg(feature = "postgres")]
-impl Drop for PostgresCancelFallbackInflightGuard {
-    fn drop(&mut self) {
-        POSTGRES_CANCEL_FALLBACK_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
-    }
+struct PostgresCancelOverflowDispatch {
+    tx: Option<std::sync::mpsc::Sender<r2d2_postgres::postgres::CancelToken>>,
 }
+#[cfg(feature = "postgres")]
+static POSTGRES_CANCEL_OVERFLOW_DISPATCH: OnceLock<PostgresCancelOverflowDispatch> =
+    OnceLock::new();
 
 #[cfg(feature = "postgres")]
 fn postgres_cancel_tx()
@@ -86,6 +81,64 @@ fn postgres_cancel_tx()
         .as_ref()
 }
 
+#[cfg(feature = "postgres")]
+fn postgres_cancel_overflow_tx()
+-> Option<&'static std::sync::mpsc::Sender<r2d2_postgres::postgres::CancelToken>> {
+    POSTGRES_CANCEL_OVERFLOW_DISPATCH
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<r2d2_postgres::postgres::CancelToken>();
+            let spawn = std::thread::Builder::new()
+                .name("db-vfs-pg-cancel-overflow-worker".to_string())
+                .spawn(move || {
+                    while let Ok(token) = rx.recv() {
+                        if let Err(err) = token.cancel_query(r2d2_postgres::postgres::NoTls) {
+                            tracing::warn!(
+                                err = %err,
+                                "failed to cancel postgres query from overflow worker"
+                            );
+                        }
+                        POSTGRES_CANCEL_OVERFLOW_PENDING.fetch_sub(1, Ordering::AcqRel);
+                    }
+                });
+            match spawn {
+                Ok(_) => PostgresCancelOverflowDispatch { tx: Some(tx) },
+                Err(err) => {
+                    tracing::warn!(
+                        err = %err,
+                        "failed to spawn postgres cancel overflow worker; direct cancel fallback will be used"
+                    );
+                    PostgresCancelOverflowDispatch { tx: None }
+                }
+            }
+        })
+        .tx
+        .as_ref()
+}
+
+#[cfg(feature = "postgres")]
+enum CancelDispatchOutcome<T> {
+    Dispatched,
+    DirectFallback(T),
+}
+
+#[cfg(feature = "postgres")]
+fn dispatch_cancel_item<T>(
+    item: T,
+    primary_send: impl FnOnce(T) -> Result<(), std::sync::mpsc::TrySendError<T>>,
+    overflow_send: impl FnOnce(T) -> Result<(), std::sync::mpsc::SendError<T>>,
+) -> CancelDispatchOutcome<T> {
+    let item = match primary_send(item) {
+        Ok(()) => return CancelDispatchOutcome::Dispatched,
+        Err(std::sync::mpsc::TrySendError::Full(item))
+        | Err(std::sync::mpsc::TrySendError::Disconnected(item)) => item,
+    };
+
+    match overflow_send(item) {
+        Ok(()) => CancelDispatchOutcome::Dispatched,
+        Err(std::sync::mpsc::SendError(item)) => CancelDispatchOutcome::DirectFallback(item),
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum Backend {
     #[cfg(feature = "sqlite")]
@@ -115,43 +168,51 @@ impl CancelHandle {
             CancelHandle::Sqlite(handle) => handle.interrupt(),
             #[cfg(feature = "postgres")]
             CancelHandle::Postgres(token) => {
-                let token = if let Some(cancel_tx) = postgres_cancel_tx() {
-                    match cancel_tx.try_send(token.clone()) {
-                        Ok(()) => return,
-                        Err(std::sync::mpsc::TrySendError::Full(token))
-                        | Err(std::sync::mpsc::TrySendError::Disconnected(token)) => token,
-                    }
-                } else {
-                    token.clone()
-                };
-                let fallback_count =
-                    POSTGRES_CANCEL_QUEUE_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                if fallback_count == 1 || fallback_count.is_multiple_of(100) {
-                    tracing::warn!(
-                        fallback_count,
-                        "postgres cancel queue saturated/disconnected; falling back to ad-hoc cancel task"
-                    );
-                }
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    let in_flight =
-                        POSTGRES_CANCEL_FALLBACK_INFLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
-                    if in_flight > POSTGRES_CANCEL_FALLBACK_MAX_INFLIGHT {
-                        POSTGRES_CANCEL_FALLBACK_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
-                        let skipped =
-                            POSTGRES_CANCEL_FALLBACK_SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
-                        if skipped == 1 || skipped.is_multiple_of(100) {
+                let token = match dispatch_cancel_item(
+                    token.clone(),
+                    |token| {
+                        if let Some(cancel_tx) = postgres_cancel_tx() {
+                            cancel_tx.try_send(token)
+                        } else {
+                            Err(std::sync::mpsc::TrySendError::Disconnected(token))
+                        }
+                    },
+                    |token| {
+                        let pending =
+                            POSTGRES_CANCEL_OVERFLOW_PENDING.fetch_add(1, Ordering::AcqRel) + 1;
+                        let overflow_count = POSTGRES_CANCEL_QUEUE_OVERFLOW_COUNT
+                            .fetch_add(1, Ordering::Relaxed)
+                            + 1;
+                        if overflow_count == 1 || overflow_count.is_multiple_of(100) {
                             tracing::warn!(
-                                skipped,
-                                in_flight,
-                                max_in_flight = POSTGRES_CANCEL_FALLBACK_MAX_INFLIGHT,
-                                "postgres cancel fallback saturated; skipping ad-hoc cancel task"
+                                overflow_count,
+                                pending,
+                                "postgres cancel queue saturated/disconnected; routing cancel through overflow worker"
                             );
                         }
-                        return;
-                    }
-                    let inflight_guard = PostgresCancelFallbackInflightGuard;
+                        if pending >= POSTGRES_CANCEL_OVERFLOW_WARN_PENDING
+                            && (pending == POSTGRES_CANCEL_OVERFLOW_WARN_PENDING
+                                || pending.is_multiple_of(100))
+                        {
+                            tracing::warn!(
+                                pending,
+                                warn_pending = POSTGRES_CANCEL_OVERFLOW_WARN_PENDING,
+                                "postgres cancel overflow worker is backlogged"
+                            );
+                        }
+                        if let Some(overflow_tx) = postgres_cancel_overflow_tx() {
+                            overflow_tx.send(token)
+                        } else {
+                            POSTGRES_CANCEL_OVERFLOW_PENDING.fetch_sub(1, Ordering::AcqRel);
+                            Err(std::sync::mpsc::SendError(token))
+                        }
+                    },
+                ) {
+                    CancelDispatchOutcome::Dispatched => return,
+                    CancelDispatchOutcome::DirectFallback(token) => token,
+                };
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn_blocking(move || {
-                        let _inflight_guard = inflight_guard;
                         if let Err(err) = token.cancel_query(r2d2_postgres::postgres::NoTls) {
                             tracing::warn!(err = %err, "failed to cancel postgres query");
                         }
@@ -430,11 +491,17 @@ impl Store for BackendStore {
 #[cfg(test)]
 mod postgres_tests {
     #[cfg(feature = "postgres")]
+    use super::CancelDispatchOutcome;
+    #[cfg(feature = "postgres")]
     use super::configure_postgres_session_timeouts;
+    #[cfg(feature = "postgres")]
+    use super::dispatch_cancel_item;
     #[cfg(feature = "postgres")]
     use super::postgres_timeout_ms;
     #[cfg(feature = "postgres")]
     use r2d2_postgres::postgres::NoTls;
+    #[cfg(feature = "postgres")]
+    use std::sync::mpsc;
     #[cfg(feature = "postgres")]
     use std::time::Duration;
 
@@ -509,6 +576,49 @@ mod postgres_tests {
             .expect("clear postgres session timeouts for unbounded scans");
         assert_eq!(current_statement_timeout_ms(&mut client), 0);
         assert_eq!(current_lock_timeout_ms(&mut client), 0);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn dispatch_cancel_item_routes_full_primary_queue_to_overflow_queue() {
+        let (primary_tx, primary_rx) = mpsc::sync_channel::<u32>(1);
+        primary_tx.send(1).expect("fill primary queue");
+        let (overflow_tx, overflow_rx) = mpsc::channel::<u32>();
+
+        let outcome = dispatch_cancel_item(
+            2,
+            |token| primary_tx.try_send(token),
+            |token| overflow_tx.send(token),
+        );
+
+        assert!(matches!(outcome, CancelDispatchOutcome::Dispatched));
+        assert_eq!(primary_rx.recv().expect("primary token"), 1);
+        assert_eq!(overflow_rx.recv().expect("overflow token"), 2);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn dispatch_cancel_item_only_uses_direct_fallback_when_both_paths_are_unavailable() {
+        let (primary_tx, primary_rx) = mpsc::sync_channel::<u32>(1);
+        primary_tx.send(1).expect("fill primary queue");
+        drop(primary_rx);
+        let (overflow_tx, overflow_rx) = mpsc::channel::<u32>();
+        drop(overflow_rx);
+
+        let outcome = dispatch_cancel_item(
+            2,
+            |token| primary_tx.try_send(token),
+            |token| overflow_tx.send(token),
+        );
+
+        match outcome {
+            CancelDispatchOutcome::DirectFallback(token) => assert_eq!(token, 2),
+            CancelDispatchOutcome::Dispatched => {
+                panic!(
+                    "direct fallback should be reserved for unavailable primary and overflow paths"
+                )
+            }
+        }
     }
 }
 
