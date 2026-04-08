@@ -172,6 +172,7 @@ Tune policy `limits` for your workload:
 Budget semantics:
 
 - `max_io_ms` bounds non-scan requests (`read`/`write`/`patch`/`delete`), request-body buffering / JSON decode, and healthy DB pool wait/connect time.
+- `max_io_ms` must stay within backend session-timeout range (`1..=2147483647` ms), so policy validation fails before SQLite/Postgres setup can reject it later.
 - The router body cap still keeps its hard limit, but it now reserves worst-case JSON string escape expansion for `write` / `patch` payloads so escape-heavy yet logically valid bodies are not rejected before decoded-size enforcement runs.
 - `read` / `delete` / `glob` / `grep` stay on a fixed 64 KiB JSON frontdoor cap instead of inheriting the larger `write` / `patch` transport budget.
 - Once the JSON body is buffered, the service preflights `workspace_id` before full request-schema decode and VFS execution, so token-authorized but disallowed workspaces fail early without paying the full operation parse/execute cost.

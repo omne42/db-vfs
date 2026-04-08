@@ -12,6 +12,7 @@
   - service-only 的 auth、audit、DB pool / rate-limit 运行期配置归到 `db_vfs_service::policy::ServicePolicy`。
 - 路径合法性、traversal、secrets redaction、scan budgets
   - `max_io_ms` 约束非 scan 请求、DB pool wait/connect，以及 service 启动 migration 的 connect/lock 预算。
+  - `max_io_ms` 还是一个后端兼容边界：policy 校验必须把它限制在 SQLite / Postgres 可接受的 session timeout 范围内，不能让“配置通过、启动或请求期才炸 backend-specific timeout 参数错误”漏到运行期。
   - `max_walk_ms` 负责 `glob` / `grep` 的 scan runtime 预算；配置缺字段时默认是 `Some(2000)`。
   - scan 侧 DB pool wait/connect 仍受 `max_io_ms` 约束；SQLite `busy_timeout` / Postgres `statement_timeout` / `lock_timeout` 跟随当前请求预算。启动 migration 也必须复用有界预算，不能无限挂死在锁竞争上。
   - `max_walk_ms = None` 只表示 scan runtime 不设上限；不会把 DB pool wait/connect 也放成无界。
