@@ -71,6 +71,7 @@ fn audit_event_base(
         op,
         workspace_id,
         auth_subject: auth_subject.map(ToOwned::to_owned),
+        late_completion: None,
         requested_path: None,
         path: None,
         path_prefix: None,
@@ -645,6 +646,7 @@ struct VfsLimits {
     runtime_budget: Option<Duration>,
 }
 
+#[derive(Clone, Copy)]
 struct AuditHooks<Resp> {
     ok: fn(&super::AppState, &mut AuditEvent, &Resp),
     err: fn(&super::AppState, &mut AuditEvent, &super::ErrorBody),
@@ -659,6 +661,15 @@ struct AuditEventContext<'a> {
 }
 
 impl AuditEventContext<'_> {
+    fn into_owned(self) -> OwnedAuditEventContext {
+        OwnedAuditEventContext {
+            request_id: self.request_id.to_string(),
+            peer: self.peer,
+            op: self.op,
+            auth_subject: self.auth_subject.map(ToOwned::to_owned),
+        }
+    }
+
     fn build_event(
         self,
         audit_req: AuditRequest,
@@ -670,6 +681,32 @@ impl AuditEventContext<'_> {
             self.peer,
             self.op,
             self.auth_subject,
+            status,
+            error_code,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct OwnedAuditEventContext {
+    request_id: String,
+    peer: Option<SocketAddr>,
+    op: &'static str,
+    auth_subject: Option<String>,
+}
+
+impl OwnedAuditEventContext {
+    fn build_event(
+        &self,
+        audit_req: AuditRequest,
+        status: StatusCode,
+        error_code: Option<String>,
+    ) -> AuditEvent {
+        audit_req.into_event(
+            self.request_id.clone(),
+            self.peer,
+            self.op,
+            self.auth_subject.as_deref(),
             status,
             error_code,
         )
@@ -722,6 +759,62 @@ fn require_retained_permit(
             "{context}: missing retained permit after audit logging"
         )))
     })
+}
+
+fn spawn_timed_out_vfs_completion_observer<Resp>(
+    state: super::AppState,
+    event_ctx: OwnedAuditEventContext,
+    audit_req: AuditRequest,
+    completion: super::runner::TimedOutCompletion<Resp>,
+    hooks: AuditHooks<Resp>,
+) where
+    Resp: Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = match completion.finish().await {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::warn!(
+                    err = %err,
+                    request_id = %event_ctx.request_id,
+                    op = event_ctx.op,
+                    "timed-out db-vfs worker failed before late-completion audit could be recorded"
+                );
+                return;
+            }
+        };
+
+        let Some(audit) = state.inner.audit.as_ref() else {
+            return;
+        };
+
+        let late_budget = super::runner::io_timeout(&state.inner.policy);
+        let mut event = match result {
+            Ok(resp) => {
+                let mut event = event_ctx.build_event(audit_req, StatusCode::OK, None);
+                (hooks.ok)(&state, &mut event, &resp);
+                event
+            }
+            Err(err) => {
+                let (status, Json(body)) = super::map_err(err);
+                let mut event =
+                    event_ctx.build_event(audit_req, status, Some(body.code.to_string()));
+                (hooks.err)(&state, &mut event, &body);
+                event
+            }
+        };
+        event.late_completion = Some(true);
+
+        if let Err(err) = audit.log_background(event, late_budget).await {
+            tracing::error!(
+                err = %err,
+                request_id = %event_ctx.request_id,
+                op = event_ctx.op,
+                late_budget_ms = late_budget.as_millis() as u64,
+                "late-completion audit logging failed after request timeout"
+            );
+        }
+    });
 }
 
 fn request_ctx(
@@ -794,16 +887,19 @@ where
         parse_budget,
         runtime_budget,
     } = limits;
-    let AuditHooks {
-        ok: audit_ok,
-        err: audit_err,
-    } = hooks;
+    let late_hooks = AuditHooks {
+        ok: hooks.ok,
+        err: hooks.err,
+    };
+    let audit_ok = hooks.ok;
+    let audit_err = hooks.err;
     let audit_event_ctx = AuditEventContext {
         request_id: &request_id,
         peer,
         op,
         auth_subject: auth.audit_subject.as_deref(),
     };
+    let owned_audit_event_ctx = audit_event_ctx.into_owned();
 
     let (permit, mut remaining, body) =
         match try_acquire_permit_then_buffer_json(semaphore, parse_budget, request, &state).await {
@@ -1004,7 +1100,7 @@ where
                     event_ctx: audit_event_ctx,
                     audit_err,
                 },
-                audit_req,
+                audit_req.clone(),
                 status,
                 &body,
                 Some(permit),
@@ -1068,7 +1164,45 @@ where
             }
             Err((status, Json(body)))
         }
-        (Err((permit, status, Json(body))), audit_req) => {
+        (
+            Err(super::runner::RunBlockingError::TimedOut {
+                permit,
+                completion,
+                status,
+                body: Json(body),
+            }),
+            audit_req,
+        ) => {
+            let _permit = log_request_rejection_audit(
+                RejectionAuditContext {
+                    state: &state,
+                    event_ctx: audit_event_ctx,
+                    audit_err,
+                },
+                audit_req.clone(),
+                status,
+                &body,
+                Some(permit),
+                audit_budget_after_execution(&state, runtime_budget, started),
+            )
+            .await?;
+            spawn_timed_out_vfs_completion_observer(
+                state.clone(),
+                owned_audit_event_ctx,
+                audit_req,
+                completion,
+                late_hooks,
+            );
+            Err((status, Json(body)))
+        }
+        (
+            Err(super::runner::RunBlockingError::Response {
+                permit,
+                status,
+                body,
+            }),
+            audit_req,
+        ) => {
             let _permit = log_request_rejection_audit(
                 RejectionAuditContext {
                     state: &state,
@@ -1077,12 +1211,12 @@ where
                 },
                 audit_req,
                 status,
-                &body,
+                &body.0,
                 Some(permit),
                 audit_budget_after_execution(&state, runtime_budget, started),
             )
             .await?;
-            Err((status, Json(body)))
+            Err((status, body))
         }
     }
 }
@@ -1263,7 +1397,7 @@ mod tests {
     use axum::http::Request;
     use axum::http::StatusCode;
     #[cfg(feature = "sqlite")]
-    use db_vfs::vfs::{DbVfs, WriteRequest};
+    use db_vfs::vfs::{DbVfs, WriteRequest, WriteResponse};
     #[cfg(feature = "sqlite")]
     use db_vfs_core::policy::ValidatedVfsPolicy;
     #[cfg(feature = "sqlite")]
@@ -1274,6 +1408,35 @@ mod tests {
     use serde::Deserialize;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(feature = "sqlite")]
+    async fn wait_for_audit_lines_for_test(
+        path: &std::path::Path,
+        min_lines: usize,
+    ) -> Vec<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let lines = raw
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| {
+                        serde_json::from_str::<serde_json::Value>(line).expect("audit json")
+                    })
+                    .collect::<Vec<_>>();
+                if lines.len() >= min_lines {
+                    return lines;
+                }
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for audit lines in {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
 
     #[cfg(feature = "sqlite")]
     fn test_state_with_audit(
@@ -1913,6 +2076,85 @@ mod tests {
         .expect("timed-out decode should release the semaphore slot")
         .expect("acquire IO permit after decode timeout");
         drop(permit);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn handle_vfs_request_audits_late_completion_after_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let audit_path = dir.path().join("audit.jsonl");
+        let audit =
+            super::super::audit::AuditLogger::new(&audit_path, false, 1, Duration::from_millis(1))
+                .expect("audit logger");
+        let policy = ServicePolicy {
+            limits: ServiceLimits {
+                max_io_ms: 10,
+                ..ServiceLimits::default()
+            },
+            audit: AuditPolicy {
+                required: false,
+                ..AuditPolicy::default()
+            },
+            ..ServicePolicy::default()
+        };
+        let state = super::super::test_state_with_policy_and_audit(policy, Some(audit));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/write")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws","path":"docs/a.txt","content":"hello\n","expected_version":null}"#,
+            ))
+            .expect("request");
+
+        let err = handle_vfs_request(
+            request_ctx(
+                None,
+                state,
+                "req-timeout-late-audit".to_string(),
+                allow_all_auth_ctx(),
+                "write",
+            ),
+            request,
+            VfsLimits {
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                parse_budget: None,
+                runtime_budget: Some(Duration::from_millis(10)),
+            },
+            |req: &WriteRequest| super::build_path_audit_req(req.workspace_id.as_str(), &req.path),
+            |_vfs, _req| {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(WriteResponse {
+                    requested_path: "docs/a.txt".to_string(),
+                    path: "docs/a.txt".to_string(),
+                    bytes_written: 6,
+                    created: true,
+                    version: 7,
+                })
+            },
+            AuditHooks {
+                ok: super::audit_ok_write,
+                err: super::audit_err_hide_secret_path,
+            },
+        )
+        .await
+        .expect_err("request should time out before the worker finishes");
+
+        assert_eq!(err.0, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(err.1.0.code, "timeout");
+
+        let lines = wait_for_audit_lines_for_test(&audit_path, 2).await;
+        assert_eq!(lines[0]["request_id"], "req-timeout-late-audit");
+        assert_eq!(lines[0]["status"], 408);
+        assert_eq!(lines[0]["error_code"], "timeout");
+        assert!(lines[0].get("late_completion").is_none());
+
+        assert_eq!(lines[1]["request_id"], "req-timeout-late-audit");
+        assert_eq!(lines[1]["status"], 200);
+        assert_eq!(lines[1]["late_completion"], true);
+        assert_eq!(lines[1]["path"], "docs/a.txt");
+        assert_eq!(lines[1]["bytes_written"], 6);
+        assert_eq!(lines[1]["version"], 7);
     }
 
     #[cfg(feature = "sqlite")]

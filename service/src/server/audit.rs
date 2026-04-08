@@ -102,6 +102,7 @@ pub(super) fn minimal_event(
         op,
         workspace_id: UNKNOWN_WORKSPACE_ID.to_string(),
         auth_subject: None,
+        late_completion: None,
         requested_path: None,
         path: None,
         path_prefix: None,
@@ -138,6 +139,8 @@ pub(super) struct AuditEvent {
     pub workspace_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub late_completion: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_path: Option<String>,
@@ -324,6 +327,18 @@ impl AuditLogger {
 
     pub(super) fn is_required(&self) -> bool {
         self.required
+    }
+
+    pub(super) async fn log_background(
+        &self,
+        event: AuditEvent,
+        budget: Duration,
+    ) -> Result<(), AuditFailure> {
+        if self.required {
+            self.log_required(event, Some(budget)).await
+        } else {
+            self.try_log(event)
+        }
     }
 
     #[cfg(test)]

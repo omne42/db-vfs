@@ -128,6 +128,11 @@ async fn log_audit_event_with_permit(
     permit: tokio::sync::OwnedSemaphorePermit,
     budget: Option<Duration>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, Json<ErrorBody>)> {
+    if !audit.is_required() {
+        audit.try_log(event).map_err(audit_failure_response)?;
+        return Ok(permit);
+    }
+
     audit
         .log_required(event, budget)
         .await
