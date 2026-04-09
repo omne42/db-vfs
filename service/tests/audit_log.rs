@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -123,27 +122,6 @@ async fn setup(mut policy: ServicePolicy) -> TestServer {
     }
 }
 
-async fn wait_for_audit_lines(path: &Path, min_lines: usize) -> Vec<serde_json::Value> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(lines) = try_read_audit_lines(path)
-            && lines.len() >= min_lines
-        {
-            return lines;
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for audit log lines (path={}, min_lines={})",
-                path.display(),
-                min_lines
-            );
-        }
-
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
 fn try_read_audit_lines(path: &Path) -> Option<Vec<serde_json::Value>> {
     let raw = std::fs::read_to_string(path).ok()?;
     let mut lines = Vec::new();
@@ -207,7 +185,7 @@ async fn audit_logs_unauthorized_requests() {
     let resp = server.send(raw_request("{")).await;
     assert_eq!(resp.status(), 401);
 
-    let lines = wait_for_audit_lines(&server.audit_path, 1).await;
+    let lines = read_audit_lines_immediately(&server.audit_path);
     let event = find_event(&lines, "write", 401, "unauthorized");
     assert_eq!(event["workspace_id"], "<unknown>");
     assert!(
@@ -224,7 +202,7 @@ async fn audit_logs_invalid_json_requests() {
     let resp = server.send(authorized_raw_request("{")).await;
     assert_eq!(resp.status(), 400);
 
-    let lines = wait_for_audit_lines(&server.audit_path, 1).await;
+    let lines = read_audit_lines_immediately(&server.audit_path);
     let event = find_event(&lines, "write", 400, "invalid_json_syntax");
     assert_eq!(event["workspace_id"], "<unknown>");
     assert!(
@@ -272,7 +250,7 @@ async fn audit_logs_rate_limited_requests() {
     }
     assert!(saw_rate_limit, "expected at least one rate-limited write");
 
-    let lines = wait_for_audit_lines(&server.audit_path, 2).await;
+    let lines = read_audit_lines_immediately(&server.audit_path);
     let event = find_event(&lines, "write", 429, "rate_limited");
     assert_eq!(event["workspace_id"], "<unknown>");
 }
